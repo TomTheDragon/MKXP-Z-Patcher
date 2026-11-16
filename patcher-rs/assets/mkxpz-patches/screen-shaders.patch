@@ -1,0 +1,1836 @@
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -157,6 +157,7 @@
+         {"frameInterpolation", false},
+         {"musicVolume", 100},
+         {"soundVolume", 100},
++        {"shader", ""},
+         {"solidFonts", json::array({})},
+         {"renderer", 0},
+         {"subImageFix", false},
+@@ -301,6 +302,7 @@
+     SET_OPT(soundVolume, integer);
+     musicVolume = clamp(musicVolume, 0, 100);
+     soundVolume = clamp(soundVolume, 0, 100);
++    SET_STRINGOPT(shader, shader);
+     fillStringVec(opts["solidFonts"], solidFonts);
+     for (std::string & solidFont : solidFonts)
+         std::transform(solidFont.begin(), solidFont.end(), solidFont.begin(),
+@@ -378,6 +380,7 @@
+     obj["frameInterpolation"] = json::value(frameInterpolation);
+     obj["musicVolume"] = json::value((int) musicVolume);
+     obj["soundVolume"] = json::value((int) soundVolume);
++    obj["shader"] = json::value(shader);
+     
+     std::string text = conf.stringify(json::rule::space_indent<4>()) + "\n";
+     FILE *f = fopen(userConfPath.c_str(), "wb");
+--- a/src/config.h
++++ b/src/config.h
+@@ -71,6 +71,10 @@
+     int musicVolume;
+     int soundVolume;
+     
++    /* Screen shader (libretro .glslp / .glsl), relative to the game
++     * folder; empty: none */
++    std::string shader;
++    
+     std::vector<std::string> solidFonts;
+     
+     bool subImageFix;
+--- a/src/display/graphics.cpp
++++ b/src/display/graphics.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "graphics.h"
+ #include "frameinterp.h"
++#include "retroshader.h"
+ 
+ #include "alstream.h"
+ #include "audio.h"
+@@ -1039,6 +1040,21 @@
+         if (!interpFrame)
+             fpsLimiter.delay();
+ 
++        /* Screen shader: the game's picture (not an integer-scaled copy)
++         * goes through its passes into the window */
++        if (RetroShader::active() && !(source == integerScaleBuffer)) {
++            const Vec2i input(std::min(scRes.x, source.width), std::min(scRes.y, source.height));
++            for (size_t repaintCount = 1; repaintCount-- > 0;) {
++                mkxp_angle_direct3d_resize_callback = [&]() {
++                    repaintCount = 2;
++                };
++                FBO::bind(FBO::ID(0));
++                FBO::clear();
++                RetroShader::render(source, input, IntRect(scOffset.x, scOffset.y, scSize.x, scSize.y), winSize);
++                SDL_GL_SwapWindow(threadData->window);
++                mkxp_angle_direct3d_resize_callback = nullptr;
++            }
++        } else {
+         GLMeta::blitBeginScreen(screenSize, scaleIsSpecial);
+         GLMeta::blitSource(source, scaleIsSpecial);
+ 
+@@ -1054,6 +1070,7 @@
+         }
+ 
+         GLMeta::blitEnd();
++        }
+ 
+         countPresentedFrame();
+ 
+@@ -1112,6 +1129,14 @@
+     void redrawScreen() {
+         screen.composite();
+         
++        /* A screen shader does its own scaling */
++        if (RetroShader::active()) {
++            swapGLBuffer(winSize, screen.getPP().frontBuffer(), 0);
++            if (!interpFrame)
++                updateAvgFPS();
++            return;
++        }
++        
+         // maybe unspaghetti this later
+         if (integerScaleStepApplicable() && !integerLastMileScaling)
+         {
+@@ -1205,6 +1230,36 @@
+         swapInterval = want;
+     }
+ 
++    /* Screen shader from the config, or as chosen in the settings menu;
++     * loaded here, where the GL context is current */
++    bool shaderStarted = false;
++
++    void updateShader() {
++        std::string runtimeError = RetroShader::takeError();
++        if (!runtimeError.empty()) {
++            Debug() << "Screen shader failed:" << runtimeError;
++            threadData->ethread->showMessageBox(("The screen shader couldn't be used, the game is shown without it.\n\n" + runtimeError).c_str(), SDL_MESSAGEBOX_WARNING);
++        }
++        std::string want;
++        if (!shaderStarted) {
++            shaderStarted = true;
++            want = threadData->config.shader;
++            threadData->shaderMsg.poll(want);
++        } else if (!threadData->shaderMsg.poll(want)) {
++            return;
++        }
++        if (want == RetroShader::current() && (RetroShader::active() || want.empty()))
++            return;
++        std::string error;
++        if (!RetroShader::load(want, error)) {
++            Debug() << "Screen shader failed:" << error;
++            std::string msg = "The screen shader couldn't be used, the game is shown without it.\n\n" + error;
++            if (msg.size() > 1500)
++                msg = msg.substr(0, 1500) + " ...";
++            threadData->ethread->showMessageBox(msg.c_str(), SDL_MESSAGEBOX_WARNING);
++        }
++    }
++
+     void captureInterpolation() {
+         bool active = interpolationActive();
+         if (active)
+@@ -1350,6 +1405,7 @@
+ #endif
+     
+     p->updateSwapInterval();
++    p->updateShader();
+     
+     if (p->frozen) {
+         FrameInterp::reset();
+--- a/src/display/retroshader.cpp
++++ b/src/display/retroshader.cpp
+@@ -0,0 +1,1236 @@
++/*
++** retroshader.cpp
++**
++** Screen shaders (added by the rpgm-patcher), see retroshader.h.
++**
++** Supports the libretro GLSL shader format (one file per pass, the vertex and
++** fragment shader selected by "#define VERTEX" / "#define FRAGMENT") and its
++** presets (.glslp): several passes with their scaling, filtering and wrap
++** modes, frame_count_mod, aliases, lookup textures and #pragma parameter
++** values. Uniforms: MVPMatrix, FrameDirection, FrameCount, OutputSize,
++** TextureSize, InputSize, Texture, Orig*, PassN* / PassPrevN* / <alias>*,
++** the lookup textures by name and the parameters. Previous frames (Prev*) get
++** the current picture. Not supported: Cg shaders (.cg/.cgp) and slang
++** (.slang/.slangp).
++**
++** This file is part of mkxp-z and is licensed under the GPL v2 or later.
++*/
++
++#include "retroshader.h"
++
++#include "gl-fun.h"
++#include "gl-meta.h"
++#include "glstate.h"
++#include "vertex.h"
++#include "debugwriter.h"
++
++#include <SDL_rwops.h>
++#include <SDL_video.h>
++#include <SDL_image.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#include <map>
++
++#ifdef MKXPZ_EXP_FS
++#include <experimental/filesystem>
++namespace fs = std::experimental::filesystem;
++#else
++#include "ghc/filesystem.hpp"
++namespace fs = ghc::filesystem;
++#endif
++
++namespace
++{
++
++enum ScaleType { ScaleSource, ScaleViewport, ScaleAbsolute };
++
++struct Scale
++{
++	ScaleType type = ScaleSource;
++	float value = 1;
++	bool set = false;
++};
++
++struct Pass
++{
++	std::string path;
++	Scale sx, sy;
++	int filter = -1; /* input filter: -1 unset, 0 nearest, 1 linear */
++	GLenum wrap = GL_CLAMP_TO_EDGE;
++	int frameCountMod = 0;
++	std::string alias;
++	/* float_framebuffer / srgb_framebuffer: the pass output's format
++	 * (dropped again if the driver can't render into it) */
++	bool floatFb = false;
++	bool srgbFb = false;
++
++	GLuint program = 0;
++	TEXFBO fbo;
++	Vec2i size;
++};
++
++struct Lut
++{
++	std::string name;
++	TEX::ID tex;
++	Vec2i size;
++};
++
++struct State
++{
++	std::string current;
++	bool active = false;
++	std::vector<Pass> passes;
++	std::vector<Lut> luts;
++	std::map<std::string, float> params;
++	/* Final stretch to the window when the last pass doesn't render at
++	 * the window's size */
++	GLuint blitProgram = 0;
++	int finalFilter = 1;
++	unsigned frameCount = 0;
++	GLMeta::VAO vao;
++	bool vaoReady = false;
++	/* First frames after loading: watch for draw errors. The driver may
++	 * only fail when it first draws (ANGLE builds its D3D shaders then,
++	 * and e.g. Wine's D3D compiler can't build all of them). */
++	int checkFrames = 0;
++	std::string runtimeError;
++} st;
++
++/* not in mkxp-z's GL function table */
++#define RS_GL_RGBA16F 0x881A
++#define RS_GL_SRGB8_ALPHA8 0x8C43
++#define RS_GL_FRAMEBUFFER_SRGB 0x8DB9
++#define RS_GL_FRAMEBUFFER 0x8D40
++#define RS_GL_FRAMEBUFFER_COMPLETE 0x8CD5
++
++GLenum framebufferStatus()
++{
++	typedef GLenum (APIENTRYP CheckFn)(GLenum);
++	static CheckFn check = (CheckFn) SDL_GL_GetProcAddress("glCheckFramebufferStatus");
++	return check ? check(RS_GL_FRAMEBUFFER) : RS_GL_FRAMEBUFFER_COMPLETE;
++}
++
++/* A pass's output buffer at the given size, in its format: 16-bit float
++ * (values outside 0..1, e.g. video signals), sRGB (linear light) or the
++ * usual 8-bit RGBA */
++void allocPass(Pass &p, int w, int h)
++{
++	TEX::bind(p.fbo.tex);
++	if (p.floatFb || p.srgbFb)
++	{
++		if (p.floatFb)
++			gl.TexImage2D(GL_TEXTURE_2D, 0, RS_GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, 0);
++		else
++			gl.TexImage2D(GL_TEXTURE_2D, 0, RS_GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
++		p.fbo.width = w;
++		p.fbo.height = h;
++		TEXFBO::linkFBO(p.fbo);
++		while (gl.GetError() != GL_NO_ERROR) {}
++		if (framebufferStatus() == RS_GL_FRAMEBUFFER_COMPLETE)
++			return;
++		Debug() << "Screen shader:" << (p.floatFb ? "float" : "sRGB") << "framebuffer not supported, using RGBA8 for" << p.path;
++		p.floatFb = p.srgbFb = false;
++		TEX::bind(p.fbo.tex);
++	}
++	TEXFBO::allocEmpty(p.fbo, w, h);
++	TEXFBO::linkFBO(p.fbo);
++}
++
++bool readFile(const std::string &path, std::string &out)
++{
++	SDL_RWops *ops = SDL_RWFromFile(path.c_str(), "rb");
++	if (!ops)
++		return false;
++	Sint64 size = SDL_RWsize(ops);
++	if (size < 0)
++	{
++		SDL_RWclose(ops);
++		return false;
++	}
++	out.resize((size_t) size);
++	size_t got = size ? SDL_RWread(ops, &out[0], 1, (size_t) size) : 0;
++	SDL_RWclose(ops);
++	out.resize(got);
++	return true;
++}
++
++std::string trim(const std::string &s)
++{
++	size_t a = s.find_first_not_of(" \t\r\n");
++	if (a == std::string::npos)
++		return std::string();
++	size_t b = s.find_last_not_of(" \t\r\n");
++	return s.substr(a, b - a + 1);
++}
++
++std::string unquote(std::string s)
++{
++	s = trim(s);
++	if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
++		s = s.substr(1, s.size() - 2);
++	return s;
++}
++
++std::string lower(std::string s)
++{
++	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char) std::tolower(c); });
++	return s;
++}
++
++std::string dirOf(const std::string &path)
++{
++	size_t p = path.find_last_of("/\\");
++	return p == std::string::npos ? std::string() : path.substr(0, p + 1);
++}
++
++std::string ext(const std::string &path)
++{
++	size_t p = path.find_last_of('.');
++	size_t s = path.find_last_of("/\\");
++	if (p == std::string::npos || (s != std::string::npos && p < s))
++		return std::string();
++	return lower(path.substr(p + 1));
++}
++
++bool truthy(const std::string &v)
++{
++	std::string l = lower(trim(v));
++	return l == "true" || l == "1" || l == "yes";
++}
++
++GLenum wrapMode(const std::string &v)
++{
++	std::string l = lower(trim(v));
++	if (l == "repeat")
++		return GL_REPEAT;
++	if (l == "mirrored_repeat")
++		return GL_MIRRORED_REPEAT;
++	/* clamp_to_border isn't in GLES; the edge is close enough */
++	return GL_CLAMP_TO_EDGE;
++}
++
++/* "key = value" lines of a preset */
++std::map<std::string, std::string> parsePreset(const std::string &text)
++{
++	std::map<std::string, std::string> kv;
++	size_t pos = 0;
++	while (pos < text.size())
++	{
++		size_t end = text.find('\n', pos);
++		if (end == std::string::npos)
++			end = text.size();
++		std::string line = text.substr(pos, end - pos);
++		pos = end + 1;
++
++		/* comments, but not inside quotes */
++		bool quoted = false;
++		for (size_t i = 0; i < line.size(); ++i)
++		{
++			if (line[i] == '"')
++				quoted = !quoted;
++			else if (!quoted && (line[i] == '#' || (line[i] == '/' && i + 1 < line.size() && line[i+1] == '/')))
++			{
++				line.resize(i);
++				break;
++			}
++		}
++		size_t eq = line.find('=');
++		if (eq == std::string::npos)
++			continue;
++		std::string key = trim(line.substr(0, eq));
++		if (!key.empty())
++			kv[key] = unquote(line.substr(eq + 1));
++	}
++	return kv;
++}
++
++/* A preset with the presets it builds on ('#reference "file"', relative to
++ * it, read first so its own values win). dirs: the folder each value's
++ * paths are relative to. */
++bool readPreset(const std::string &path, std::map<std::string, std::string> &kv,
++                std::map<std::string, std::string> &dirs, std::string &error, int depth = 0)
++{
++	std::string text;
++	if (!readFile(path, text))
++	{
++		error = "can't read " + path;
++		return false;
++	}
++	if (depth > 16)
++	{
++		error = path + ": #reference nested too deeply";
++		return false;
++	}
++	size_t pos = 0;
++	while (pos < text.size())
++	{
++		size_t end = text.find('\n', pos);
++		if (end == std::string::npos)
++			end = text.size();
++		std::string line = trim(text.substr(pos, end - pos));
++		pos = end + 1;
++		if (line.compare(0, 10, "#reference") == 0)
++			if (!readPreset(dirOf(path) + unquote(line.substr(10)), kv, dirs, error, depth + 1))
++				return false;
++	}
++	for (auto &v : parsePreset(text))
++	{
++		kv[v.first] = v.second;
++		dirs[v.first] = dirOf(path);
++	}
++	return true;
++}
++
++/* Read a pass source with its #include files (relative to the file) */
++bool readSource(const std::string &path, std::string &out, std::string &error, int depth = 0)
++{
++	std::string text;
++	if (!readFile(path, text))
++	{
++		error = "can't read " + path;
++		return false;
++	}
++	if (depth > 8)
++	{
++		error = "#include nested too deep in " + path;
++		return false;
++	}
++	size_t pos = 0;
++	while (pos < text.size())
++	{
++		size_t end = text.find('\n', pos);
++		if (end == std::string::npos)
++			end = text.size();
++		std::string line = text.substr(pos, end - pos);
++		std::string t = trim(line);
++		if (t.compare(0, 8, "#include") == 0)
++		{
++			size_t a = t.find('"'), b = t.rfind('"');
++			if (a != std::string::npos && b > a)
++			{
++				std::string inc;
++				if (!readSource(dirOf(path) + t.substr(a + 1, b - a - 1), inc, error, depth + 1))
++					return false;
++				out += inc;
++				if (!inc.empty() && inc.back() != '\n')
++					out += '\n';
++				pos = end + 1;
++				continue;
++			}
++		}
++		out += line;
++		out += '\n';
++		pos = end + 1;
++	}
++	return true;
++}
++
++/* Split off the #version line; collect #pragma parameter defaults */
++void prepareSource(std::string &src, int &version, std::map<std::string, float> &paramDefaults)
++{
++	version = 0;
++	std::string out;
++	size_t pos = 0;
++	while (pos < src.size())
++	{
++		size_t end = src.find('\n', pos);
++		if (end == std::string::npos)
++			end = src.size();
++		std::string line = src.substr(pos, end - pos);
++		pos = end + 1;
++		std::string t = trim(line);
++		if (t.compare(0, 8, "#version") == 0)
++		{
++			version = std::atoi(t.c_str() + 8);
++			out += '\n'; /* keep the line numbers */
++			continue;
++		}
++		if (t.compare(0, 17, "#pragma parameter") == 0)
++		{
++			/* #pragma parameter NAME "Description" default min max step */
++			std::string rest = trim(t.substr(17));
++			size_t sp = rest.find_first_of(" \t");
++			std::string name = rest.substr(0, sp);
++			size_t q2 = rest.rfind('"');
++			if (!name.empty() && q2 != std::string::npos)
++				paramDefaults.emplace(name, (float) std::atof(rest.c_str() + q2 + 1));
++			out += '\n';
++			continue;
++		}
++		out += line;
++		out += '\n';
++	}
++	src = out;
++}
++
++GLuint compileStage(GLenum type, const std::string &header, const std::string &src, std::string &error)
++{
++	GLuint sh = gl.CreateShader(type);
++	const GLchar *parts[2] = { header.c_str(), src.c_str() };
++	GLint lens[2] = { (GLint) header.size(), (GLint) src.size() };
++	gl.ShaderSource(sh, 2, parts, lens);
++	gl.CompileShader(sh);
++	GLint ok = 0;
++	gl.GetShaderiv(sh, GL_COMPILE_STATUS, &ok);
++	if (!ok)
++	{
++		GLint len = 0;
++		gl.GetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
++		std::string log(len > 0 ? len : 1, '\0');
++		gl.GetShaderInfoLog(sh, (GLsizei) log.size(), 0, &log[0]);
++		error = std::string(type == GL_VERTEX_SHADER ? "vertex" : "fragment") + " shader: " + log.c_str();
++		gl.DeleteShader(sh);
++		return 0;
++	}
++	return sh;
++}
++
++/* GLSL ES only allows constant initializers on global variables, desktop
++ * GLSL also takes ones that use uniforms (shader parameters), e.g.
++ * "float B = 1.0 - SHARPNESS;". Turn such a global into a plain
++ * declaration plus an assignment at the start of main(). The assignment
++ * goes through a #define placed where the declaration was, so it only
++ * reaches the main() of the stage (#if VERTEX / FRAGMENT) that has it. */
++std::string hoistGlobalInits(const std::string &in)
++{
++	/* comments out (keeping the line breaks) */
++	std::string src;
++	src.reserve(in.size());
++	for (size_t i = 0; i < in.size(); ++i)
++	{
++		if (in.compare(i, 2, "//") == 0)
++		{
++			while (i < in.size() && in[i] != '\n')
++				++i;
++			if (i < in.size())
++				src += '\n';
++			continue;
++		}
++		if (in.compare(i, 2, "/*") == 0)
++		{
++			size_t e = in.find("*/", i + 2);
++			e = e == std::string::npos ? in.size() : e + 2;
++			for (size_t k = i; k < e; ++k)
++				if (in[k] == '\n')
++					src += '\n';
++			src += ' ';
++			i = e - 1;
++			continue;
++		}
++		src += in[i];
++	}
++
++	auto isIdent = [](char c) { return std::isalnum((unsigned char) c) || c == '_'; };
++	std::string out;
++	int count = 0;
++	int depth = 0;
++	size_t stmt = 0; /* start of the current global statement */
++	bool lineStart = true;
++	for (size_t i = 0; i < src.size(); ++i)
++	{
++		char c = src[i];
++		if (lineStart && c == '#')
++		{
++			/* preprocessor line (with continuations) */
++			while (i < src.size() && !(src[i] == '\n' && src[i - 1] != '\\'))
++				++i;
++			if (depth == 0 && trim(src.substr(stmt, i - stmt)).compare(0, 1, "#") == 0)
++			{
++				out += src.substr(stmt, i - stmt);
++				stmt = i;
++			}
++			if (i >= src.size())
++				break;
++			lineStart = true;
++			continue;
++		}
++		if (c == '\n')
++			lineStart = true;
++		else if (c != ' ' && c != '\t' && c != '\r')
++			lineStart = false;
++
++		if (c == '{' || c == '(')
++			++depth;
++		else if (c == '}' || c == ')')
++		{
++			if (--depth == 0 && c == '}')
++			{
++				out += src.substr(stmt, i + 1 - stmt);
++				stmt = i + 1;
++			}
++		}
++		else if (c == ';' && depth == 0)
++		{
++			std::string s = src.substr(stmt, i - stmt);
++			size_t eq = s.find('=');
++			bool hoist = false;
++			std::string decl, name, expr;
++			if (eq != std::string::npos && s.find("==") != eq)
++			{
++				decl = trim(s.substr(0, eq));
++				expr = s.substr(eq + 1);
++				/* "[qualifiers] type name": no const/uniform/arrays/lists */
++				size_t sp = decl.find_last_of(" \t\n");
++				name = sp == std::string::npos ? std::string() : decl.substr(sp + 1);
++				bool plain = !name.empty() && std::all_of(name.begin(), name.end(), isIdent);
++				int d = 0;
++				bool list = false;
++				for (char e : expr)
++				{
++					d += (e == '(') - (e == ')');
++					list |= (e == ',' && d == 0);
++				}
++				std::string words = " " + decl + " ";
++				for (char &w : words)
++					if (!isIdent(w))
++						w = ' ';
++				const char *quals[] = { " const ", " uniform ", " in ", " out ", " attribute ", " varying ", " struct ", " precision " };
++				bool qualified = false;
++				for (const char *q : quals)
++					qualified |= words.find(q) != std::string::npos;
++				hoist = plain && !list && !qualified;
++			}
++			if (hoist)
++			{
++				for (char &e : expr)
++					if (e == '\n' || e == '\r')
++						e = ' ';
++				std::string mac = "RS_GLOBAL_INIT_" + std::to_string(count++);
++				size_t nl = std::count(s.begin(), s.end(), '\n');
++				out += "\n#define " + mac + " " + name + " =" + expr + ";\n" + decl;
++				for (size_t k = 2; k < nl; ++k)
++					out += '\n';
++			}
++			else
++				out += s;
++			out += ';';
++			stmt = i + 1;
++		}
++	}
++	out += src.substr(std::min(stmt, src.size()));
++	if (count == 0)
++		return in;
++
++	std::string inits;
++	for (int k = 0; k < count; ++k)
++	{
++		std::string mac = "RS_GLOBAL_INIT_" + std::to_string(k);
++		inits += "\n#ifdef " + mac + "\n" + mac + "\n#endif\n";
++	}
++	/* at the start of every main() */
++	std::string res;
++	size_t pos = 0;
++	while (true)
++	{
++		size_t m = out.find("main", pos);
++		if (m == std::string::npos)
++			break;
++		size_t a = m + 4;
++		bool word = (m == 0 || !isIdent(out[m - 1])) && (a >= out.size() || !isIdent(out[a]));
++		size_t open = out.find_first_not_of(" \t\r\n", a);
++		size_t close = open != std::string::npos && out[open] == '(' ? out.find(')', open) : std::string::npos;
++		size_t brace = close != std::string::npos ? out.find_first_not_of(" \t\r\n", close + 1) : std::string::npos;
++		if (word && brace != std::string::npos && out[brace] == '{')
++		{
++			res += out.substr(pos, brace + 1 - pos) + inits;
++			pos = brace + 1;
++		}
++		else
++		{
++			res += out.substr(pos, a - pos);
++			pos = a;
++		}
++	}
++	res += out.substr(pos);
++	return res;
++}
++
++/* Both stages for GLSL ES 3.00 or 1.00; on failure nothing is kept */
++bool compileGLESOnce(const std::string &src, bool es3, GLuint &vs, GLuint &fs, std::string &error);
++
++bool compileGLES(const std::string &src, bool es3, GLuint &vs, GLuint &fs, std::string &error)
++{
++	if (compileGLESOnce(src, es3, vs, fs, error))
++		return true;
++	if (error.find("global variable initializers must be constant") == std::string::npos)
++		return false;
++	std::string firstError = error;
++	if (compileGLESOnce(hoistGlobalInits(src), es3, vs, fs, error))
++		return true;
++	error = firstError;
++	return false;
++}
++
++bool compileGLESOnce(const std::string &src, bool es3, GLuint &vs, GLuint &fs, std::string &error)
++{
++	std::string ver = es3 ? "#version 300 es\n" : "#version 100\n";
++	const std::string common = "#define PARAMETER_UNIFORM\n";
++	/* fragment shaders have no default float precision in GLSL ES;
++	 * a shader's own precision statement still overrides this */
++	const std::string precision =
++		"#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n";
++
++	/* #extension has to come before any code, so the shader's ones move
++	 * up in front of the precision statement (line numbers stay) */
++	std::string s, ext;
++	size_t pos = 0;
++	while (pos < src.size())
++	{
++		size_t end = src.find('\n', pos);
++		if (end == std::string::npos)
++			end = src.size();
++		std::string line = src.substr(pos, end - pos);
++		pos = end + 1;
++		std::string t = trim(line);
++		if (t.compare(0, 10, "#extension") == 0)
++		{
++			/* derivatives are core in ES 3.00, where the extension is unknown */
++			if (!(es3 && t.find("GL_OES_standard_derivatives") != std::string::npos))
++				ext += t + "\n";
++			s += '\n';
++			continue;
++		}
++		s += line + '\n';
++	}
++
++	vs = compileStage(GL_VERTEX_SHADER, ver + ext + "#define VERTEX\n" + common, s, error);
++	fs = vs ? compileStage(GL_FRAGMENT_SHADER, ver + ext + "#define FRAGMENT\n" + common + precision, s, error) : 0;
++	if (!fs && vs)
++	{
++		gl.DeleteShader(vs);
++		vs = 0;
++	}
++	return fs != 0;
++}
++
++GLuint buildProgram(std::string src,const std::string &name, std::map<std::string, float> &paramDefaults, std::string &error)
++{
++	int version = 0;
++	prepareSource(src, version, paramDefaults);
++
++	GLuint vs = 0, fs = 0;
++	if (gl.glsles)
++	{
++		/* Most libretro shaders are written for desktop GLSL and switch
++		 * on __VERSION__; GLSL ES 3.00 takes far more of them than ES 1.00
++		 * (matNxM, round, textureLod, array constructors, ...). Try the
++		 * one matching the shader first, then the other one. */
++		bool es3First = version >= 130 || version == 0;
++		std::string firstError;
++		for (int attempt = 0; attempt < 2 && !fs; ++attempt)
++		{
++			bool es3 = (attempt == 0) == es3First;
++			if (compileGLES(src, es3, vs, fs, error))
++				break;
++			if (attempt == 0)
++				firstError = error;
++		}
++		if (!fs)
++		{
++			error = name + ": " + firstError;
++			return 0;
++		}
++	}
++	else
++	{
++		std::string ver = version > 0 ? "#version " + std::to_string(version) + "\n" : std::string();
++		const std::string common = "#define PARAMETER_UNIFORM\n";
++		vs = compileStage(GL_VERTEX_SHADER, ver + "#define VERTEX\n" + common, src, error);
++		if (vs)
++			fs = compileStage(GL_FRAGMENT_SHADER, ver + "#define FRAGMENT\n" + common, src, error);
++		if (!fs)
++		{
++			if (vs)
++				gl.DeleteShader(vs);
++			error = name + ": " + error;
++			return 0;
++		}
++	}
++
++	GLuint prog = gl.CreateProgram();
++	gl.AttachShader(prog, vs);
++	gl.AttachShader(prog, fs);
++	gl.BindAttribLocation(prog, Shader::Position, "VertexCoord");
++	gl.BindAttribLocation(prog, Shader::TexCoord, "TexCoord");
++	gl.BindAttribLocation(prog, Shader::Color, "COLOR");
++	gl.LinkProgram(prog);
++	gl.DeleteShader(vs);
++	gl.DeleteShader(fs);
++
++	GLint ok = 0;
++	gl.GetProgramiv(prog, GL_LINK_STATUS, &ok);
++	if (!ok)
++	{
++		GLint len = 0;
++		gl.GetProgramiv(prog, GL_INFO_LOG_LENGTH, &len);
++		std::string log(len > 0 ? len : 1, '\0');
++		gl.GetProgramInfoLog(prog, (GLsizei) log.size(), 0, &log[0]);
++		error = name + ": linking: " + log.c_str();
++		gl.DeleteProgram(prog);
++		return 0;
++	}
++	return prog;
++}
++
++/* Pass-through for the final stretch to the window */
++const char *const BLIT_SOURCE =
++	"#if defined(VERTEX)\n"
++	"#if __VERSION__ >= 130\n#define COMPAT_VARYING out\n#define COMPAT_ATTRIBUTE in\n"
++	"#else\n#define COMPAT_VARYING varying\n#define COMPAT_ATTRIBUTE attribute\n#endif\n"
++	"COMPAT_ATTRIBUTE vec4 VertexCoord;\nCOMPAT_ATTRIBUTE vec4 TexCoord;\n"
++	"COMPAT_VARYING vec2 vTex;\nuniform mat4 MVPMatrix;\n"
++	"void main() { gl_Position = MVPMatrix * VertexCoord; vTex = TexCoord.xy; }\n"
++	"#elif defined(FRAGMENT)\n"
++	"#ifdef GL_ES\nprecision mediump float;\n#endif\n"
++	"#if __VERSION__ >= 130\n#define COMPAT_VARYING in\n#define COMPAT_TEXTURE texture\nout vec4 FragColor;\n"
++	"#else\n#define COMPAT_VARYING varying\n#define COMPAT_TEXTURE texture2D\n#define FragColor gl_FragColor\n#endif\n"
++	"COMPAT_VARYING vec2 vTex;\nuniform sampler2D Texture;\n"
++	"void main() { FragColor = COMPAT_TEXTURE(Texture, vTex); }\n"
++	"#endif\n";
++
++void destroyAll()
++{
++	for (Pass &p : st.passes)
++	{
++		if (p.program)
++			gl.DeleteProgram(p.program);
++		if (p.fbo.tex != TEX::ID(0))
++			TEXFBO::fini(p.fbo);
++	}
++	st.passes.clear();
++	for (Lut &l : st.luts)
++		TEX::del(l.tex);
++	st.luts.clear();
++	if (st.blitProgram)
++		gl.DeleteProgram(st.blitProgram);
++	st.blitProgram = 0;
++	st.params.clear();
++	st.active = false;
++	st.frameCount = 0;
++}
++
++void ensureVao()
++{
++	if (st.vaoReady)
++		return;
++	GLMeta::vaoFillInVertexData<Vertex>(st.vao);
++	st.vao.vbo = VBO::gen();
++	st.vao.ibo = IBO::gen();
++
++	Vertex v[4];
++	v[0].pos = Vec2(0, 0); v[0].texPos = Vec2(0, 0);
++	v[1].pos = Vec2(1, 0); v[1].texPos = Vec2(1, 0);
++	v[2].pos = Vec2(1, 1); v[2].texPos = Vec2(1, 1);
++	v[3].pos = Vec2(0, 1); v[3].texPos = Vec2(0, 1);
++	const GLushort idx[6] = { 0, 1, 2, 2, 3, 0 };
++
++	VBO::bind(st.vao.vbo);
++	VBO::uploadData(sizeof(v), v, GL_DYNAMIC_DRAW);
++	IBO::bind(st.vao.ibo);
++	IBO::uploadData(sizeof(idx), idx);
++	GLMeta::vaoInit(st.vao);
++	VBO::unbind();
++	IBO::unbind();
++	st.vaoReady = true;
++}
++
++/* Texture coordinates of the quad: the used part of the input texture */
++void setTexRange(float u, float v)
++{
++	Vertex vx[4];
++	vx[0].pos = Vec2(0, 0); vx[0].texPos = Vec2(0, 0);
++	vx[1].pos = Vec2(1, 0); vx[1].texPos = Vec2(u, 0);
++	vx[2].pos = Vec2(1, 1); vx[2].texPos = Vec2(u, v);
++	vx[3].pos = Vec2(0, 1); vx[3].texPos = Vec2(0, v);
++	VBO::bind(st.vao.vbo);
++	VBO::uploadSubData(0, sizeof(vx), vx);
++	VBO::unbind();
++}
++
++int scaled(const Scale &s, int source, int viewport)
++{
++	float v;
++	switch (s.type)
++	{
++	case ScaleViewport: v = viewport * s.value; break;
++	case ScaleAbsolute: v = s.value; break;
++	default:            v = source * s.value; break;
++	}
++	return std::max(1, (int) std::lround(v));
++}
++
++void bindTex(int unit, TEX::ID tex, bool linear, GLenum wrap)
++{
++	gl.ActiveTexture(GL_TEXTURE0 + unit);
++	TEX::bind(tex);
++	gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
++	gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
++	gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
++	gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
++}
++
++void setSampler(GLuint prog, const std::string &name, int unit)
++{
++	GLint loc = gl.GetUniformLocation(prog, name.c_str());
++	if (loc >= 0)
++		gl.Uniform1i(loc, unit);
++}
++
++void setVec2(GLuint prog, const std::string &name, float x, float y)
++{
++	GLint loc = gl.GetUniformLocation(prog, name.c_str());
++	if (loc >= 0)
++		gl.Uniform2f(loc, x, y);
++}
++
++bool uses(GLuint prog, const std::string &name)
++{
++	return gl.GetUniformLocation(prog, name.c_str()) >= 0;
++}
++
++const GLfloat MVP_NORMAL[16] = { 2, 0, 0, 0,  0, 2, 0, 0,  0, 0, 1, 0,  -1, -1, 0, 1 };
++/* The window is bottom-up, the game's picture top row first */
++const GLfloat MVP_FLIPPED[16] = { 2, 0, 0, 0,  0, -2, 0, 0,  0, 0, 1, 0,  -1, 1, 0, 1 };
++
++void drawQuad(GLuint prog, bool flipped)
++{
++	GLint loc = gl.GetUniformLocation(prog, "MVPMatrix");
++	if (loc >= 0)
++		gl.UniformMatrix4fv(loc, 1, GL_FALSE, flipped ? MVP_FLIPPED : MVP_NORMAL);
++	GLMeta::vaoBind(st.vao);
++	gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
++	GLMeta::vaoUnbind(st.vao);
++}
++
++} // namespace
++
++namespace RetroShader
++{
++
++const char *const FOLDER = "mkxp-z/shaders";
++
++std::vector<std::string> list(const std::string &userDataPath)
++{
++	std::vector<std::string> out;
++	std::vector<std::string> roots;
++	roots.push_back(FOLDER);
++	if (!userDataPath.empty())
++		roots.push_back(userDataPath + "/shaders");
++
++	for (const std::string &root : roots)
++	{
++		try
++		{
++			fs::path base = fs::u8path(root);
++			if (!fs::is_directory(base))
++				continue;
++			for (auto it = fs::recursive_directory_iterator(base); it != fs::recursive_directory_iterator(); ++it)
++			{
++				if (!fs::is_regular_file(it->path()))
++					continue;
++				std::string p = it->path().u8string();
++				std::replace(p.begin(), p.end(), '\\', '/');
++				std::string e = ext(p);
++				if (e == "glslp")
++				{
++					out.push_back(p);
++				}
++				else if (e == "glsl")
++				{
++					/* the passes of presets live in "shaders" subfolders
++					 * (libretro layout); list only shaders on their own */
++					std::string parent = lower(it->path().parent_path().filename().u8string());
++					if (parent != "shaders" || it->path().parent_path() == base)
++						out.push_back(p);
++				}
++			}
++		}
++		catch (...)
++		{
++		}
++	}
++	std::sort(out.begin(), out.end(), [](const std::string &a, const std::string &b) { return lower(a) < lower(b); });
++	return out;
++}
++
++const std::string &current()
++{
++	return st.current;
++}
++
++bool active()
++{
++	return st.active;
++}
++
++void unload()
++{
++	destroyAll();
++	st.current.clear();
++}
++
++bool load(const std::string &path, std::string &error)
++{
++	destroyAll();
++	st.current = path;
++	if (path.empty())
++		return true;
++
++	std::map<std::string, std::string> kv;
++	/* the folder of the preset each value came from (#reference) */
++	std::map<std::string, std::string> dirs;
++	std::string e = ext(path);
++
++	if (e == "glslp")
++	{
++		if (!readPreset(path, kv, dirs, error))
++			return false;
++		int count = std::atoi(kv["shaders"].c_str());
++		if (count <= 0)
++		{
++			error = path + ": no shaders in the preset";
++			return false;
++		}
++		for (int i = 0; i < count; ++i)
++		{
++			std::string n = std::to_string(i);
++			Pass p;
++			if (!kv.count("shader" + n))
++			{
++				error = path + ": shader" + n + " missing";
++				destroyAll();
++				return false;
++			}
++			p.path = dirs["shader" + n] + kv["shader" + n];
++			for (int axis = 0; axis < 2; ++axis)
++			{
++				Scale &s = axis ? p.sy : p.sx;
++				const char *xy = axis ? "_y" : "_x";
++				std::string type = kv.count("scale_type" + std::string(xy) + n) ? kv["scale_type" + std::string(xy) + n]
++				                 : (kv.count("scale_type" + n) ? kv["scale_type" + n] : std::string());
++				type = lower(type);
++				if (!type.empty())
++				{
++					s.set = true;
++					s.type = type == "viewport" ? ScaleViewport : type == "absolute" ? ScaleAbsolute : ScaleSource;
++				}
++				std::string val = kv.count("scale" + std::string(xy) + n) ? kv["scale" + std::string(xy) + n]
++				                : (kv.count("scale" + n) ? kv["scale" + n] : std::string());
++				if (!val.empty())
++					s.value = (float) std::atof(val.c_str());
++			}
++			if (kv.count("filter_linear" + n))
++				p.filter = truthy(kv["filter_linear" + n]) ? 1 : 0;
++			if (kv.count("wrap_mode" + n))
++				p.wrap = wrapMode(kv["wrap_mode" + n]);
++			if (kv.count("frame_count_mod" + n))
++				p.frameCountMod = std::atoi(kv["frame_count_mod" + n].c_str());
++			if (kv.count("alias" + n))
++				p.alias = kv["alias" + n];
++			if (kv.count("float_framebuffer" + n))
++				p.floatFb = truthy(kv["float_framebuffer" + n]);
++			if (kv.count("srgb_framebuffer" + n))
++				p.srgbFb = truthy(kv["srgb_framebuffer" + n]) && !p.floatFb;
++			st.passes.push_back(p);
++		}
++		/* the stretch to the window after the last pass */
++		std::string n = std::to_string(count);
++		st.finalFilter = kv.count("filter_linear" + n) ? (truthy(kv["filter_linear" + n]) ? 1 : 0) : 1;
++	}
++	else if (e == "glsl")
++	{
++		Pass p;
++		p.path = path;
++		st.passes.push_back(p);
++		st.finalFilter = 1;
++	}
++	else
++	{
++		error = path + ": not a GLSL shader (.glsl / .glslp)";
++		return false;
++	}
++
++	/* the last pass draws at the window's size unless it says otherwise */
++	Pass &last = st.passes.back();
++	if (!last.sx.set && !last.sy.set)
++	{
++		last.sx.type = last.sy.type = ScaleViewport;
++		last.sx.value = last.sy.value = 1;
++	}
++
++	std::map<std::string, float> defaults;
++	for (Pass &p : st.passes)
++	{
++		std::string src;
++		if (!readSource(p.path, src, error))
++		{
++			destroyAll();
++			return false;
++		}
++		p.program = buildProgram(src, p.path, defaults, error);
++		if (!p.program)
++		{
++			destroyAll();
++			return false;
++		}
++		TEXFBO::init(p.fbo);
++	}
++	std::map<std::string, float> unusedDefaults;
++	st.blitProgram = buildProgram(BLIT_SOURCE, "(stretch)", unusedDefaults, error);
++	if (!st.blitProgram)
++	{
++		destroyAll();
++		return false;
++	}
++
++	/* parameters: the shaders' defaults, the preset's values */
++	st.params = defaults;
++	for (auto &d : defaults)
++		if (kv.count(d.first))
++			st.params[d.first] = (float) std::atof(kv[d.first].c_str());
++
++	/* lookup textures */
++	if (kv.count("textures"))
++	{
++		std::string names = kv["textures"];
++		size_t pos = 0;
++		while (pos <= names.size())
++		{
++			size_t end = names.find(';', pos);
++			if (end == std::string::npos)
++				end = names.size();
++			std::string name = trim(names.substr(pos, end - pos));
++			pos = end + 1;
++			if (name.empty())
++				continue;
++			std::string file = dirs[name] + kv[name];
++			SDL_Surface *img = IMG_Load(file.c_str());
++			if (!img)
++			{
++				error = "can't load texture " + file;
++				destroyAll();
++				return false;
++			}
++			SDL_Surface *rgba = SDL_ConvertSurfaceFormat(img, SDL_PIXELFORMAT_ABGR8888, 0);
++			SDL_FreeSurface(img);
++			if (!rgba)
++			{
++				error = "can't convert texture " + file;
++				destroyAll();
++				return false;
++			}
++			Lut l;
++			l.name = name;
++			l.tex = TEX::gen();
++			l.size = Vec2i(rgba->w, rgba->h);
++			TEX::bind(l.tex);
++			gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
++			TEX::uploadImage(rgba->w, rgba->h, rgba->pixels, GL_RGBA);
++			bool linear = kv.count(name + "_linear") ? truthy(kv[name + "_linear"]) : false;
++			GLenum wrap = kv.count(name + "_wrap_mode") ? wrapMode(kv[name + "_wrap_mode"]) : GL_CLAMP_TO_EDGE;
++			bindTex(0, l.tex, linear, wrap);
++			SDL_FreeSurface(rgba);
++			st.luts.push_back(l);
++		}
++	}
++	TEX::unbind();
++
++	ensureVao();
++	st.active = true;
++	st.checkFrames = 3;
++	Debug() << "Shader:" << path << "(" << st.passes.size() << "pass(es))";
++	return true;
++}
++
++void render(const TEXFBO &source, const Vec2i &inputSize, const IntRect &dst, const Vec2i &winSize)
++{
++	(void) winSize;
++	const Vec2i viewport(dst.w, dst.h);
++	const size_t n = st.passes.size();
++
++	/* output sizes; (re)allocate the pass buffers */
++	Vec2i in = inputSize;
++	for (size_t i = 0; i < n; ++i)
++	{
++		Pass &p = st.passes[i];
++		Vec2i out(scaled(p.sx, in.x, viewport.x), scaled(p.sy, in.y, viewport.y));
++		if (out.x != p.fbo.width || out.y != p.fbo.height)
++			allocPass(p, out.x, out.y);
++		p.size = out;
++		in = out;
++	}
++	/* the last pass draws straight into the window if it has its size */
++	const bool direct = st.passes.back().size.x == viewport.x && st.passes.back().size.y == viewport.y;
++
++	glState.blend.pushSet(false);
++	glState.scissorTest.pushSet(false);
++	glState.viewport.push();
++
++	if (st.checkFrames > 0)
++		for (int k = 0; k < 16 && gl.GetError() != GL_NO_ERROR; ++k) {}
++	int failedPass = -1;
++
++	for (size_t i = 0; i < n; ++i)
++	{
++		Pass &p = st.passes[i];
++		const bool toWindow = direct && i + 1 == n;
++		const TEXFBO &inTex = i == 0 ? source : st.passes[i - 1].fbo;
++		const Vec2i inSize = i == 0 ? inputSize : st.passes[i - 1].size;
++		const Vec2i texSize(inTex.width, inTex.height);
++
++		if (toWindow)
++		{
++			FBO::bind(FBO::ID(0));
++			glState.viewport.set(dst);
++		}
++		else
++		{
++			FBO::bind(p.fbo.fbo);
++			glState.viewport.set(IntRect(0, 0, p.size.x, p.size.y));
++		}
++		const bool srgbWrite = p.srgbFb && !toWindow && !gl.glsles;
++		if (srgbWrite)
++			gl.Enable(RS_GL_FRAMEBUFFER_SRGB);
++
++		glState.program.set(p.program);
++		GLuint prog = p.program;
++
++		GLint loc;
++		if ((loc = gl.GetUniformLocation(prog, "FrameDirection")) >= 0)
++			gl.Uniform1i(loc, 1);
++		if ((loc = gl.GetUniformLocation(prog, "FrameCount")) >= 0)
++			gl.Uniform1i(loc, (GLint) (p.frameCountMod > 0 ? st.frameCount % p.frameCountMod : st.frameCount));
++		setVec2(prog, "OutputSize", (float) (toWindow ? viewport.x : p.size.x), (float) (toWindow ? viewport.y : p.size.y));
++		setVec2(prog, "TextureSize", (float) texSize.x, (float) texSize.y);
++		setVec2(prog, "InputSize", (float) inSize.x, (float) inSize.y);
++		for (auto &pr : st.params)
++			if ((loc = gl.GetUniformLocation(prog, pr.first.c_str())) >= 0)
++				gl.Uniform1f(loc, pr.second);
++
++		int unit = 0;
++		/* the input: filtered as the preset says, else nearest (like
++		 * RetroArch with its default settings) */
++		bool linear = p.filter == 1;
++		bindTex(unit, inTex.tex, linear, p.wrap);
++		setSampler(prog, "Texture", unit++);
++
++		/* the original picture */
++		const char *origNames[] = { "Orig", "Prev", "Prev1", "Prev2", "Prev3", "Prev4", "Prev5", "Prev6" };
++		for (const char *on : origNames)
++		{
++			std::string s(on);
++			if (!uses(prog, s + "Texture"))
++			{
++				setVec2(prog, s + "TextureSize", (float) source.width, (float) source.height);
++				setVec2(prog, s + "InputSize", (float) inputSize.x, (float) inputSize.y);
++				continue;
++			}
++			bindTex(unit, source.tex, p.filter == 1, p.wrap);
++			setSampler(prog, s + "Texture", unit++);
++			setVec2(prog, s + "TextureSize", (float) source.width, (float) source.height);
++			setVec2(prog, s + "InputSize", (float) inputSize.x, (float) inputSize.y);
++		}
++
++		/* earlier passes: PassN (output of pass N, 1-based), PassPrevN
++		 * (N passes back), <alias> */
++		for (size_t j = 0; j < i && unit < 15; ++j)
++		{
++			const Pass &q = st.passes[j];
++			std::vector<std::string> names;
++			names.push_back("Pass" + std::to_string(j + 1));
++			names.push_back("PassPrev" + std::to_string(i - j));
++			if (!q.alias.empty())
++				names.push_back(q.alias);
++			for (const std::string &nm : names)
++			{
++				setVec2(prog, nm + "TextureSize", (float) q.fbo.width, (float) q.fbo.height);
++				setVec2(prog, nm + "InputSize", (float) q.size.x, (float) q.size.y);
++				if (uses(prog, nm + "Texture") && unit < 15)
++				{
++					bindTex(unit, q.fbo.tex, p.filter == 1, p.wrap);
++					setSampler(prog, nm + "Texture", unit++);
++				}
++			}
++		}
++		/* PassPrevN reaching back to the original picture */
++		{
++			std::string nm = "PassPrev" + std::to_string(i + 1);
++			if (uses(prog, nm + "Texture") && unit < 15)
++			{
++				bindTex(unit, source.tex, p.filter == 1, p.wrap);
++				setSampler(prog, nm + "Texture", unit++);
++			}
++			setVec2(prog, nm + "TextureSize", (float) source.width, (float) source.height);
++			setVec2(prog, nm + "InputSize", (float) inputSize.x, (float) inputSize.y);
++		}
++
++		/* lookup textures */
++		for (const Lut &l : st.luts)
++		{
++			if (!uses(prog, l.name) || unit >= 16)
++				continue;
++			gl.ActiveTexture(GL_TEXTURE0 + unit);
++			TEX::bind(l.tex);
++			setSampler(prog, l.name, unit++);
++		}
++
++		setTexRange((float) inSize.x / texSize.x, (float) inSize.y / texSize.y);
++		drawQuad(prog, toWindow);
++		if (srgbWrite)
++			gl.Disable(RS_GL_FRAMEBUFFER_SRGB);
++		if (st.checkFrames > 0 && gl.GetError() != GL_NO_ERROR)
++		{
++			failedPass = (int) i;
++			break;
++		}
++	}
++
++	if (!direct && failedPass < 0)
++	{
++		/* stretch the last pass's picture to the window */
++		const Pass &last = st.passes.back();
++		FBO::bind(FBO::ID(0));
++		glState.viewport.set(dst);
++		glState.program.set(st.blitProgram);
++		bindTex(0, last.fbo.tex, st.finalFilter == 1, GL_CLAMP_TO_EDGE);
++		setSampler(st.blitProgram, "Texture", 0);
++		setTexRange(1, 1);
++		drawQuad(st.blitProgram, true);
++	}
++
++	/* leave the textures as mkxp-z expects them: unit 0, nearest, clamped */
++	gl.ActiveTexture(GL_TEXTURE0);
++	bindTex(0, source.tex, false, GL_CLAMP_TO_EDGE);
++	for (const Pass &p : st.passes)
++		bindTex(0, p.fbo.tex, false, GL_CLAMP_TO_EDGE);
++	TEX::unbind();
++	glState.program.set(0);
++	glState.viewport.pop();
++	glState.scissorTest.pop();
++	glState.blend.pop();
++
++	++st.frameCount;
++	if (failedPass >= 0)
++	{
++		st.runtimeError = st.passes[failedPass].path + ": the graphics driver couldn't run this shader"
++#ifdef _WIN32
++			" (on Wine/Proton, its Direct3D shader compiler doesn't support everything yet)"
++#endif
++			".";
++		destroyAll();
++	}
++	else if (st.checkFrames > 0)
++		--st.checkFrames;
++}
++
++std::string takeError()
++{
++	std::string e;
++	e.swap(st.runtimeError);
++	return e;
++}
++
++} // namespace RetroShader
+--- a/src/display/retroshader.h
++++ b/src/display/retroshader.h
+@@ -0,0 +1,49 @@
++/*
++** retroshader.h
++**
++** Screen shaders (added by the rpgm-patcher): libretro GLSL shaders and
++** presets (.glsl / .glslp, as in https://github.com/libretro/glsl-shaders)
++** applied to the game's picture on its way to the window.
++**
++** This file is part of mkxp-z and is licensed under the GPL v2 or later.
++*/
++
++#ifndef RETROSHADER_H
++#define RETROSHADER_H
++
++#include "etc-internal.h"
++#include "gl-util.h"
++
++#include <string>
++#include <vector>
++
++namespace RetroShader
++{
++	/* Folders searched for shaders, relative to the game folder
++	 * (and the user's data folder) */
++	extern const char *const FOLDER;
++
++	/* Shaders found in the shader folders: paths as stored in the config
++	 * ("shader"), sorted. Presets (.glslp) and lone .glsl files. */
++	std::vector<std::string> list(const std::string &userDataPath);
++
++	/* Load a preset or a single shader (empty: none). On failure the
++	 * shader is off and `error` says why. Needs the GL context. */
++	bool load(const std::string &path, std::string &error);
++	void unload();
++
++	/* The path loaded (also after a failure), to notice changes */
++	const std::string &current();
++	bool active();
++
++	/* Draw `source` (inputSize used of it, top row first) through the
++	 * shader passes into the window's default framebuffer, in the
++	 * rectangle `dst` (GL window coordinates). */
++	void render(const TEXFBO &source, const Vec2i &inputSize, const IntRect &dst, const Vec2i &winSize);
++
++	/* Set when the driver failed to draw a freshly loaded shader (which
++	 * is then off); returns it once */
++	std::string takeError();
++}
++
++#endif // RETROSHADER_H
+--- a/src/eventthread.h
++++ b/src/eventthread.h
+@@ -251,6 +251,8 @@
+ 	UnidirMessage<Vec2i> windowSizeMsg;
+     UnidirMessage<Vec2i> drawableSizeMsg;
+ 	UnidirMessage<BDescVec> bindingUpdateMsg;
++	/* Screen shader chosen in the settings menu */
++	UnidirMessage<std::string> shaderMsg;
+ 	SyncPoint syncPoint;
+ 
+ 	const char *argv0;
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -1248,6 +1248,7 @@
+     'display/bitmap.cpp',
+     'display/font.cpp',
+     'display/frameinterp.cpp',
++    'display/retroshader.cpp',
+     'display/graphics.cpp',
+     'display/plane.cpp',
+     'display/sprite.cpp',
+--- a/src/settingsmenu.cpp
++++ b/src/settingsmenu.cpp
+@@ -37,13 +37,14 @@
+ #include "util.h"
+ #include "audio.h"
+ #include "config.h"
++#include "retroshader.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+ #include <assert.h>
+ 
+ /* Key bindings on top, the player's options below them */
+-const int optionsH = 118;
++const int optionsH = 144;
+ const Vec2i winSize(840, 356 + optionsH);
+ 
+ const uint8_t cBgNorm = 50;
+@@ -278,10 +279,27 @@
+ 	void clickHandler(int x, int, uint8_t button);
+ };
+ 
++/* Shows the chosen screen shader; a click opens the list to choose from */
++struct ShaderField : Widget
++{
++	ShaderField(SMP *p, const IntRect &rect)
++	    : Widget(p, rect), hovered(false)
++	{}
++
++protected:
++	bool hovered;
++
++	void drawHandler(SDL_Surface *surf);
++	void motionHandler(int, int);
++	void leaveHandler();
++	void clickHandler(int, int, uint8_t button);
++};
++
+ enum State
+ {
+ 	Idle,
+-	AwaitingInput
++	AwaitingInput,
++	ChoosingShader
+ };
+ 
+ enum Justification
+@@ -319,8 +337,14 @@
+ 	std::vector<Slider> sliders;
+ 	Label optionsLabel;
+ 	Label optionsNote;
++	std::vector<ShaderField> shaderFields;
+ 	Slider *dragged;
+ 
++	/* The shader list (state ChoosingShader) */
++	std::vector<std::string> shaderList;
++	int listScroll;
++	int listHover;
++
+ 	/* Options as shown, taken over on "Accept" */
+ 	struct
+ 	{
+@@ -329,6 +353,7 @@
+ 		bool fullscreen;
+ 		int musicVolume;
+ 		int soundVolume;
++		std::string shader;
+ 	} opt;
+ 	Label infoLabel;
+ 	Label dupWarnLabel;
+@@ -607,9 +632,168 @@
+ 			SDL_FreeSurface(dark);
+ 		}
+ 
++		if (state == ChoosingShader)
++			drawShaderList();
++
+ 		SDL_UpdateWindowSurface(window);
+ 	}
+ 
++	/* --- screen shader list */
++	std::string shaderName(const std::string &path) const
++	{
++		if (path.empty())
++			return "(none)";
++		std::string folder = std::string(RetroShader::FOLDER) + "/";
++		std::string user = rtData.config.customDataPath + "/shaders/";
++		if (path.compare(0, folder.size(), folder) == 0)
++			return path.substr(folder.size());
++		if (!rtData.config.customDataPath.empty() && path.compare(0, user.size(), user) == 0)
++			return "(user folder) " + path.substr(user.size());
++		return path;
++	}
++
++	SDL_Rect listPanel() const
++	{
++		SDL_Rect r = { 40, 24, winSize.x - 80, winSize.y - 48 };
++		return r;
++	}
++
++	static const int listRowH = 22;
++
++	int listRows() const
++	{
++		return (listPanel().h - 40) / listRowH;
++	}
++
++	/* entry 0 is "(none)" */
++	int listCount() const
++	{
++		return (int) shaderList.size() + 1;
++	}
++
++	int listIndexAt(int x, int y) const
++	{
++		SDL_Rect r = listPanel();
++		int top = r.y + 32;
++		if (x < r.x || x >= r.x + r.w || y < top || y >= top + listRows() * listRowH)
++			return -1;
++		int i = listScroll + (y - top) / listRowH;
++		return i < listCount() ? i : -1;
++	}
++
++	void openShaderList()
++	{
++		shaderList = RetroShader::list(rtData.config.customDataPath);
++		listScroll = 0;
++		listHover = -1;
++		/* show the chosen one */
++		for (size_t i = 0; i < shaderList.size(); ++i)
++			if (shaderList[i] == opt.shader)
++				listScroll = std::max(0, (int) i + 1 - listRows() / 2);
++		clampListScroll();
++		if (hovered)
++		{
++			hovered->leave();
++			hovered = 0;
++		}
++		state = ChoosingShader;
++		redraw();
++	}
++
++	void clampListScroll()
++	{
++		listScroll = std::min(listScroll, std::max(0, listCount() - listRows()));
++		listScroll = std::max(listScroll, 0);
++	}
++
++	void closeShaderList()
++	{
++		state = Idle;
++		redraw();
++	}
++
++	void drawShaderList()
++	{
++		drawOff = Vec2i();
++		SDL_Surface *dark = createSurface(winSize.x, winSize.y);
++		fillSurface(dark, 0);
++		SDL_SetSurfaceAlphaMod(dark, 128);
++		SDL_SetSurfaceBlendMode(dark, SDL_BLENDMODE_BLEND);
++		SDL_BlitSurface(dark, 0, winSurf, 0);
++		SDL_FreeSurface(dark);
++
++		SDL_Rect r = listPanel();
++		fillRect(winSurf, cBgNorm, r.x, r.y, r.w, r.h);
++		strokeRectInner(winSurf, cLine, r.x, r.y, r.w, r.h, 2);
++
++		char title[160];
++		snprintf(title, sizeof(title), "Screen shader (%d found in %s) - mouse wheel scrolls, Esc closes",
++		         (int) shaderList.size(), RetroShader::FOLDER);
++		drawText(winSurf, title, r.x + 10, r.y + 16, r.w - 20, Left, true);
++
++		const int top = r.y + 32;
++		const int rows = listRows();
++		for (int k = 0; k < rows; ++k)
++		{
++			int i = listScroll + k;
++			if (i >= listCount())
++				break;
++			const std::string path = i == 0 ? std::string() : shaderList[i - 1];
++			const int y = top + k * listRowH;
++			if (i == listHover)
++				fillRect(winSurf, cBgDark, r.x + 4, y, r.w - 8, listRowH);
++			if (path == opt.shader)
++				fillRect(winSurf, r.x + 6, y + 6, 4, listRowH - 12, 120, 200, 120);
++			drawText(winSurf, shaderName(path).c_str(), r.x + 16, y + listRowH / 2, r.w - 40, Left);
++		}
++		if (shaderList.empty())
++		{
++			const char *hint = "Put libretro GLSL shaders (.glslp / .glsl) into that folder, e.g. from github.com/libretro/glsl-shaders";
++			drawText(winSurf, hint, r.x + 16, top + listRowH + listRowH / 2, r.w - 32, Left);
++		}
++
++		/* scroll position */
++		if (listCount() > rows)
++		{
++			const int barH = rows * listRowH;
++			const int knobH = std::max(16, barH * rows / listCount());
++			const int knobY = top + (barH - knobH) * listScroll / std::max(1, listCount() - rows);
++			fillRect(winSurf, cBgDark, r.x + r.w - 12, top, 6, barH);
++			fillRect(winSurf, 170, r.x + r.w - 12, knobY, 6, knobH);
++		}
++	}
++
++	void onShaderListClick(int x, int y)
++	{
++		int i = listIndexAt(x, y);
++		if (i >= 0)
++			opt.shader = i == 0 ? std::string() : shaderList[i - 1];
++		else
++		{
++			SDL_Rect r = listPanel();
++			if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
++				return; /* inside, not on an entry */
++		}
++		closeShaderList();
++	}
++
++	void onShaderListMotion(int x, int y)
++	{
++		int i = listIndexAt(x, y);
++		if (i != listHover)
++		{
++			listHover = i;
++			redraw();
++		}
++	}
++
++	void onShaderListWheel(int dy)
++	{
++		listScroll -= dy * 3;
++		clampListScroll();
++		redraw();
++	}
++
+ 	Widget *findWidget(int x, int y)
+ 	{
+ 		Widget *w = 0;
+@@ -636,6 +820,15 @@
+ 			return;
+ 		}
+ 
++		if (state == ChoosingShader)
++		{
++			if (e.button == SDL_BUTTON_LEFT)
++				onShaderListClick(e.x, e.y);
++			else
++				closeShaderList();
++			return;
++		}
++
+ 		Widget *w = findWidget(e.x, e.y);
+ 
+ 		if (w)
+@@ -647,6 +840,12 @@
+ 		if (state == AwaitingInput)
+ 			return;
+ 
++		if (state == ChoosingShader)
++		{
++			onShaderListMotion(e.x, e.y);
++			return;
++		}
++
+ 		if (dragged)
+ 		{
+ 			if (e.state & SDL_BUTTON_LMASK)
+@@ -761,7 +960,8 @@
+ 		    || c.frameInterpolation != opt.frameInterpolation
+ 		    || c.fullscreen != opt.fullscreen
+ 		    || c.musicVolume != opt.musicVolume
+-		    || c.soundVolume != opt.soundVolume;
++		    || c.soundVolume != opt.soundVolume
++		    || c.shader != opt.shader;
+ 
+ 		/* vsync and frame interpolation are picked up by the next
+ 		 * Graphics.update, "fullscreen" is the mode at startup */
+@@ -770,6 +970,11 @@
+ 		c.fullscreen = opt.fullscreen;
+ 		c.musicVolume = opt.musicVolume;
+ 		c.soundVolume = opt.soundVolume;
++		if (c.shader != opt.shader)
++		{
++			c.shader = opt.shader;
++			rtData.shaderMsg.post(c.shader);
++		}
+ 		shState->audio().setUserVolumes(c.musicVolume, c.soundVolume);
+ 
+ 		if (changed)
+@@ -1107,6 +1312,45 @@
+ 	p->drawText(surf, buf, tx + tw + 10, midY, 46, Left);
+ }
+ 
++void ShaderField::drawHandler(SDL_Surface *surf)
++{
++	const int labelW = 150;
++	p->drawText(surf, "Screen shader", 4, rect.h/2, labelW - 8, Left);
++
++	const int bx = labelW, bw = rect.w - labelW - 4;
++	if (hovered)
++		p->fillRect(surf, cBgDark, bx, 1, bw, rect.h - 2);
++	p->strokeRectInner(surf, cLine, bx, 1, bw, rect.h - 2, 2);
++	p->drawText(surf, p->shaderName(p->opt.shader).c_str(), bx + 8, rect.h/2, bw - 90, Left);
++	p->drawText(surf, "choose...", bx + bw - 80, rect.h/2, 72, Left);
++}
++
++void ShaderField::motionHandler(int, int)
++{
++	if (!hovered)
++	{
++		hovered = true;
++		p->redraw();
++	}
++}
++
++void ShaderField::leaveHandler()
++{
++	if (hovered)
++	{
++		hovered = false;
++		p->redraw();
++	}
++}
++
++void ShaderField::clickHandler(int, int, uint8_t button)
++{
++	if (button != SDL_BUTTON_LEFT)
++		return;
++	hovered = false;
++	p->openShaderList();
++}
++
+ SettingsMenu::SettingsMenu(RGSSThreadData &rtData)
+ {
+     // Set names to be shown in the menu
+@@ -1209,6 +1453,10 @@
+ 	p->opt.fullscreen = conf.fullscreen;
+ 	p->opt.musicVolume = conf.musicVolume;
+ 	p->opt.soundVolume = conf.soundVolume;
++	p->opt.shader = conf.shader;
++	p->shaderList.clear();
++	p->listScroll = 0;
++	p->listHover = -1;
+ 	p->dragged = 0;
+ 
+ 	const int optY = winSize.y - optionsH - 48 + 4;
+@@ -1238,6 +1486,9 @@
+ 	                       "Alt+Enter switches fullscreen right away", 170, 170, 170);
+ 	p->widgets.push_back(&p->optionsNote);
+ 
++	p->shaderFields.push_back(ShaderField(p, IntRect(12, optY + 20 + rowH*3 + 2, winSize.x - 28, rowH)));
++	p->widgets.push_back(&p->shaderFields[0]);
++
+ 	p->hovered = 0;
+ 	p->captureDesc = 0;
+ 	p->captureName = 0;
+@@ -1266,6 +1517,7 @@
+ 	case SDL_MOUSEMOTION :
+ 	case SDL_KEYDOWN :
+ 	case SDL_KEYUP :
++	case SDL_MOUSEWHEEL :
+ 		/* We can do this because windowID has the same
+ 		 * struct offset in all these event types */
+ 		if (event.window.windowID != p->winID)
+@@ -1329,7 +1581,19 @@
+ 		p->onMotion(event.motion);
+ 		return true;
+ 
++	case SDL_MOUSEWHEEL:
++		if (p->state == ChoosingShader)
++			p->onShaderListWheel(event.wheel.y);
++		return true;
++
+ 	case SDL_KEYDOWN:
++		if (p->state == ChoosingShader)
++		{
++			if (event.key.keysym.sym == SDLK_ESCAPE)
++				p->closeShaderList();
++			return true;
++		}
++
+ 		if (p->state != AwaitingInput)
+ 		{
+ 			if (event.key.keysym.sym == SDLK_RETURN)

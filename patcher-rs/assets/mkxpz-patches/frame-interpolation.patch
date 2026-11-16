@@ -1,0 +1,863 @@
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -154,6 +154,7 @@
+         {"fixedFramerate", 0},
+         {"frameSkip", false},
+         {"syncToRefreshrate", false},
++        {"frameInterpolation", false},
+         {"solidFonts", json::array({})},
+         {"renderer", 0},
+         {"subImageFix", false},
+@@ -293,6 +294,7 @@
+     SET_OPT(fixedFramerate, integer);
+     SET_OPT(frameSkip, boolean);
+     SET_OPT(syncToRefreshrate, boolean);
++    SET_OPT(frameInterpolation, boolean);
+     fillStringVec(opts["solidFonts"], solidFonts);
+     for (std::string & solidFont : solidFonts)
+         std::transform(solidFont.begin(), solidFont.end(), solidFont.begin(),
+--- a/src/config.h
++++ b/src/config.h
+@@ -65,6 +65,7 @@
+     int fixedFramerate;
+     bool frameSkip;
+     bool syncToRefreshrate;
++    bool frameInterpolation;
+     
+     std::vector<std::string> solidFonts;
+     
+--- a/src/display/frameinterp.cpp
++++ b/src/display/frameinterp.cpp
+@@ -0,0 +1,341 @@
++/*
++** frameinterp.cpp
++**
++** Frame interpolation (added by the rpgm-patcher), see frameinterp.h.
++**
++** At each logic frame, every tracked object's position values are recorded
++** as a key frame. In-between frames set values blended between the previous
++** and the current key frame, render, and put the real values back before the
++** game's scripts run again, so scripts never see blended values.
++**
++** Values that jump (teleports, scene changes, looping planes or maps), sprites
++** that changed their bitmap or just became visible, and new objects are shown
++** as they are instead of being blended.
++**
++** This file is part of mkxp-z and is licensed under the GPL v2 or later.
++*/
++
++#include "frameinterp.h"
++
++#include "sprite.h"
++#include "plane.h"
++#include "viewport.h"
++#include "tilemap.h"
++#include "tilemapvx.h"
++#include "etc.h"
++
++#include <cmath>
++#include <unordered_map>
++
++namespace
++{
++
++enum Kind { KSprite, KPlane, KViewport, KTilemap, KTilemapVX };
++
++/* Most values per object: sprite x, y, ox, oy, zoom_x, zoom_y */
++const int MAX_VALUES = 6;
++
++/* Bigger changes within one logic frame are jumps, not movement
++ * (fast movement in RPG Maker is about 8-16 pixels per frame). */
++const double JUMP_PIXELS = 48.0;
++const double JUMP_ZOOM = 0.5;
++
++struct Entry
++{
++	Kind kind;
++	bool haveKey;      /* cur holds a key frame */
++	bool moving;       /* prev != cur and blending allowed */
++	bool applied;      /* blended values are set right now */
++	const void *tag;   /* sprite/plane bitmap, to notice reuse */
++	bool visible;
++	double prev[MAX_VALUES];
++	double cur[MAX_VALUES];
++};
++
++std::unordered_map<const void*, Entry> entries;
++
++int valueCount(Kind k)
++{
++	switch (k)
++	{
++	case KSprite:   return 6;
++	case KViewport: return 4;
++	default:        return 2;
++	}
++}
++
++bool isZoom(Kind k, int i)
++{
++	return k == KSprite && i >= 4;
++}
++
++Disposable *disposable(const void *obj, Kind k)
++{
++	void *o = const_cast<void*>(obj);
++	switch (k)
++	{
++	case KSprite:    return static_cast<Sprite*>(o);
++	case KPlane:     return static_cast<Plane*>(o);
++	case KViewport:  return static_cast<Viewport*>(o);
++	case KTilemap:   return static_cast<Tilemap*>(o);
++	case KTilemapVX: return static_cast<TilemapVX*>(o);
++	}
++	return 0;
++}
++
++/* Read the current values; returns false if the object can't be used. */
++bool read(const void *obj, Kind k, double *v, const void *&tag, bool &visible)
++{
++	tag = 0;
++	switch (k)
++	{
++	case KSprite: {
++		const Sprite *s = static_cast<const Sprite*>(obj);
++		v[0] = s->getX();
++		v[1] = s->getY();
++		v[2] = s->getOX();
++		v[3] = s->getOY();
++		v[4] = s->getZoomX();
++		v[5] = s->getZoomY();
++		tag = s->getBitmap();
++		visible = s->getVisible();
++		return true;
++	}
++	case KPlane: {
++		const Plane *p = static_cast<const Plane*>(obj);
++		v[0] = p->getOX();
++		v[1] = p->getOY();
++		tag = p->getBitmap();
++		visible = p->getVisible();
++		return true;
++	}
++	case KViewport: {
++		Viewport *vp = static_cast<Viewport*>(const_cast<void*>(obj));
++		const Rect &r = vp->getRect();
++		v[0] = r.x;
++		v[1] = r.y;
++		v[2] = vp->getOX();
++		v[3] = vp->getOY();
++		visible = vp->getVisible();
++		return true;
++	}
++	case KTilemap: {
++		const Tilemap *t = static_cast<const Tilemap*>(obj);
++		v[0] = t->getOX();
++		v[1] = t->getOY();
++		visible = t->getVisible();
++		return true;
++	}
++	case KTilemapVX: {
++		const TilemapVX *t = static_cast<const TilemapVX*>(obj);
++		v[0] = t->getOX();
++		v[1] = t->getOY();
++		visible = t->getVisible();
++		return true;
++	}
++	}
++	return false;
++}
++
++int px(double v)
++{
++	return (int) std::lround(v);
++}
++
++/* Set values; `old` holds what is set now, so unchanged ones are skipped. */
++void write(const void *obj, Kind k, const double *v, const double *old)
++{
++	void *o = const_cast<void*>(obj);
++	switch (k)
++	{
++	case KSprite: {
++		Sprite *s = static_cast<Sprite*>(o);
++		if (px(v[0]) != px(old[0]) || px(v[1]) != px(old[1]))
++			s->setInterpPosition(px(v[0]), px(v[1]));
++		if (px(v[2]) != px(old[2]))
++			s->setOX(px(v[2]));
++		if (px(v[3]) != px(old[3]))
++			s->setOY(px(v[3]));
++		if (v[4] != old[4])
++			s->setZoomX((float) v[4]);
++		if (v[5] != old[5])
++			s->setZoomY((float) v[5]);
++		break;
++	}
++	case KPlane: {
++		Plane *p = static_cast<Plane*>(o);
++		if (px(v[0]) != px(old[0]))
++			p->setOX(px(v[0]));
++		if (px(v[1]) != px(old[1]))
++			p->setOY(px(v[1]));
++		break;
++	}
++	case KViewport: {
++		Viewport *vp = static_cast<Viewport*>(o);
++		Rect &r = vp->getRect();
++		if (px(v[0]) != px(old[0]))
++			r.setX(px(v[0]));
++		if (px(v[1]) != px(old[1]))
++			r.setY(px(v[1]));
++		if (px(v[2]) != px(old[2]))
++			vp->setOX(px(v[2]));
++		if (px(v[3]) != px(old[3]))
++			vp->setOY(px(v[3]));
++		break;
++	}
++	case KTilemap: {
++		Tilemap *t = static_cast<Tilemap*>(o);
++		if (px(v[0]) != px(old[0]))
++			t->setOX(px(v[0]));
++		if (px(v[1]) != px(old[1]))
++			t->setOY(px(v[1]));
++		break;
++	}
++	case KTilemapVX: {
++		TilemapVX *t = static_cast<TilemapVX*>(o);
++		if (px(v[0]) != px(old[0]))
++			t->setOX(px(v[0]));
++		if (px(v[1]) != px(old[1]))
++			t->setOY(px(v[1]));
++		break;
++	}
++	}
++}
++
++void add(const void *obj, Kind k)
++{
++	Entry e = Entry();
++	e.kind = k;
++	entries[obj] = e;
++}
++
++/* The values blended for `alpha` */
++void blend(const Entry &e, double alpha, double *out)
++{
++	for (int i = 0; i < valueCount(e.kind); ++i)
++		out[i] = e.prev[i] + (e.cur[i] - e.prev[i]) * alpha;
++}
++
++double lastAlpha = 1.0;
++
++} // namespace
++
++namespace FrameInterp
++{
++
++void track(Sprite *s)    { add(s, KSprite); }
++void track(Plane *p)     { add(p, KPlane); }
++void track(Viewport *v)  { add(v, KViewport); }
++void track(Tilemap *t)   { add(t, KTilemap); }
++void track(TilemapVX *t) { add(t, KTilemapVX); }
++
++void untrack(const void *obj)
++{
++	entries.erase(obj);
++}
++
++void capture()
++{
++	for (auto &it : entries)
++	{
++		Entry &e = it.second;
++		e.moving = false;
++		e.applied = false;
++
++		Disposable *d = disposable(it.first, e.kind);
++		if (!d || d->isDisposed())
++		{
++			e.haveKey = false;
++			continue;
++		}
++
++		double v[MAX_VALUES];
++		const void *tag;
++		bool visible = false;
++		if (!read(it.first, e.kind, v, tag, visible))
++		{
++			e.haveKey = false;
++			continue;
++		}
++
++		const int n = valueCount(e.kind);
++		bool blendable = e.haveKey && visible && e.visible && tag == e.tag;
++		bool changed = false;
++		for (int i = 0; i < n && blendable; ++i)
++		{
++			double delta = std::fabs(v[i] - e.cur[i]);
++			if (delta > (isZoom(e.kind, i) ? JUMP_ZOOM : JUMP_PIXELS))
++				blendable = false;
++			else if (delta != 0)
++				changed = true;
++		}
++
++		for (int i = 0; i < n; ++i)
++		{
++			e.prev[i] = blendable ? e.cur[i] : v[i];
++			e.cur[i] = v[i];
++		}
++		e.moving = blendable && changed;
++		e.haveKey = true;
++		e.tag = tag;
++		e.visible = visible;
++	}
++	lastAlpha = 1.0;
++}
++
++void reset()
++{
++	for (auto &it : entries)
++	{
++		it.second.haveKey = false;
++		it.second.moving = false;
++	}
++}
++
++void apply(double alpha)
++{
++	if (alpha < 0)
++		alpha = 0;
++	if (alpha > 1)
++		alpha = 1;
++
++	for (auto &it : entries)
++	{
++		Entry &e = it.second;
++		if (!e.moving)
++			continue;
++		Disposable *d = disposable(it.first, e.kind);
++		if (!d || d->isDisposed())
++		{
++			e.moving = false;
++			continue;
++		}
++
++		double v[MAX_VALUES];
++		blend(e, alpha, v);
++		write(it.first, e.kind, v, e.cur);
++		e.applied = true;
++	}
++	lastAlpha = alpha;
++}
++
++void restore()
++{
++	for (auto &it : entries)
++	{
++		Entry &e = it.second;
++		if (!e.applied)
++			continue;
++		e.applied = false;
++		Disposable *d = disposable(it.first, e.kind);
++		if (!d || d->isDisposed())
++			continue;
++
++		double v[MAX_VALUES];
++		blend(e, lastAlpha, v);
++		write(it.first, e.kind, e.cur, v);
++	}
++	lastAlpha = 1.0;
++}
++
++} // namespace FrameInterp
+--- a/src/display/frameinterp.h
++++ b/src/display/frameinterp.h
+@@ -0,0 +1,46 @@
++/*
++** frameinterp.h
++**
++** Frame interpolation (added by the rpgm-patcher): the game logic keeps
++** running at its frame rate (usually 60 Hz); on faster displays, the frames in
++** between show sprite, plane, viewport and tilemap positions blended between
++** the last two logic frames.
++**
++** This file is part of mkxp-z and is licensed under the GPL v2 or later.
++*/
++
++#ifndef FRAMEINTERP_H
++#define FRAMEINTERP_H
++
++class Sprite;
++class Plane;
++class Viewport;
++class Tilemap;
++class TilemapVX;
++
++namespace FrameInterp
++{
++	/* Objects register themselves on creation and leave on destruction */
++	void track(Sprite *s);
++	void track(Plane *p);
++	void track(Viewport *v);
++	void track(Tilemap *t);
++	void track(TilemapVX *t);
++	void untrack(const void *obj);
++
++	/* At every logic frame (Graphics.update): the state the game set up
++	 * becomes the newest key frame. */
++	void capture();
++
++	/* Forget earlier key frames (scene changes, freeze/transition, reset):
++	 * the next frames are shown as they are. */
++	void reset();
++
++	/* Set blended values for an in-between frame (0 = previous logic frame,
++	 * 1 = current), and put the real values back afterwards. Only between
++	 * capture() and the return to the game's scripts. */
++	void apply(double alpha);
++	void restore();
++}
++
++#endif // FRAMEINTERP_H
+--- a/src/display/graphics.cpp
++++ b/src/display/graphics.cpp
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "graphics.h"
++#include "frameinterp.h"
+ 
+ #include "alstream.h"
+ #include "audio.h"
+@@ -763,6 +764,8 @@
+     }
+     
+     void resetFrameAdjust() { adj.resetFlag = true; }
++
++    void sleepTicks(uint64_t ticks) { delayTicks(ticks); }
+     
+     /* If we're more than a full frame's worth
+      * of ticks behind the ideal timestep,
+@@ -1031,7 +1034,10 @@
+     
+ private:
+     template <typename... Args> void swapGLBufferImpl(const Vec2i &screenSize, TEXFBO &source, int scaleIsSpecial, Args... args) {
+-        fpsLimiter.delay();
++        /* In-between frames (frame interpolation) don't wait for the
++         * next logic frame and don't count as frames for the game */
++        if (!interpFrame)
++            fpsLimiter.delay();
+ 
+         GLMeta::blitBeginScreen(screenSize, scaleIsSpecial);
+         GLMeta::blitSource(source, scaleIsSpecial);
+@@ -1049,6 +1055,11 @@
+ 
+         GLMeta::blitEnd();
+ 
++        countPresentedFrame();
++
++        if (interpFrame)
++            return;
++
+         ++frameCount;
+         threadData->ethread->notifyFrame();
+     }
+@@ -1107,7 +1118,8 @@
+             int scaleIsSpecial = GLMeta::blitScaleIsSpecial(integerScaleBuffer, false, IntRect(0, 0, scSize.x, scSize.y), screen.getPP().frontBuffer(), IntRect(0, 0, scRes.x, scRes.y));
+ 
+             swapGLBuffer(winSize, screen.getPP().frontBuffer(), scRes, scaleIsSpecial, true);
+-            updateAvgFPS();
++            if (!interpFrame)
++                updateAvgFPS();
+             return;
+         }
+         
+@@ -1142,7 +1154,89 @@
+ 
+         swapGLBuffer(winSize, integerScaleActive ? integerScaleBuffer : screen.getPP().frontBuffer(), sourceSize, scaleIsSpecial);
+         
+-        updateAvgFPS();
++        if (!interpFrame)
++            updateAvgFPS();
++    }
++
++    /* Frame interpolation: on displays faster than the game's frame rate,
++     * fill the time until the next logic frame is due with frames whose
++     * positions are blended between the last two logic frames. */
++    bool interpFrame = false;
++    bool interpWasActive = false;
++
++    /* Frames sent to the display (logic and in-between frames), for the
++     * second FPS counter shown while frame interpolation is enabled */
++    double presentedStart = -1;
++    int presentedCount = 0;
++    double presentedRate = 0;
++
++    void countPresentedFrame() {
++        const double now = shState->runTime();
++        if (presentedStart < 0) {
++            presentedStart = now;
++            presentedCount = 0;
++            return;
++        }
++        ++presentedCount;
++        const double elapsed = now - presentedStart;
++        if (elapsed >= 0.5) {
++            presentedRate = presentedCount / elapsed;
++            presentedStart = now;
++            presentedCount = 0;
++        }
++    }
++
++    bool interpolationActive() const {
++        return threadData->config.frameInterpolation && !fpsLimiter.disabled
++            && threadData->refreshRate > frameRate + 5;
++    }
++
++    void captureInterpolation() {
++        bool active = interpolationActive();
++        if (active)
++            FrameInterp::capture();
++        else if (interpWasActive)
++            FrameInterp::reset();
++        interpWasActive = active;
++    }
++
++    void renderInterpolatedFrames() {
++        if (!interpWasActive)
++            return;
++
++        const int64_t period = (int64_t)(fpsLimiter.tickFreq / threadData->refreshRate);
++        const int64_t tpf = fpsLimiter.tpf;
++        const uint64_t start = fpsLimiter.lastTickCount;
++
++        for (int n = 0; n < 32; ++n) {
++            const uint64_t now = SDL_GetPerformanceCounter();
++            /* when the real frame is due (see FPSLimiter::delay) */
++            const int64_t untilDue = (int64_t)(start + tpf) - fpsLimiter.adj.idealDiff - (int64_t)now;
++            if (untilDue < period)
++                break;
++
++            /* the position at about the time this frame gets shown */
++            double alpha = (double)((int64_t)(now - start) + period) / (double)tpf;
++
++            FrameInterp::apply(alpha);
++            interpFrame = true;
++            try {
++                redrawScreen();
++            } catch (...) {
++                interpFrame = false;
++                FrameInterp::restore();
++                throw;
++            }
++            interpFrame = false;
++            FrameInterp::restore();
++
++            /* vsync paces the frames; without it, sleep for one refresh */
++            if (!threadData->config.vsync) {
++                const int64_t used = (int64_t)(SDL_GetPerformanceCounter() - now);
++                if (used < period)
++                    fpsLimiter.sleepTicks((uint64_t)(period - used));
++            }
++        }
+     }
+     
+     void checkSyncLock() {
+@@ -1241,8 +1335,12 @@
+         STEAMSHIM_pump();
+ #endif
+     
+-    if (p->frozen)
++    if (p->frozen) {
++        FrameInterp::reset();
+         return;
++    }
++    
++    p->captureInterpolation();
+     
+     if (p->fpsLimiter.frameSkipRequired()) {
+         if (p->useFrameSkip) {
+@@ -1259,11 +1357,13 @@
+     }
+     
+     p->checkResize();
++    p->renderInterpolatedFrames();
+     p->redrawScreen();
+ }
+ 
+ void Graphics::freeze() {
+     p->frozen = true;
++    FrameInterp::reset();
+     
+     p->checkShutDownReset();
+     p->checkResize();
+@@ -1380,7 +1480,10 @@
+     p->frozen = false;
+ }
+ 
+-void Graphics::frameReset() {p->fpsLimiter.resetFrameAdjust();}
++void Graphics::frameReset() {
++    p->fpsLimiter.resetFrameAdjust();
++    FrameInterp::reset();
++}
+ 
+ static void guardDisposed() {}
+ 
+@@ -1401,6 +1504,12 @@
+     //shState->input().recalcRepeat((unsigned int)p->frameRate);
+ }
+ 
++double Graphics::displayFrameRate() {
++    if (!p->threadData->config.frameInterpolation)
++        return -1;
++    return p->presentedRate;
++}
++
+ double Graphics::averageFrameRate() {
+     return p->averageFPS();
+ }
+@@ -1517,6 +1626,7 @@
+     
+     p->scRes = size;
+     p->scResLores = sizeLores;
++    FrameInterp::reset();
+     
+     p->screen.setResolution(width, height);
+     
+@@ -1619,6 +1729,7 @@
+     
+     /* Reset attributes (frame count not included) */
+     p->fpsLimiter.resetFrameAdjust();
++    FrameInterp::reset();
+     p->frozen = false;
+     p->screen.getPP().clearBuffers();
+     
+--- a/src/display/graphics.h
++++ b/src/display/graphics.h
+@@ -86,6 +86,9 @@
+     DECL_ATTR( LastMileScaling, bool )
+     DECL_ATTR( Threadsafe, bool )
+     double averageFrameRate();
++    /* Frames per second sent to the display (with frame interpolation's
++     * in-between frames), or -1 while frame interpolation is off */
++    double displayFrameRate();
+ 
+ 	/* <internal> */
+ 	Scene *getScreen() const;
+--- a/src/display/plane.cpp
++++ b/src/display/plane.cpp
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "plane.h"
++#include "frameinterp.h"
+ 
+ #include "sharedstate.h"
+ #include "bitmap.h"
+@@ -235,6 +236,7 @@
+ 	p = new PlanePrivate();
+ 
+ 	onGeometryChange(scene->getGeometry());
++	FrameInterp::track(this);
+ }
+ 
+ DEF_ATTR_RD_SIMPLE(Plane, Bitmap,    Bitmap*, p->realBitmap)
+@@ -250,6 +252,7 @@
+ 
+ Plane::~Plane()
+ {
++	FrameInterp::untrack(this);
+ 	dispose();
+ }
+ 
+--- a/src/display/sprite.cpp
++++ b/src/display/sprite.cpp
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "sprite.h"
++#include "frameinterp.h"
+ 
+ #include "sharedstate.h"
+ #include "bitmap.h"
+@@ -647,13 +648,26 @@
+     p->spriteVisible = &visible;
+     p->viewport = viewport;
+     onGeometryChange(scene->getGeometry());
++    FrameInterp::track(this);
+ }
+ 
+ Sprite::~Sprite()
+ {
++    FrameInterp::untrack(this);
+     dispose();
+ }
+ 
++void Sprite::setInterpPosition(int x, int y)
++{
++    if (isDisposed())
++        return;
++
++    p->trans.setPosition(Vec2(x, y));
++
++    if (p->wave.active)
++        p->wave.dirty = true;
++}
++
+ DEF_ATTR_RD_SIMPLE(Sprite, Bitmap,     Bitmap*, p->realBitmap)
+ DEF_ATTR_RD_SIMPLE(Sprite, X,          int,     p->trans.getPosition().x)
+ DEF_ATTR_RD_SIMPLE(Sprite, Y,          int,     p->trans.getPosition().y)
+--- a/src/display/sprite.h
++++ b/src/display/sprite.h
+@@ -78,6 +78,10 @@
+ 
+ 	void initDynAttribs();
+ 
++	/* Frame interpolation: set the drawing position without the side
++	 * effects of setY (RGSS2+ re-sorting by Y) */
++	void setInterpPosition(int x, int y);
++
+ private:
+ 	SpritePrivate *p;
+ 
+--- a/src/display/tilemap.cpp
++++ b/src/display/tilemap.cpp
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "tilemap.h"
++#include "frameinterp.h"
+ 
+ #include "viewport.h"
+ #include "bitmap.h"
+@@ -1241,10 +1242,12 @@
+ {
+ 	p = new TilemapPrivate(viewport);
+ 	atProxy.p = p;
++	FrameInterp::track(this);
+ }
+ 
+ Tilemap::~Tilemap()
+ {
++	FrameInterp::untrack(this);
+ 	dispose();
+ }
+ 
+--- a/src/display/tilemapvx.cpp
++++ b/src/display/tilemapvx.cpp
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "tilemapvx.h"
++#include "frameinterp.h"
+ 
+ #include "util/debugwriter.h"
+ 
+@@ -461,10 +462,12 @@
+ {
+ 	p = new TilemapVXPrivate(viewport);
+ 	bmProxy.p = p;
++	FrameInterp::track(this);
+ }
+ 
+ TilemapVX::~TilemapVX()
+ {
++	FrameInterp::untrack(this);
+ 	dispose();
+ }
+ 
+--- a/src/display/viewport.cpp
++++ b/src/display/viewport.cpp
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "viewport.h"
++#include "frameinterp.h"
+ 
+ #include "sharedstate.h"
+ #include "etc.h"
+@@ -130,10 +131,13 @@
+ 
+ 	/* Handle parent geometry */
+ 	onGeometryChange(scene->getGeometry());
++
++	FrameInterp::track(this);
+ }
+ 
+ Viewport::~Viewport()
+ {
++	FrameInterp::untrack(this);
+ 	dispose();
+ }
+ 
+--- a/src/eventthread.cpp
++++ b/src/eventthread.cpp
+@@ -570,14 +570,29 @@
+                         break;
+                         
+                     case UPDATE_FPS :
++                    {
++                        /* data1: frames sent to the display, -1 without
++                         * frame interpolation */
++                        const int displayFPS = (int)reinterpret_cast<intptr_t>(event.user.data1);
++                        
+                         if (rtData.config.printFPS)
+-                            Debug() << "FPS:" << event.user.code;
++                        {
++                            if (displayFPS >= 0)
++                                Debug() << "FPS:" << event.user.code << "display FPS:" << displayFPS;
++                            else
++                                Debug() << "FPS:" << event.user.code;
++                        }
+                         
+                         if (!fps.sendUpdates)
+                             break;
+                         
+-                        snprintf(buffer, sizeof(buffer), "%s - %d FPS",
+-                                 rtData.config.windowTitle.c_str(), event.user.code);
++                        if (displayFPS >= 0)
++                            snprintf(buffer, sizeof(buffer), "%s - %d FPS - %d FPS on display",
++                                     rtData.config.windowTitle.c_str(), event.user.code, displayFPS);
++                        else
++                            snprintf(buffer, sizeof(buffer), "%s - %d FPS",
++                                     rtData.config.windowTitle.c_str(), event.user.code);
++                    }
+                         
+                         /* Updating the window title in fullscreen
+                          * mode seems to cause flickering */
+@@ -843,6 +858,10 @@
+ #else
+     event.user.code = round(shState->graphics().averageFrameRate());
+ #endif
++    {
++        double displayFPS = shState->graphics().displayFrameRate();
++        event.user.data1 = reinterpret_cast<void*>((intptr_t)(displayFPS < 0 ? -1 : lround(displayFPS)));
++    }
+     event.user.type = usrIdStart + UPDATE_FPS;
+     SDL_PushEvent(&event);
+ }
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -678,6 +678,12 @@
+     if (!mode.refresh_rate)
+       conf.syncToRefreshrate = false;
+ 
++    /* Frame interpolation paces its in-between frames with vsync
++     * (when the display is faster than the game: RGSS1 runs at 40 fps) */
++    if (conf.frameInterpolation && !conf.syncToRefreshrate &&
++        mode.refresh_rate > (conf.rgssVersion == 1 ? 45 : 65))
++      conf.vsync = true;
++
+     EventThread eventThread;
+ 
+ #ifndef MKXPZ_INIT_GL_LATER
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -1247,6 +1247,7 @@
+     'display/autotilesvx.cpp',
+     'display/bitmap.cpp',
+     'display/font.cpp',
++    'display/frameinterp.cpp',
+     'display/graphics.cpp',
+     'display/plane.cpp',
+     'display/sprite.cpp',

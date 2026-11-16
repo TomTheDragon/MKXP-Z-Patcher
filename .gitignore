@@ -1,0 +1,19 @@
+# Build output: patcher programs, built engines, the mkxp-z source with its
+# build folders, downloaded toolchains (made by build-patcher.sh / the patcher)
+/dist/
+target/
+
+# Games used for testing (they belong to their authors; never commit them)
+/examples/
+
+# Made by the patcher
+*.AppImage
+*.AppDir/
+
+# Editors and systems
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

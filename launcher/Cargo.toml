@@ -1,0 +1,16 @@
+[package]
+name = "mkxpz-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny Windows launcher: starts mkxp-z\\windows\\mkxp-z.*.exe next to it"
+license = "GPL-3.0-or-later"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

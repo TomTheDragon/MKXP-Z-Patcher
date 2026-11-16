@@ -1,0 +1,48 @@
+[package]
+name = "mkxpz-patcher"
+version = "0.3.0"
+edition = "2021"
+description = "Run RPG Maker XP/VX/VX Ace games on the mkxp-z engine (Linux and Windows)"
+license = "GPL-3.0-or-later"
+default-run = "mkxpz-patcher"
+
+[lib]
+name = "mkxpz_patcher"
+path = "src/lib.rs"
+
+# The patcher (window + command line): one file per platform.
+[[bin]]
+name = "mkxpz-patcher"
+path = "src/main.rs"
+
+[features]
+# Linux: the window and most helpers come from system libraries through GTK/GLib
+# (folder dialog, clipboard, zlib via GIO, text encodings via GLib/iconv).
+# Without it (--no-default-features): command line only, zlib built in and
+# text encodings from the C library's iconv, e.g. for static musl builds that
+# run on any Linux (the ARM patchers).
+default = ["gtk"]
+gtk = ["dep:gtk"]
+
+[target.'cfg(not(windows))'.dependencies]
+gtk = { version = "0.18", optional = true }
+
+# zlib where there's no system one to use: Windows, and builds without GTK.
+[dependencies]
+miniz_oxide = "0.8"
+
+# Windows: native Win32 controls and Windows' own code-page conversion. No DLLs needed.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi", "Win32_System_Com",
+    "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

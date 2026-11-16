@@ -1,0 +1,19 @@
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -649,9 +649,14 @@
+ #endif
+ 
+     /* OSX and Windows have their own native ways of
+-     * dealing with icons; don't interfere with them */
+-#ifdef __LINUX__
++     * dealing with icons; don't interfere with them,
++     * unless the config names an icon (on Windows, the
++     * engine's .exe icon would show otherwise) */
++#if defined(__LINUX__)
+     setupWindowIcon(conf, win);
++#elif defined(_WIN32)
++    if (!conf.iconPath.empty())
++        setupWindowIcon(conf, win);
+ #else
+     (void)setupWindowIcon;
+ #endif

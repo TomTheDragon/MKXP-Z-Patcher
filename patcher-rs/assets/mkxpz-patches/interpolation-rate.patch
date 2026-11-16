@@ -1,0 +1,604 @@
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -69,6 +69,12 @@
+         if (it.second.is_object() && destVec[it.first].is_object())
+             continue;
+         
++        /* frameInterpolation was on/off before it took a rate */
++        if (it.first == "frameInterpolation" && it.second.is_boolean() && destVec[it.first].is_number()) {
++            destVec[it.first] = json::value(it.second.as_boolean() ? (int)Config::FRAME_INTERP_MAX : 0);
++            continue;
++        }
++
+         if ((it.second.is_array() && destVec[it.first].is_array())    ||
+             (it.second.is_number() && destVec[it.first].is_number())  ||
+             (it.second.is_string() && destVec[it.first].is_string())  ||
+@@ -154,7 +160,7 @@
+         {"fixedFramerate", 0},
+         {"frameSkip", false},
+         {"syncToRefreshrate", false},
+-        {"frameInterpolation", false},
++        {"frameInterpolation", 0},
+         {"musicVolume", 100},
+         {"soundVolume", 100},
+         {"shader", ""},
+@@ -297,7 +303,8 @@
+     SET_OPT(fixedFramerate, integer);
+     SET_OPT(frameSkip, boolean);
+     SET_OPT(syncToRefreshrate, boolean);
+-    SET_OPT(frameInterpolation, boolean);
++    SET_OPT(frameInterpolation, integer);
++    frameInterpolation = clamp(frameInterpolation, 0, (int)FRAME_INTERP_UNLIMITED);
+     SET_OPT(musicVolume, integer);
+     SET_OPT(soundVolume, integer);
+     musicVolume = clamp(musicVolume, 0, 100);
+@@ -368,6 +375,14 @@
+     raw = optsJ;
+ }
+ 
++int Config::currentRefreshRate(SDL_Window *win) {
++    int index = win ? SDL_GetWindowDisplayIndex(win) : 0;
++    SDL_DisplayMode mode;
++    if (index < 0 || SDL_GetCurrentDisplayMode(index, &mode) != 0)
++        return 0;
++    return mode.refresh_rate > 0 ? mode.refresh_rate : 0;
++}
++
+ bool Config::storeUserSettings() const {
+     if (userConfPath.empty())
+         return false;
+--- a/src/config.h
++++ b/src/config.h
+@@ -28,6 +28,8 @@
+ #include <string>
+ #include <vector>
+ 
++struct SDL_Window;
++
+ struct Config {
+     // Used for sending the JSON data to Ruby as System::CONFIG
+     json5pp::value raw;
+@@ -65,7 +67,17 @@
+     int fixedFramerate;
+     bool frameSkip;
+     bool syncToRefreshrate;
+-    bool frameInterpolation;
++    /* Frame interpolation: 0 off, else the rate (FPS) to show frames at;
++     * values at or above the display's refresh rate (FRAME_INTERP_MAX)
++     * mean the display's rate, FRAME_INTERP_UNLIMITED as many as the
++     * computer manages (no vsync for them) */
++    int frameInterpolation;
++    enum { FRAME_INTERP_MAX = 1000, FRAME_INTERP_UNLIMITED = 1001 };
++
++    /* The refresh rate of the display the window is on, in its current
++     * mode (rtData.refreshRate is only the first mode of display 0); 0 if
++     * unknown. Main thread or render thread. */
++    static int currentRefreshRate(SDL_Window *win);
+     
+     /* The player's music (BGM, ME) and sound (BGS, SE) levels, 0-100 */
+     int musicVolume;
+--- a/src/display/graphics.cpp
++++ b/src/display/graphics.cpp
+@@ -1211,9 +1211,44 @@
+         }
+     }
+ 
+-    bool interpolationActive() const {
+-        return threadData->config.frameInterpolation && !fpsLimiter.disabled
+-            && threadData->refreshRate > frameRate + 5;
++    /* The refresh rate of the display the window is on, checked once a
++     * second (the window may move to another display) */
++    int displayRate = 0;
++    uint64_t displayRateChecked = 0;
++
++    int refreshRate() {
++        const uint64_t now = SDL_GetPerformanceCounter();
++        if (!displayRate || now - displayRateChecked > fpsLimiter.tickFreq) {
++            displayRateChecked = now;
++            int r = Config::currentRefreshRate(threadData->window);
++            displayRate = r > 0 ? r : (threadData->refreshRate > 0 ? threadData->refreshRate : 60);
++        }
++        return displayRate;
++    }
++
++    bool interpolationUnlimited() const {
++        return threadData->config.frameInterpolation >= Config::FRAME_INTERP_UNLIMITED;
++    }
++
++    /* The rate frames are shown at with frame interpolation (0: off): the
++     * chosen one, at most the display's refresh rate (unlimited: as fast as
++     * possible, see renderInterpolatedFrames) */
++    double interpolationRate() {
++        const int want = threadData->config.frameInterpolation;
++        if (want <= 0)
++            return 0;
++        if (interpolationUnlimited())
++            return 1e6;
++        return std::min((double)want, (double)refreshRate());
++    }
++
++    /* at the display's full rate, vsync paces the frames */
++    bool interpolationAtDisplayRate() {
++        return !interpolationUnlimited() && threadData->config.frameInterpolation >= refreshRate();
++    }
++
++    bool interpolationActive() {
++        return interpolationRate() > frameRate + 0.5 && !fpsLimiter.disabled;
+     }
+ 
+     /* vsync: on when the player wants it ("Reduce screen flickering"), and
+@@ -1223,7 +1258,10 @@
+     
+     void updateSwapInterval() {
+         const Config &c = threadData->config;
+-        const int want = (c.vsync || c.syncToRefreshrate || interpolationActive()) ? 1 : 0;
++        const bool interp = interpolationActive();
++        /* unlimited frame interpolation: no frame limit at all */
++        const int want = (interp && interpolationUnlimited()) ? 0
++            : (c.vsync || c.syncToRefreshrate || (interp && interpolationAtDisplayRate())) ? 1 : 0;
+         if (want == swapInterval)
+             return;
+         SDL_GL_SetSwapInterval(want);
+@@ -1269,42 +1307,69 @@
+         interpWasActive = active;
+     }
+ 
++    /* Draw one in-between frame at position alpha (0: last game frame,
++     * 1: the next one) */
++    void drawInterpolatedFrame(double alpha) {
++        FrameInterp::apply(std::min(std::max(alpha, 0.0), 1.0));
++        interpFrame = true;
++        try {
++            redrawScreen();
++        } catch (...) {
++            interpFrame = false;
++            FrameInterp::restore();
++            throw;
++        }
++        interpFrame = false;
++        FrameInterp::restore();
++    }
++
+     void renderInterpolatedFrames() {
+         if (!interpWasActive)
+             return;
+ 
+-        const int64_t period = (int64_t)(fpsLimiter.tickFreq / threadData->refreshRate);
+         const int64_t tpf = fpsLimiter.tpf;
+         const uint64_t start = fpsLimiter.lastTickCount;
+-
+-        for (int n = 0; n < 32; ++n) {
+-            const uint64_t now = SDL_GetPerformanceCounter();
+-            /* when the real frame is due (see FPSLimiter::delay) */
+-            const int64_t untilDue = (int64_t)(start + tpf) - fpsLimiter.adj.idealDiff - (int64_t)now;
+-            if (untilDue < period)
+-                break;
+-
+-            /* the position at about the time this frame gets shown */
+-            double alpha = (double)((int64_t)(now - start) + period) / (double)tpf;
+-
+-            FrameInterp::apply(alpha);
+-            interpFrame = true;
+-            try {
+-                redrawScreen();
+-            } catch (...) {
+-                interpFrame = false;
+-                FrameInterp::restore();
+-                throw;
++        /* when the next game frame is due (see FPSLimiter::delay) */
++        const int64_t due = (int64_t)(start + tpf) - fpsLimiter.adj.idealDiff;
++        const int64_t refresh = (int64_t)(fpsLimiter.tickFreq / refreshRate());
++        /* with vsync a frame shows up at the next refresh after drawing it */
++        const int64_t shownAfter = swapInterval == 1 ? refresh : 0;
++
++        if (interpolationUnlimited()) {
++            /* as many frames as fit before the game frame is due */
++            int64_t cost = refresh / 4;
++            for (int n = 0; n < 4000; ++n) {
++                const int64_t now = (int64_t)SDL_GetPerformanceCounter();
++                if (due - now < cost)
++                    break;
++                drawInterpolatedFrame((double)(now - (int64_t)start + cost) / (double)tpf);
++                cost = std::max<int64_t>((int64_t)SDL_GetPerformanceCounter() - now, 1);
+             }
+-            interpFrame = false;
+-            FrameInterp::restore();
++            return;
++        }
+ 
+-            /* vsync paces the frames; without it, sleep for one refresh */
+-            if (swapInterval != 1) {
+-                const int64_t used = (int64_t)(SDL_GetPerformanceCounter() - now);
+-                if (used < period)
+-                    fpsLimiter.sleepTicks((uint64_t)(period - used));
+-            }
++        /* One continuous grid of slots at the chosen rate (not restarted
++         * with every game frame, or only whole multiples of the game's rate
++         * would come out): each game frame takes the slot nearest to it, the
++         * in-between frames the slots between. The rate holds whether or not
++         * vsync waits for the display; a frame that would come too late
++         * skips its slot instead of being rushed. */
++        const int64_t period = std::max<int64_t>((int64_t)(fpsLimiter.tickFreq / interpolationRate()), 1);
++        /* first slot not taken by the last game frame (shown at about `start`) */
++        int64_t slot = ((int64_t)start + period / 2) / period * period + period;
++        for (int k = 0; k < 64; ++k, slot += period) {
++            /* the next game frame takes the slot nearest to `due` */
++            if (slot > due - period / 2)
++                break;
++            int64_t now = (int64_t)SDL_GetPerformanceCounter();
++            if (now > slot + period / 2)
++                continue;
++            /* vsync waits for the display anyway: wake up a little early, so
++             * that no refresh is missed */
++            const int64_t wake = slot - (swapInterval == 1 ? period / 4 : 0);
++            if (now < wake)
++                fpsLimiter.sleepTicks((uint64_t)(wake - now));
++            drawInterpolatedFrame((double)(slot - (int64_t)start + shownAfter) / (double)tpf);
+         }
+     }
+     
+@@ -1577,7 +1642,7 @@
+ }
+ 
+ double Graphics::displayFrameRate() {
+-    if (!p->threadData->config.frameInterpolation)
++    if (p->threadData->config.frameInterpolation <= 0)
+         return -1;
+     return p->presentedRate;
+ }
+--- a/src/eventthread.cpp
++++ b/src/eventthread.cpp
+@@ -587,7 +587,7 @@
+                             break;
+                         
+                         if (displayFPS >= 0)
+-                            snprintf(buffer, sizeof(buffer), "%s - %d FPS - %d FPS on display",
++                            snprintf(buffer, sizeof(buffer), "%s - %d/%d FPS",
+                                      rtData.config.windowTitle.c_str(), event.user.code, displayFPS);
+                         else
+                             snprintf(buffer, sizeof(buffer), "%s - %d FPS",
+--- a/src/settingsmenu.cpp
++++ b/src/settingsmenu.cpp
+@@ -44,7 +44,7 @@
+ #include <assert.h>
+ 
+ /* Key bindings on top, the player's options below them */
+-const int optionsH = 144;
++const int optionsH = 182;
+ const Vec2i winSize(840, 356 + optionsH);
+ 
+ const uint8_t cBgNorm = 50;
+@@ -255,22 +255,48 @@
+ 	void clickHandler(int, int, uint8_t button);
+ };
+ 
+-/* A level from 0 to 100, set by clicking or dragging */
++/* A value from lo to hi, set by clicking or dragging: a level in percent,
++ * or the frame interpolation rate (lo: off, then rates up to the display's,
++ * hi: unlimited) */
+ struct Slider : Widget
+ {
++	enum Format { Percent, InterpFPS };
++
+ 	const char *str;
+ 	int *value;
+-
+-	Slider(SMP *p, const IntRect &rect, const char *str, int *value)
+-	    : Widget(p, rect), str(str), value(value)
++	int lo, hi;
++	Format format;
++	/* InterpFPS: *value is an index into these rates (first: off, last:
++	 * unlimited); a tick under the track marks each multiple of markEvery */
++	const std::vector<int> *stops;
++	int markEvery;
++
++	Slider(SMP *p, const IntRect &rect, const char *str, int *value,
++	       int lo = 0, int hi = 100, Format format = Percent,
++	       const std::vector<int> *stops = 0, int markEvery = 0)
++	    : Widget(p, rect), str(str), value(value), lo(lo), hi(hi), format(format),
++	      stops(stops), markEvery(markEvery)
+ 	{}
+ 
+ 	/* x in window coordinates (while dragging) */
+ 	void dragTo(int x);
++	/* one step up or down (mouse wheel) */
++	void nudge(int steps);
+ 
+ protected:
+ 	int trackX() const { return 160; }
+-	int trackW() const { return rect.w - trackX() - 56; }
++	int valueW() const { return format == Percent ? 46 : 104; }
++	/* the line of the track and texts (the FPS slider has its marks below) */
++	int midY() const { return (format == InterpFPS ? rect.h - MARKS_H : rect.h) / 2; }
++
++public:
++	enum { MARKS_H = 12 };
++
++protected:
++	int trackW() const { return rect.w - trackX() - valueW() - 10; }
++	/* the handle's position on the track, 0 to trackW() */
++	int handleX() const { return posX(*value); }
++	int posX(int v) const { return hi > lo ? trackW() * (v - lo) / (hi - lo) : 0; }
+ 	void setFromX(int x);
+ 
+ 	void drawHandler(SDL_Surface *surf);
+@@ -327,6 +353,8 @@
+ 	uint32_t winID;
+ 
+ 	TTF_Font *font;
++	/* for the "2x", "3x" ... marks under the frame interpolation slider */
++	TTF_Font *smallFont;
+ 	SDL_PixelFormat *rgb;
+ 
+ 	RGSSThreadData &rtData;
+@@ -349,7 +377,15 @@
+ 	struct
+ 	{
+ 		bool vsync;
+-		bool frameInterpolation;
++		/* frame interpolation slider: an index into interpStops, which are
++		 * the game's own rate (= off), then 5 Hz steps up to the display's
++		 * refresh rate (interpMax, always included), then unlimited */
++		int interpolation;
++		/* the position it was opened at: an untouched slider keeps the saved
++		 * value (e.g. 144 while the window is on a 60 Hz display) */
++		int interpolationStart;
++		int interpOff, interpMax;
++		std::vector<int> interpStops;
+ 		bool fullscreen;
+ 		int musicVolume;
+ 		int soundVolume;
+@@ -514,6 +550,20 @@
+ 		SDL_FreeSurface(txt);
+ 	}
+ 
++	/* small text centered on (cx, cy) in widget coordinates */
++	void drawSmallText(SDL_Surface *surf, const char *str, int cx, int cy)
++	{
++		if (!smallFont)
++			return;
++		SDL_Color c = { 230, 230, 230, 255 };
++		SDL_Surface *txt = TTF_RenderUTF8_Blended(smallFont, str, c);
++		if (!txt)
++			return;
++		SDL_Rect dst = { drawOff.x + cx - txt->w / 2, drawOff.y + cy - txt->h / 2, txt->w, txt->h };
++		SDL_BlitSurface(txt, 0, surf, &dst);
++		SDL_FreeSurface(txt);
++	}
++
+ 	void drawText(SDL_Surface *surf, const char *str,
+ 	              int x, int y, int alignW,
+ 	              Justification just, bool bold = false)
+@@ -953,11 +1003,60 @@
+ 		shState->audio().setUserVolumes(opt.musicVolume, opt.soundVolume);
+ 	}
+ 
++	enum { INTERP_STEP = 1 };
++
++	void makeInterpolationStops()
++	{
++		std::vector<int> &s = opt.interpStops;
++		s.clear();
++		s.push_back(opt.interpOff);
++		for (int r = opt.interpOff + INTERP_STEP; r < opt.interpMax; r += INTERP_STEP)
++			s.push_back(r);
++		if (opt.interpMax > opt.interpOff)
++			s.push_back(opt.interpMax);
++		s.push_back(Config::FRAME_INTERP_UNLIMITED);
++	}
++
++	/* config value <-> slider position (index into interpStops) */
++	int interpolationToSlider(int v) const
++	{
++		const std::vector<int> &s = opt.interpStops;
++		const int last = (int) s.size() - 1;
++		if (v <= 0)
++			return 0;
++		if (v >= Config::FRAME_INTERP_UNLIMITED)
++			return last;
++		if (v >= opt.interpMax)
++			return std::max(last - 1, 0);
++		/* the nearest step */
++		int best = std::min(1, last);
++		for (int i = 1; i < last; ++i)
++			if (std::abs(s[i] - v) < std::abs(s[best] - v))
++				best = i;
++		return best;
++	}
++
++	int interpolationFromSlider(int pos) const
++	{
++		const std::vector<int> &s = opt.interpStops;
++		const int last = (int) s.size() - 1;
++		if (pos <= 0)
++			return 0;
++		if (pos >= last)
++			return Config::FRAME_INTERP_UNLIMITED;
++		/* the display's rate follows the display, also a different one later */
++		if (s[pos] >= opt.interpMax)
++			return Config::FRAME_INTERP_MAX;
++		return s[pos];
++	}
++
+ 	void storeOptions()
+ 	{
+ 		Config &c = rtData.config;
++		const int interpolation = opt.interpolation == opt.interpolationStart
++		    ? c.frameInterpolation : interpolationFromSlider(opt.interpolation);
+ 		const bool changed = c.vsync != opt.vsync
+-		    || c.frameInterpolation != opt.frameInterpolation
++		    || c.frameInterpolation != interpolation
+ 		    || c.fullscreen != opt.fullscreen
+ 		    || c.musicVolume != opt.musicVolume
+ 		    || c.soundVolume != opt.soundVolume
+@@ -966,7 +1065,7 @@
+ 		/* vsync and frame interpolation are picked up by the next
+ 		 * Graphics.update, "fullscreen" is the mode at startup */
+ 		c.vsync = opt.vsync;
+-		c.frameInterpolation = opt.frameInterpolation;
++		c.frameInterpolation = interpolation;
+ 		c.fullscreen = opt.fullscreen;
+ 		c.musicVolume = opt.musicVolume;
+ 		c.soundVolume = opt.soundVolume;
+@@ -1265,8 +1364,8 @@
+ 
+ void Slider::setFromX(int x)
+ {
+-	int v = (int) std::lround((x - trackX()) * 100.0 / trackW());
+-	v = clamp(v, 0, 100);
++	int v = lo + (int) std::lround((x - trackX()) * (double)(hi - lo) / trackW());
++	v = clamp(v, lo, hi);
+ 
+ 	if (v == *value)
+ 		return;
+@@ -1276,6 +1375,16 @@
+ 	p->redraw();
+ }
+ 
++void Slider::nudge(int steps)
++{
++	const int v = clamp(*value + steps, lo, hi);
++	if (v == *value)
++		return;
++	*value = v;
++	p->onVolumeChanged();
++	p->redraw();
++}
++
+ void Slider::dragTo(int x)
+ {
+ 	setFromX(x - rect.x);
+@@ -1292,7 +1401,7 @@
+ 
+ void Slider::drawHandler(SDL_Surface *surf)
+ {
+-	const int midY = rect.h / 2;
++	const int midY = this->midY();
+ 	const int tx = trackX();
+ 	const int tw = trackW();
+ 
+@@ -1300,16 +1409,40 @@
+ 
+ 	/* track, filled up to the level */
+ 	p->fillRect(surf, cBgDark, tx, midY - 3, tw, 6);
+-	p->fillRect(surf, tx, midY - 3, tw * *value / 100, 6, 120, 200, 120);
++	p->fillRect(surf, tx, midY - 3, handleX(), 6, 120, 200, 120);
++
++	/* marks at the multiples of the game's frame rate (120 = 2x, 180 = 3x
++	 * ...): there every in-between frame gets the same time */
++	if (stops && markEvery > 0)
++		for (int i = 1; i + 1 < (int) stops->size(); ++i)
++		{
++			const int r = (*stops)[i];
++			if (r < 2 * markEvery || r % markEvery != 0)
++				continue;
++			const int mx = tx + posX(i);
++			p->fillRect(surf, 230, mx - 1, midY - 7, 2, 14);
++			char mark[8];
++			snprintf(mark, sizeof(mark), "%dx", r / markEvery);
++			p->drawSmallText(surf, mark, mx, midY + 7 + MARKS_H / 2 + 1);
++		}
+ 
+ 	/* handle */
+-	const int hx = tx + tw * *value / 100;
++	const int hx = tx + handleX();
+ 	p->fillRect(surf, 200, hx - 4, midY - 9, 8, 18);
+ 	p->strokeRectInner(surf, cLine, hx - 4, midY - 9, 8, 18, 1);
+ 
+-	char buf[16];
+-	snprintf(buf, sizeof(buf), "%d%%", *value);
+-	p->drawText(surf, buf, tx + tw + 10, midY, 46, Left);
++	char buf[24];
++	if (format == Percent)
++		snprintf(buf, sizeof(buf), "%d%%", *value);
++	else if (*value <= lo)
++		snprintf(buf, sizeof(buf), "Off");
++	else if (*value >= hi)
++		snprintf(buf, sizeof(buf), "Unlimited");
++	else if (stops && markEvery > 0 && (*stops)[*value] % markEvery == 0)
++		snprintf(buf, sizeof(buf), "%d FPS (%dx)", (*stops)[*value], (*stops)[*value] / markEvery);
++	else
++		snprintf(buf, sizeof(buf), "%d FPS", stops ? (*stops)[*value] : *value);
++	p->drawText(surf, buf, tx + tw + 10, midY, valueW(), Left);
+ }
+ 
+ void ShaderField::drawHandler(SDL_Surface *surf)
+@@ -1391,6 +1524,7 @@
+ 	p->winID = SDL_GetWindowID(p->window);
+ 
+ 	p->font = SharedFontState::openBundled(fontSize);
++	p->smallFont = SharedFontState::openBundled(11);
+ 
+ 	p->rgb = p->winSurf->format;
+ 
+@@ -1449,7 +1583,16 @@
+ 	/* Options */
+ 	const Config &conf = rtData.config;
+ 	p->opt.vsync = conf.vsync;
+-	p->opt.frameInterpolation = conf.frameInterpolation;
++	/* off at the game's own frame rate (RGSS1: 40, else 60) */
++	p->opt.interpOff = conf.rgssVersion == 1 ? 40 : 60;
++	/* the display the game's window is on, in its current mode */
++	int refresh = Config::currentRefreshRate(rtData.window);
++	if (refresh <= 0)
++		refresh = rtData.refreshRate;
++	p->opt.interpMax = std::max(refresh, p->opt.interpOff);
++	p->makeInterpolationStops();
++	p->opt.interpolation = p->interpolationToSlider(conf.frameInterpolation);
++	p->opt.interpolationStart = p->opt.interpolation;
+ 	p->opt.fullscreen = conf.fullscreen;
+ 	p->opt.musicVolume = conf.musicVolume;
+ 	p->opt.soundVolume = conf.soundVolume;
+@@ -1469,8 +1612,6 @@
+ 	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20, colW - 24, rowH),
+ 	                                 "Reduce screen flickering (vsync)", &p->opt.vsync));
+ 	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20 + rowH, colW - 24, rowH),
+-	                                 "Smooth movement (frame interpolation)", &p->opt.frameInterpolation));
+-	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20 + rowH*2, colW - 24, rowH),
+ 	                                 "Start in fullscreen", &p->opt.fullscreen));
+ 	for (size_t i = 0; i < p->checkBoxes.size(); ++i)
+ 		p->widgets.push_back(&p->checkBoxes[i]);
+@@ -1479,6 +1620,13 @@
+ 	                            "Music (BGM, ME)", &p->opt.musicVolume));
+ 	p->sliders.push_back(Slider(p, IntRect(colW + 12, optY + 20 + rowH, colW - 28, rowH),
+ 	                            "Sounds (BGS, SE)", &p->opt.soundVolume));
++	/* frame interpolation: off, or in-between frames up to this rate; ticks
++	 * at the multiples of the game's rate (even frame pacing) */
++	/* a row of its own: one step per FPS needs room (mouse wheel: 1 FPS) */
++	p->sliders.push_back(Slider(p, IntRect(12, optY + 20 + rowH*3, winSize.x - 28, rowH + Slider::MARKS_H),
++	                            "Smooth movement", &p->opt.interpolation,
++	                            0, (int) p->opt.interpStops.size() - 1, Slider::InterpFPS,
++	                            &p->opt.interpStops, p->opt.interpOff));
+ 	for (size_t i = 0; i < p->sliders.size(); ++i)
+ 		p->widgets.push_back(&p->sliders[i]);
+ 
+@@ -1486,7 +1634,7 @@
+ 	                       "Alt+Enter switches fullscreen right away", 170, 170, 170);
+ 	p->widgets.push_back(&p->optionsNote);
+ 
+-	p->shaderFields.push_back(ShaderField(p, IntRect(12, optY + 20 + rowH*3 + 2, winSize.x - 28, rowH)));
++	p->shaderFields.push_back(ShaderField(p, IntRect(12, optY + 20 + rowH*4 + Slider::MARKS_H + 2, winSize.x - 28, rowH)));
+ 	p->widgets.push_back(&p->shaderFields[0]);
+ 
+ 	p->hovered = 0;
+@@ -1501,6 +1649,8 @@
+ SettingsMenu::~SettingsMenu()
+ {
+ 	TTF_CloseFont(p->font);
++	if (p->smallFont)
++		TTF_CloseFont(p->smallFont);
+ 	SDL_DestroyWindow(p->window);
+ 
+ 	delete p;
+@@ -1584,6 +1734,11 @@
+ 	case SDL_MOUSEWHEEL:
+ 		if (p->state == ChoosingShader)
+ 			p->onShaderListWheel(event.wheel.y);
++		else
++			/* fine adjustment of the slider under the mouse */
++			for (size_t i = 0; i < p->sliders.size(); ++i)
++				if (p->hovered == &p->sliders[i] && event.wheel.y != 0)
++					p->sliders[i].nudge(event.wheel.y > 0 ? 1 : -1);
+ 		return true;
+ 
+ 	case SDL_KEYDOWN:

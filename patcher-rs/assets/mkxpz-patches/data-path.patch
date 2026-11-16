@@ -1,0 +1,147 @@
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -25,6 +25,14 @@
+ 
+ #include "system/system.h"
+ 
++#ifdef MKXPZ_EXP_FS
++#include <experimental/filesystem>
++namespace cfs = std::experimental::filesystem;
++#else
++#include "ghc/filesystem.hpp"
++namespace cfs = ghc::filesystem;
++#endif
++
+ 
+ namespace json = json5pp;
+ 
+@@ -182,6 +190,7 @@
+         {"allowSymlinks", true},
+         {"dataPathOrg", ""},
+         {"dataPathApp", ""},
++        {"dataPath", ""},
+         {"iconPath", ""},
+         {"execName", "Game"},
+         {"midiSoundFont", ""},
+@@ -252,6 +261,7 @@
+     SET_STRINGOPT(gameFolder, gameFolder);
+     SET_STRINGOPT(dataPathOrg, dataPathOrg);
+     SET_STRINGOPT(dataPathApp, dataPathApp);
++    SET_STRINGOPT(dataPath, dataPath);
+     SET_STRINGOPT(iconPath, iconPath);
+     SET_STRINGOPT(execName, execName);
+     SET_OPT(allowSymlinks, boolean);
+@@ -383,6 +393,41 @@
+     return mode.refresh_rate > 0 ? mode.refresh_rate : 0;
+ }
+ 
++/* With a data folder of its own (dataPath): settings and key bindings saved
++ * in the per-user folder before (SDL_GetPrefPath: ~/.local/share/<title>,
++ * %APPDATA%\<title>) are copied over once, when there are none yet. That
++ * folder is found without SDL_GetPrefPath, which would create it. */
++void Config::migrateUserFiles(const std::string &app) {
++    std::string base;
++#ifdef _WIN32
++    const char *appdata = SDL_getenv("APPDATA");
++    if (appdata)
++        base = appdata;
++#elif !defined(__APPLE__)
++    const char *xdg = SDL_getenv("XDG_DATA_HOME");
++    const char *home = SDL_getenv("HOME");
++    if (xdg && *xdg)
++        base = xdg;
++    else if (home)
++        base = std::string(home) + "/.local/share";
++#endif
++    if (base.empty() || app.empty())
++        return;
++    try {
++        const cfs::path from = cfs::u8path(base) / cfs::u8path(app);
++        const cfs::path to = cfs::u8path(customDataPath);
++        if (!cfs::is_directory(from) || cfs::equivalent(from, to))
++            return;
++        for (const char *name : { CONF_FILE, "keybindings.mkxp1", "keybindings.mkxp2", "keybindings.mkxp3" }) {
++            if (cfs::exists(from / name) && !cfs::exists(to / name)) {
++                cfs::copy_file(from / name, to / name);
++                Debug() << "Took over" << (from / name).u8string() << "into" << to.u8string();
++            }
++        }
++    } catch (...) {
++    }
++}
++
+ bool Config::storeUserSettings() const {
+     if (userConfPath.empty())
+         return false;
+@@ -479,7 +524,24 @@
+     if (dataPathApp.empty())
+         dataPathApp = game.title;
+     
+-    customDataPath = mkxp_fs::normalizePath(prefPath(dataPathOrg.c_str(), dataPathApp.c_str()).c_str(), 0, 1);
++    const char *envPath = SDL_getenv("MKXPZ_DATA_PATH");
++    const std::string ownPath = (envPath && *envPath) ? std::string(envPath) : dataPath;
++    if (!ownPath.empty()) {
++        /* a folder of its own (relative paths: to the game folder, which
++         * is the current folder here) */
++        try {
++            cfs::path dir = cfs::absolute(cfs::u8path(ownPath));
++            cfs::create_directories(dir);
++            /* ending in a slash, like SDL's paths (key bindings depend on it) */
++            customDataPath = mkxp_fs::normalizePath((dir.u8string() + "/").c_str(), 0, 1);
++            migrateUserFiles(dataPathApp);
++        } catch (...) {
++            Debug() << "Can't use" << ownPath << "for mkxp-z's files; using the per-user folder";
++            customDataPath.clear();
++        }
++    }
++    if (customDataPath.empty())
++        customDataPath = mkxp_fs::normalizePath(prefPath(dataPathOrg.c_str(), dataPathApp.c_str()).c_str(), 0, 1);
+     
+     if (rgssVersion == 0) {
+         /* Try to guess RGSS version based on Data/Scripts extension */
+--- a/src/config.h
++++ b/src/config.h
+@@ -109,6 +109,11 @@
+     
+     std::string dataPathOrg;
+     std::string dataPathApp;
++    /* The folder for mkxp-z's own files (user mkxp.json, key bindings),
++     * relative to the game folder or absolute; empty: the system's per-user
++     * folder from dataPathOrg/dataPathApp. The environment variable
++     * MKXPZ_DATA_PATH overrides it (e.g. for an AppImage). */
++    std::string dataPath;
+     
+     std::string iconPath;
+     std::string execName;
+@@ -203,6 +208,7 @@
+     /* Save the options of the settings menu (F1) to the user's mkxp.json
+      * (userConfPath), which overrides the game's mkxp.json */
+     bool storeUserSettings() const;
++    void migrateUserFiles(const std::string &app);
+ };
+ 
+ #endif // CONFIG_H
+--- a/src/display/retroshader.cpp
++++ b/src/display/retroshader.cpp
+@@ -818,7 +818,20 @@
+ 	std::vector<std::string> roots;
+ 	roots.push_back(FOLDER);
+ 	if (!userDataPath.empty())
+-		roots.push_back(userDataPath + "/shaders");
++	{
++		/* not twice when mkxp-z's data folder is the game's mkxp-z folder */
++		bool same = false;
++		try
++		{
++			fs::path a = fs::u8path(FOLDER), b = fs::u8path(userDataPath + "/shaders");
++			same = fs::exists(a) && fs::exists(b) && fs::equivalent(a, b);
++		}
++		catch (...)
++		{
++		}
++		if (!same)
++			roots.push_back(userDataPath + "/shaders");
++	}
+ 
+ 	for (const std::string &root : roots)
+ 	{

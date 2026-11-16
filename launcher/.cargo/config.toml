@@ -1,0 +1,7 @@
+[build]
+target = "i686-pc-windows-msvc"
+
+[target.i686-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=lld-link", "-C", "link-arg=/ENTRY:entry", "-C", "link-arg=/SUBSYSTEM:WINDOWS",
+             "-C", "link-arg=/NODEFAULTLIB", "-C", "target-feature=+crt-static"]

@@ -1,0 +1,663 @@
+--- a/src/audio/alstream.cpp
++++ b/src/audio/alstream.cpp
+@@ -42,7 +42,9 @@
+ 	  source(0),
+ 	  thread(0),
+ 	  preemptPause(false),
+-      pitch(1.0f)
++      pitch(1.0f),
++	  volume(1.0f),
++	  userGain(1.0f)
+ {
+ 	alSrc = AL::Source::gen();
+ 
+@@ -153,7 +155,14 @@
+ 
+ void ALStream::setVolume(float value)
+ {
+-	AL::Source::setVolume(alSrc, value);
++	volume = value;
++	AL::Source::setVolume(alSrc, volume, userGain);
++}
++
++void ALStream::setUserGain(float value)
++{
++	userGain = value;
++	AL::Source::setVolume(alSrc, volume, userGain);
+ }
+ 
+ void ALStream::setPitch(float value)
+--- a/src/audio/alstream.h
++++ b/src/audio/alstream.h
+@@ -97,12 +97,17 @@
+ 	void pause();
+ 
+ 	void setVolume(float value);
++	/* The player's level for this stream (settings menu) */
++	void setUserGain(float value);
+ 	void setPitch(float value);
+ 	State queryState();
+ 	double queryOffset();
+ 	bool queryNativePitch();
+ 
+ private:
++	float volume;
++	float userGain;
++
+ 	void closeSource();
+ 	void openSource(const std::string &filename);
+ 
+--- a/src/audio/al-util.h
++++ b/src/audio/al-util.h
+@@ -169,7 +169,9 @@
+ 		return value;
+ 	}
+ 
+-	inline void setVolume(Source::ID id, float value)
++	/* gain: the player's music / sound level (settings menu), applied on
++	 * top of the game's volume */
++	inline void setVolume(Source::ID id, float value, float gain = 1.0f)
+ 	{
+ 		/*
+ 		 * RPG Maker uses a -35 decibel scale for volume. 100% volume is 0 dB, 99%
+@@ -197,7 +199,7 @@
+ 		if (value > FLT_EPSILON) {
+ 			value = std::pow(10.0f, -(35.0f / 20.0f) * (1.0f - value));
+ 		}
+-		alSourcef(id.al, AL_GAIN, value * GLOBAL_VOLUME);
++		alSourcef(id.al, AL_GAIN, value * gain * GLOBAL_VOLUME);
+ 	}
+ 
+ 	inline void setPitch(Source::ID id, float value)
+--- a/src/audio/audio.cpp
++++ b/src/audio/audio.cpp
+@@ -28,6 +28,7 @@
+ #include "eventthread.h"
+ #include "sdl-util.h"
+ #include "exception.h"
++#include "util.h"
+ 
+ #include <string>
+ #include <vector>
+@@ -286,7 +287,29 @@
+ 
+ Audio::Audio(RGSSThreadData &rtData)
+ 	: p(new AudioPrivate(rtData))
+-{}
++{
++	setUserVolumes(rtData.config.musicVolume, rtData.config.soundVolume);
++}
++
++/* Levels from the settings menu: squared, so that the slider changes the
++ * loudness about evenly (50% is about -12 dB) */
++static float userGain(int level)
++{
++	float v = clamp<int>(level, 0, 100) / 100.0f;
++	return v * v;
++}
++
++void Audio::setUserVolumes(int music, int sound)
++{
++	const float mg = userGain(music);
++	const float sg = userGain(sound);
++
++	for (auto track : p->bgmTracks)
++		track->stream.setUserGain(mg);
++	p->me.stream.setUserGain(mg);
++	p->bgs.stream.setUserGain(sg);
++	p->se.userGain = sg;
++}
+ 
+ 
+ void Audio::bgmPlay(const char *filename,
+--- a/src/audio/audio.h
++++ b/src/audio/audio.h
+@@ -72,6 +72,10 @@
+ 
+ 	void reset();
+ 
++	/* The player's music (BGM, ME) and sound (BGS, SE) levels, 0-100;
++	 * from the settings menu, on top of the game's own volumes */
++	void setUserVolumes(int music, int sound);
++
+ private:
+ 	Audio(RGSSThreadData &rtData);
+ 	~Audio();
+--- a/src/audio/soundemitter.cpp
++++ b/src/audio/soundemitter.cpp
+@@ -93,7 +93,8 @@
+       srcCount(conf.SE.sourceCount),
+       alSrcs(srcCount),
+       atchBufs(srcCount),
+-      srcPrio(srcCount)
++      srcPrio(srcCount),
++      userGain(1.0f)
+ {
+ 	for (size_t i = 0; i < srcCount; ++i)
+ 	{
+@@ -172,7 +173,7 @@
+ 	if (switchBuffer)
+ 		AL::Source::attachBuffer(src, buffer->alBuffer);
+ 
+-	AL::Source::setVolume(src, _volume);
++	AL::Source::setVolume(src, _volume, userGain);
+ 	AL::Source::setPitch(src, _pitch);
+ 
+ 	AL::Source::play(src);
+--- a/src/audio/soundemitter.h
++++ b/src/audio/soundemitter.h
+@@ -58,6 +58,9 @@
+ 
+ 	void stop();
+ 
++	/* The player's sound level (settings menu), for sounds started later */
++	float userGain;
++
+ private:
+ 	SoundBuffer *allocateBuffer(const std::string &filename);
+ };
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -155,6 +155,8 @@
+         {"frameSkip", false},
+         {"syncToRefreshrate", false},
+         {"frameInterpolation", false},
++        {"musicVolume", 100},
++        {"soundVolume", 100},
+         {"solidFonts", json::array({})},
+         {"renderer", 0},
+         {"subImageFix", false},
+@@ -295,6 +297,10 @@
+     SET_OPT(frameSkip, boolean);
+     SET_OPT(syncToRefreshrate, boolean);
+     SET_OPT(frameInterpolation, boolean);
++    SET_OPT(musicVolume, integer);
++    SET_OPT(soundVolume, integer);
++    musicVolume = clamp(musicVolume, 0, 100);
++    soundVolume = clamp(soundVolume, 0, 100);
+     fillStringVec(opts["solidFonts"], solidFonts);
+     for (std::string & solidFont : solidFonts)
+         std::transform(solidFont.begin(), solidFont.end(), solidFont.begin(),
+@@ -360,6 +366,32 @@
+     raw = optsJ;
+ }
+ 
++bool Config::storeUserSettings() const {
++    if (userConfPath.empty())
++        return false;
++    
++    /* Keep anything else the file holds */
++    json::value conf = readConfFile(userConfPath.c_str());
++    auto &obj = conf.as_object();
++    obj["vsync"] = json::value(vsync);
++    obj["fullscreen"] = json::value(fullscreen);
++    obj["frameInterpolation"] = json::value(frameInterpolation);
++    obj["musicVolume"] = json::value((int) musicVolume);
++    obj["soundVolume"] = json::value((int) soundVolume);
++    
++    std::string text = conf.stringify(json::rule::space_indent<4>()) + "\n";
++    FILE *f = fopen(userConfPath.c_str(), "wb");
++    if (!f) {
++        Debug() << "Couldn't save settings to" << userConfPath;
++        return false;
++    }
++    bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
++    ok = (fclose(f) == 0) && ok;
++    if (!ok)
++        Debug() << "Couldn't save settings to" << userConfPath;
++    return ok;
++}
++
+ static void setupScreenSize(Config &conf) {
+     if (conf.defScreenW <= 0)
+         conf.defScreenW = (conf.rgssVersion == 1 ? 640 : 544);
+--- a/src/config.h
++++ b/src/config.h
+@@ -67,6 +67,10 @@
+     bool syncToRefreshrate;
+     bool frameInterpolation;
+     
++    /* The player's music (BGM, ME) and sound (BGS, SE) levels, 0-100 */
++    int musicVolume;
++    int soundVolume;
++    
+     std::vector<std::string> solidFonts;
+     
+     bool subImageFix;
+@@ -179,6 +183,10 @@
+     
+     void read(int argc, char *argv[]);
+     void readGameINI();
++    
++    /* Save the options of the settings menu (F1) to the user's mkxp.json
++     * (userConfPath), which overrides the game's mkxp.json */
++    bool storeUserSettings() const;
+ };
+ 
+ #endif // CONFIG_H
+--- a/src/display/graphics.cpp
++++ b/src/display/graphics.cpp
+@@ -1191,6 +1191,20 @@
+             && threadData->refreshRate > frameRate + 5;
+     }
+ 
++    /* vsync: on when the player wants it ("Reduce screen flickering"), and
++     * while frame interpolation is active, which paces its frames with it;
++     * both can change at any time in the settings menu */
++    int swapInterval = -1;
++    
++    void updateSwapInterval() {
++        const Config &c = threadData->config;
++        const int want = (c.vsync || c.syncToRefreshrate || interpolationActive()) ? 1 : 0;
++        if (want == swapInterval)
++            return;
++        SDL_GL_SetSwapInterval(want);
++        swapInterval = want;
++    }
++
+     void captureInterpolation() {
+         bool active = interpolationActive();
+         if (active)
+@@ -1231,7 +1245,7 @@
+             FrameInterp::restore();
+ 
+             /* vsync paces the frames; without it, sleep for one refresh */
+-            if (!threadData->config.vsync) {
++            if (swapInterval != 1) {
+                 const int64_t used = (int64_t)(SDL_GetPerformanceCounter() - now);
+                 if (used < period)
+                     fpsLimiter.sleepTicks((uint64_t)(period - used));
+@@ -1335,6 +1349,8 @@
+         STEAMSHIM_pump();
+ #endif
+     
++    p->updateSwapInterval();
++    
+     if (p->frozen) {
+         FrameInterp::reset();
+         return;
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -678,12 +678,6 @@
+     if (!mode.refresh_rate)
+       conf.syncToRefreshrate = false;
+ 
+-    /* Frame interpolation paces its in-between frames with vsync
+-     * (when the display is faster than the game: RGSS1 runs at 40 fps) */
+-    if (conf.frameInterpolation && !conf.syncToRefreshrate &&
+-        mode.refresh_rate > (conf.rgssVersion == 1 ? 45 : 65))
+-      conf.vsync = true;
+-
+     EventThread eventThread;
+ 
+ #ifndef MKXPZ_INIT_GL_LATER
+--- a/src/settingsmenu.cpp
++++ b/src/settingsmenu.cpp
+@@ -26,6 +26,7 @@
+ #include <SDL_surface.h>
+ #include <SDL_keyboard.h>
+ #include <SDL_rect.h>
++#include <SDL_image.h>
+ 
+ #include "keybindings.h"
+ #include "eventthread.h"
+@@ -34,11 +35,16 @@
+ #include "input.h"
+ #include "etc-internal.h"
+ #include "util.h"
++#include "audio.h"
++#include "config.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <assert.h>
+ 
+-const Vec2i winSize(840, 356);
++/* Key bindings on top, the player's options below them */
++const int optionsH = 118;
++const Vec2i winSize(840, 356 + optionsH);
+ 
+ const uint8_t cBgNorm = 50;
+ const uint8_t cBgDark = 20;
+@@ -229,6 +235,49 @@
+ 	void clickHandler(int, int, uint8_t) {}
+ };
+ 
++/* An on/off option */
++struct CheckBox : Widget
++{
++	const char *str;
++	bool *value;
++
++	CheckBox(SMP *p, const IntRect &rect, const char *str, bool *value)
++	    : Widget(p, rect), str(str), value(value), hovered(false)
++	{}
++
++protected:
++	bool hovered;
++
++	void drawHandler(SDL_Surface *surf);
++	void motionHandler(int, int);
++	void leaveHandler();
++	void clickHandler(int, int, uint8_t button);
++};
++
++/* A level from 0 to 100, set by clicking or dragging */
++struct Slider : Widget
++{
++	const char *str;
++	int *value;
++
++	Slider(SMP *p, const IntRect &rect, const char *str, int *value)
++	    : Widget(p, rect), str(str), value(value)
++	{}
++
++	/* x in window coordinates (while dragging) */
++	void dragTo(int x);
++
++protected:
++	int trackX() const { return 160; }
++	int trackW() const { return rect.w - trackX() - 56; }
++	void setFromX(int x);
++
++	void drawHandler(SDL_Surface *surf);
++	void motionHandler(int, int) {}
++	void leaveHandler() {}
++	void clickHandler(int x, int, uint8_t button);
++};
++
+ enum State
+ {
+ 	Idle,
+@@ -266,6 +315,21 @@
+ 
+ 	std::vector<BindingWidget> bWidgets;
+ 	std::vector<Button> buttons;
++	std::vector<CheckBox> checkBoxes;
++	std::vector<Slider> sliders;
++	Label optionsLabel;
++	Label optionsNote;
++	Slider *dragged;
++
++	/* Options as shown, taken over on "Accept" */
++	struct
++	{
++		bool vsync;
++		bool frameInterpolation;
++		bool fullscreen;
++		int musicVolume;
++		int soundVolume;
++	} opt;
+ 	Label infoLabel;
+ 	Label dupWarnLabel;
+ 	std::vector<Widget*> widgets;
+@@ -409,8 +473,9 @@
+ 		}
+ 		else
+ 		{
++			/* squeezed into its space (relative to the widget, as above) */
+ 			dstRect.w = alignW;
+-			dstRect.x = x;
++			dstRect.x = drawOff.x + x;
+ 			SDL_BlitScaled(txtSurf, 0, surf, &dstRect);
+ 		}
+ 	}
+@@ -582,6 +647,16 @@
+ 		if (state == AwaitingInput)
+ 			return;
+ 
++		if (dragged)
++		{
++			if (e.state & SDL_BUTTON_LMASK)
++			{
++				dragged->dragTo(e.x);
++				return;
++			}
++			dragged = 0;
++		}
++
+ 		Widget *w = findWidget(e.x, e.y);
+ 
+ 		if (w != hovered)
+@@ -673,8 +748,38 @@
+ 		redraw();
+ 	}
+ 
++	/* Music and sound levels are heard right away while changing them */
++	void onVolumeChanged()
++	{
++		shState->audio().setUserVolumes(opt.musicVolume, opt.soundVolume);
++	}
++
++	void storeOptions()
++	{
++		Config &c = rtData.config;
++		const bool changed = c.vsync != opt.vsync
++		    || c.frameInterpolation != opt.frameInterpolation
++		    || c.fullscreen != opt.fullscreen
++		    || c.musicVolume != opt.musicVolume
++		    || c.soundVolume != opt.soundVolume;
++
++		/* vsync and frame interpolation are picked up by the next
++		 * Graphics.update, "fullscreen" is the mode at startup */
++		c.vsync = opt.vsync;
++		c.frameInterpolation = opt.frameInterpolation;
++		c.fullscreen = opt.fullscreen;
++		c.musicVolume = opt.musicVolume;
++		c.soundVolume = opt.soundVolume;
++		shState->audio().setUserVolumes(c.musicVolume, c.soundVolume);
++
++		if (changed)
++			c.storeUserSettings();
++	}
++
+ 	void onAccept()
+ 	{
++		storeOptions();
++
+ 		BDescVec binds;
+ 
+ 		for (size_t i = 0; i < bWidgets.size(); ++i)
+@@ -690,6 +795,8 @@
+ 
+ 	void onCancel()
+ 	{
++		/* undo the levels heard while changing them */
++		shState->audio().setUserVolumes(rtData.config.musicVolume, rtData.config.soundVolume);
+ 		destroyReq = true;
+ 	}
+ };
+@@ -909,6 +1016,97 @@
+ 		p->drawText(surf, str, 0, rect.h/2, rect.w, Left, c);
+ }
+ 
++void CheckBox::drawHandler(SDL_Surface *surf)
++{
++	const int box = 16;
++	const int by = (rect.h - box) / 2;
++
++	if (hovered)
++		p->fillRect(surf, cBgDark, 0, 0, rect.w, rect.h);
++
++	p->strokeRectInner(surf, cLine, 4, by, box, box, 2);
++	if (*value)
++		p->fillRect(surf, 4 + 4, by + 4, box - 8, box - 8, 120, 200, 120);
++
++	p->drawText(surf, str, 4 + box + 8, rect.h/2, rect.w - box - 16, Left);
++}
++
++void CheckBox::motionHandler(int, int)
++{
++	if (!hovered)
++	{
++		hovered = true;
++		p->redraw();
++	}
++}
++
++void CheckBox::leaveHandler()
++{
++	if (hovered)
++	{
++		hovered = false;
++		p->redraw();
++	}
++}
++
++void CheckBox::clickHandler(int, int, uint8_t button)
++{
++	if (button != SDL_BUTTON_LEFT)
++		return;
++
++	*value = !*value;
++	p->redraw();
++}
++
++void Slider::setFromX(int x)
++{
++	int v = (int) std::lround((x - trackX()) * 100.0 / trackW());
++	v = clamp(v, 0, 100);
++
++	if (v == *value)
++		return;
++
++	*value = v;
++	p->onVolumeChanged();
++	p->redraw();
++}
++
++void Slider::dragTo(int x)
++{
++	setFromX(x - rect.x);
++}
++
++void Slider::clickHandler(int x, int, uint8_t button)
++{
++	if (button != SDL_BUTTON_LEFT)
++		return;
++
++	p->dragged = this;
++	setFromX(x);
++}
++
++void Slider::drawHandler(SDL_Surface *surf)
++{
++	const int midY = rect.h / 2;
++	const int tx = trackX();
++	const int tw = trackW();
++
++	p->drawText(surf, str, 4, midY, tx - 12, Left);
++
++	/* track, filled up to the level */
++	p->fillRect(surf, cBgDark, tx, midY - 3, tw, 6);
++	p->fillRect(surf, tx, midY - 3, tw * *value / 100, 6, 120, 200, 120);
++
++	/* handle */
++	const int hx = tx + tw * *value / 100;
++	p->fillRect(surf, 200, hx - 4, midY - 9, 8, 18);
++	p->strokeRectInner(surf, cLine, hx - 4, midY - 9, 8, 18, 1);
++
++	char buf[16];
++	snprintf(buf, sizeof(buf), "%d%%", *value);
++	p->drawText(surf, buf, tx + tw + 10, midY, 46, Left);
++}
++
+ SettingsMenu::SettingsMenu(RGSSThreadData &rtData)
+ {
+     // Set names to be shown in the menu
+@@ -931,9 +1129,20 @@
+ 	p->hasFocus = false;
+ 	p->destroyReq = false;
+ 
+-	p->window = SDL_CreateWindow("Key bindings",
++	p->window = SDL_CreateWindow("Settings",
+ 	                             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+ 	                             winSize.x, winSize.y, SDL_WINDOW_INPUT_FOCUS);
++	/* the game's icon, like the main window (see setupWindowIcon) */
++	if (!rtData.config.iconPath.empty())
++	{
++		SDL_Surface *icon = IMG_Load(rtData.config.iconPath.c_str());
++		if (icon)
++		{
++			SDL_SetWindowIcon(p->window, icon);
++			SDL_FreeSurface(icon);
++		}
++	}
++
+ 	p->winSurf = SDL_GetWindowSurface(p->window);
+ 	p->winID = SDL_GetWindowID(p->window);
+ 
+@@ -947,7 +1156,7 @@
+ 
+ 	const int bWidgetW = winSize.x / layoutH;
+ 	const int bWidgetH = 64;
+-	const int bWidgetY = winSize.y - layoutW*bWidgetH - 48;
++	const int bWidgetY = winSize.y - optionsH - layoutW*bWidgetH - 48;
+ 
+ 	for (int y = 0; y < 4; ++y)
+ 		for (int x = 0; x < 3; ++x)
+@@ -976,7 +1185,7 @@
+ 	    IntRect(winSize.x-16-64, buttonY, 64, buttonH)
+ 	};
+ 
+-	p->buttons.push_back(Button(p, btRects[0], "Reset defaults", &SMP::onResetToDefault));
++	p->buttons.push_back(Button(p, btRects[0], "Reset keys", &SMP::onResetToDefault));
+ 	p->buttons.push_back(Button(p, btRects[1], "Cancel", &SMP::onCancel));
+ 	p->buttons.push_back(Button(p, btRects[2], "Accept", &SMP::onAccept));
+ 
+@@ -993,6 +1202,42 @@
+ 	p->widgets.push_back(&p->infoLabel);
+ 	p->widgets.push_back(&p->dupWarnLabel);
+ 
++	/* Options */
++	const Config &conf = rtData.config;
++	p->opt.vsync = conf.vsync;
++	p->opt.frameInterpolation = conf.frameInterpolation;
++	p->opt.fullscreen = conf.fullscreen;
++	p->opt.musicVolume = conf.musicVolume;
++	p->opt.soundVolume = conf.soundVolume;
++	p->dragged = 0;
++
++	const int optY = winSize.y - optionsH - 48 + 4;
++	const int rowH = 26;
++	const int colW = winSize.x / 2;
++
++	p->optionsLabel = Label(p, IntRect(16, optY, colW, 18), "Options (saved for this game)", cText, cText, cText);
++	p->widgets.push_back(&p->optionsLabel);
++
++	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20, colW - 24, rowH),
++	                                 "Reduce screen flickering (vsync)", &p->opt.vsync));
++	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20 + rowH, colW - 24, rowH),
++	                                 "Smooth movement (frame interpolation)", &p->opt.frameInterpolation));
++	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20 + rowH*2, colW - 24, rowH),
++	                                 "Start in fullscreen", &p->opt.fullscreen));
++	for (size_t i = 0; i < p->checkBoxes.size(); ++i)
++		p->widgets.push_back(&p->checkBoxes[i]);
++
++	p->sliders.push_back(Slider(p, IntRect(colW + 12, optY + 20, colW - 28, rowH),
++	                            "Music (BGM, ME)", &p->opt.musicVolume));
++	p->sliders.push_back(Slider(p, IntRect(colW + 12, optY + 20 + rowH, colW - 28, rowH),
++	                            "Sounds (BGS, SE)", &p->opt.soundVolume));
++	for (size_t i = 0; i < p->sliders.size(); ++i)
++		p->widgets.push_back(&p->sliders[i]);
++
++	p->optionsNote = Label(p, IntRect(colW + 16, optY + 20 + rowH*2, colW - 32, rowH),
++	                       "Alt+Enter switches fullscreen right away", 170, 170, 170);
++	p->widgets.push_back(&p->optionsNote);
++
+ 	p->hovered = 0;
+ 	p->captureDesc = 0;
+ 	p->captureName = 0;
+@@ -1042,8 +1287,11 @@
+ 	/* Now process it.. */
+ 	switch (event.type)
+ 	{
+-	/* Ignore these event */
+ 	case SDL_MOUSEBUTTONUP :
++		p->dragged = 0;
++		return true;
++
++	/* Ignore these event */
+ 	case SDL_KEYUP :
+ 		return true;
+ 

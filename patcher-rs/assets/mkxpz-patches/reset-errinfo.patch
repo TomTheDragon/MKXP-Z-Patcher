@@ -1,0 +1,48 @@
+--- a/binding/binding-mri.cpp
++++ b/binding/binding-mri.cpp
+@@ -1048,11 +1048,24 @@
+     if (exc != Qnil)
+         return;
+     
++    /* Set while the scripts run again after a reset (see below) */
++    VALUE resetExc = Qnil;
++    
+     while (true) {
++        int lastState = 0;
++        
+         for (long i = 0; i < scriptCount; ++i) {
+             if (shState->rtData().rqTerm)
+                 break;
+             
++            /* As in RGSS, scripts that run again after a reset see the
++             * reset exception in $! / $@: games guard their aliases with
++             * "alias ... unless $@", which would otherwise alias the
++             * methods a second time, and the methods would call
++             * themselves (SystemStackError: stack level too deep) */
++            if (!NIL_P(resetExc))
++                rb_set_errinfo(resetExc);
++            
+             VALUE script = rb_ary_entry(scriptArray, i);
+             VALUE scriptDecoded = rb_ary_entry(script, 3);
+             VALUE string =
+@@ -1099,14 +1112,20 @@
+             int state;
+             
+             evalString(string, fname, &state);
++            lastState = state;
+             if (state)
+                 break;
+         }
+         
++        /* the scripts ended without an error: the game is over */
++        if (!lastState)
++            break;
++        
+         VALUE exc = rb_gv_get("$!");
+         if (rb_obj_class(exc) != getRbData()->exc[Reset])
+             break;
+         
++        resetExc = exc;
+         if (processReset(false))
+             break;
+     }
