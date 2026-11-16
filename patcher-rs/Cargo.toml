@@ -1,6 +1,6 @@
 [package]
 name = "mkxpz-patcher"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 description = "Run RPG Maker XP/VX/VX Ace games on the mkxp-z engine (Linux and Windows)"
 license = "GPL-3.0-or-later"
