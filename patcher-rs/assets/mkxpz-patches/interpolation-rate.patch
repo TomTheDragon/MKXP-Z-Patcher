@@ -1,12 +1,13 @@
 --- a/src/config.cpp
 +++ b/src/config.cpp
-@@ -69,6 +69,12 @@
+@@ -69,6 +69,13 @@
          if (it.second.is_object() && destVec[it.first].is_object())
              continue;
          
-+        /* frameInterpolation was on/off before it took a rate */
++        /* frameInterpolation was on/off before it took a rate: an old value
++         * means off (smooth movement is chosen in the F1 menu) */
 +        if (it.first == "frameInterpolation" && it.second.is_boolean() && destVec[it.first].is_number()) {
-+            destVec[it.first] = json::value(it.second.as_boolean() ? (int)Config::FRAME_INTERP_MAX : 0);
++            destVec[it.first] = json::value((int) 0);
 +            continue;
 +        }
 +

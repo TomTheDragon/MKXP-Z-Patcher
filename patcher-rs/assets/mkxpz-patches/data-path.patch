@@ -31,7 +31,7 @@
      SET_STRINGOPT(iconPath, iconPath);
      SET_STRINGOPT(execName, execName);
      SET_OPT(allowSymlinks, boolean);
-@@ -383,6 +393,41 @@
+@@ -383,6 +393,63 @@
      return mode.refresh_rate > 0 ? mode.refresh_rate : 0;
  }
  
@@ -39,6 +39,26 @@
 + * in the per-user folder before (SDL_GetPrefPath: ~/.local/share/<title>,
 + * %APPDATA%\<title>) are copied over once, when there are none yet. That
 + * folder is found without SDL_GetPrefPath, which would create it. */
++/* Older engines saved frame interpolation as on/off; an old "on" taken over
++ * into a new data folder would switch it on in every newly patched game, so
++ * the copy starts with it off. */
++static void resetLegacyInterpolation(const std::string &path) {
++    json::value conf = readConfFile(path.c_str());
++    if (!conf.is_object())
++        return;
++    auto &obj = conf.as_object();
++    auto it = obj.find("frameInterpolation");
++    if (it == obj.end() || !it->second.is_boolean())
++        return;
++    it->second = json::value((int) 0);
++    std::string text = conf.stringify(json::rule::space_indent<4>()) + "\n";
++    FILE *f = fopen(path.c_str(), "wb");
++    if (!f)
++        return;
++    fwrite(text.data(), 1, text.size(), f);
++    fclose(f);
++}
++
 +void Config::migrateUserFiles(const std::string &app) {
 +    std::string base;
 +#ifdef _WIN32
@@ -64,6 +84,8 @@
 +            if (cfs::exists(from / name) && !cfs::exists(to / name)) {
 +                cfs::copy_file(from / name, to / name);
 +                Debug() << "Took over" << (from / name).u8string() << "into" << to.u8string();
++                if (std::string(name) == CONF_FILE)
++                    resetLegacyInterpolation((to / name).u8string());
 +            }
 +        }
 +    } catch (...) {

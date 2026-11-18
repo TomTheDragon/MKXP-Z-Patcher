@@ -176,7 +176,7 @@ const ENGINE_SKIP: [&str; 8] = [ENGINE_STAMP, ".rpgm-patcher-engine", "mkxp.json
 /// Written into engines the patcher builds. Engines without the current revision
 /// were built from source without the patcher's fixes (fix_source) and are rebuilt.
 const ENGINE_STAMP: &str = ".mkxpz-patcher-engine";
-const ENGINE_REV: &str = "18";
+const ENGINE_REV: &str = "19";
 
 fn engine_current(dir: &Path) -> bool {
     // also the stamp written under the patcher's old name (rpgm-patcher)
@@ -1251,6 +1251,15 @@ mod tests {
     use super::*;
 
     /// MSYS2_SYSROOT=<msys2-sysroot.sh dest with mingw32/> cargo test -- --ignored mingw32_dlls
+    /// Applies all source patches to the mkxp-z source in MKXPZ_SRC (from --fetch-source).
+    #[test]
+    #[ignore]
+    fn patches_apply() {
+        let src = PathBuf::from(std::env::var("MKXPZ_SRC").unwrap());
+        fix_source(&src, &|l: String| println!("{}", l)).unwrap();
+        fix_source(&src, &|l: String| println!("{}", l)).unwrap(); // twice: nothing changes
+    }
+
     #[test]
     #[ignore]
     fn mingw32_dlls() {
