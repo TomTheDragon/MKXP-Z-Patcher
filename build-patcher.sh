@@ -39,7 +39,7 @@ install_bin() {
     cp "$1" "$2.new" && mv -f "$2.new" "$2"
 }
 
-# The tiny Windows game launcher ("Game (mkxp-z).exe") gets embedded into every
+# The tiny Windows game launcher (written as the game's Game.exe) gets embedded into every
 # patcher build. It needs no Windows SDK or MinGW: linked with rust-lld (see launcher/.cargo).
 echo "==> launcher (i686-pc-windows-msvc)"
 need_target i686-pc-windows-msvc

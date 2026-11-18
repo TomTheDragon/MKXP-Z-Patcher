@@ -32,6 +32,9 @@ pub struct Options {
     pub rtp: Option<PathBuf>,
     pub rgss: Option<usize>,
     pub bundle_soundfont: bool,
+    /// Windows: the launcher takes the place of Game.exe (the original becomes
+    /// Game.original.exe); else it's added next to it as "Game (mkxp-z).exe"
+    pub replace_exe: bool,
 }
 
 pub struct Plan {
@@ -56,11 +59,15 @@ pub struct Plan {
     pub soundfont: Option<PathBuf>,
     pub notes: Vec<String>,
     pub warnings: Vec<String>,
+    /// reasons this choice of platforms can't work: patching is refused
+    pub errors: Vec<String>,
     /// the game's icon as PNG, for mkxp-z's window (set while patching)
     pub icon_png: Option<Vec<u8>>,
     /// copy the RTP into the game (mkxp-z/RTP) instead of using it where it
     /// is on this computer: for AppImages, which run on other computers too
     pub bundle_rtp: bool,
+    /// see Options::replace_exe
+    pub replace_exe: bool,
 }
 
 /// The slow part (scripts + all text), cached per game state so that changing
@@ -175,7 +182,7 @@ impl Plan {
             .unwrap_or_else(|| "Game".into());
         let archive = game::find_archive(&game_dir, rgss);
         let manifest = patch::read_manifest(&game_dir)?;
-        let (mut notes, mut warnings) = (Vec::new(), Vec::new());
+        let (mut notes, mut warnings, mut errors) = (Vec::new(), Vec::new(), Vec::new());
 
         // engines
         let paths = o.paths.resolved();
@@ -217,17 +224,29 @@ impl Plan {
             if b.to_lowercase().contains("steam_api") && b.contains("SteamAPI_Init") {
                 // off unless MKXPZ_STEAM_LOG is set (see the script / README)
                 compat.push("steam_log.rb".into());
+                if !has(Platform::Windows32) {
+                    // Steam starts Game.exe (or, with launch options, the launcher); only the
+                    // 32-bit Windows engine can run there
+                    errors.push("This is a Steam version: it only runs through Steam with the 32-bit Windows \
+                                 engine (on Linux via Proton). Choose \"Windows\" 32-bit; without it Steam keeps \
+                                 starting the original Game.exe and the patch is never used.".into());
+                }
                 if any_linux {
                     warnings.push("Linux: this is a Steam version. Its scripts call SteamAPI_Init through steam_api.dll \
                                    and quit if that fails; the Windows DLL can't load on Linux, so the Linux engine \
-                                   will exit right at startup. Play it via Steam (Proton) with the 32-bit Windows engine \
-                                   (launch options in mkxp-z/README.txt).".into());
+                                   will exit right at startup. Play it via Steam (Proton) with the 32-bit Windows \
+                                   engine.".into());
                 }
-                if has(Platform::Windows32) {
+                if has(Platform::Windows32) && o.replace_exe {
                     notes.push(format!("Windows: Steam version - the game's own steam_api.dll is called natively, so Steam \
-                                must be running. Start it through Steam with these launch options - on Windows: \"<game folder>\\mkxp-z\\windows\\\
-                                mkxp-z.i686.exe\" %command%  - on Linux (Proton): {}  (started directly, Steam \
-                                restarts the original Game.exe).", crate::patch::proton_launch_options(&exec_name)));
+                                must be running. {0}.exe is replaced by the mkxp-z launcher, so Steam starts mkxp-z as \
+                                before (on Linux via Proton); no launch options needed.", exec_name));
+                } else if has(Platform::Windows32) {
+                    notes.push(format!("Windows: Steam version - the game's own steam_api.dll is called natively, so Steam \
+                                must be running. {0}.exe stays as it is, so Steam needs these launch options to start \
+                                mkxp-z - on Windows: {1}  - on Linux (Proton): {2}  (started directly, Steam restarts \
+                                the original {0}.exe).", exec_name, crate::patch::WINDOWS_LAUNCH_OPTIONS,
+                                crate::patch::proton_launch_options(&exec_name)));
                 }
                 if has(Platform::Windows64) {
                     warnings.push("Windows 64-bit: the Steam script passes pointers as 32-bit integers and will likely \
@@ -353,7 +372,7 @@ impl Plan {
 
         Ok(Plan { game_dir, platforms, rgss, title, exec_name, archive, manifest, engines, missing_engines,
                   scripts_src, license_src, preload, compat, fonts: fonts_report, cjk_font, rtp, soundfont,
-                  notes, warnings, icon_png: None, bundle_rtp: false })
+                  notes, warnings, errors, icon_png: None, bundle_rtp: false, replace_exe: o.replace_exe })
     }
 
     pub fn engine(&self, p: Platform) -> Option<&Engine> {
@@ -368,9 +387,14 @@ impl Plan {
         self.missing_engines.is_empty()
     }
 
+    /// The Windows launcher takes the place of Game.exe (the original is backed
+    /// up and restored on unpatch), so shortcuts and Steam start mkxp-z; or,
+    /// without replace_exe, it's added next to it.
     pub fn launcher_name(&self, p: Platform) -> String {
         if !p.is_windows() {
             format!("{}.sh", self.exec_name)
+        } else if crate::patch::have_exe_launcher() && self.replace_exe {
+            format!("{}.exe", self.exec_name)
         } else if crate::patch::have_exe_launcher() {
             format!("{} (mkxp-z).exe", self.exec_name)
         } else {
@@ -416,6 +440,7 @@ impl Plan {
         }
         lines.extend(self.notes.iter().map(|n| format!("Note:     {}", n)));
         lines.extend(self.warnings.iter().map(|w| format!("Warning:  {}", w)));
+        lines.extend(self.errors.iter().map(|e| format!("Error:    {}", e)));
         if !self.missing_engines.is_empty() {
             lines.push(format!("Missing:  engines for {} - they'll be built first (takes a while once).",
                                self.missing_engines.iter().map(|p| p.label()).collect::<Vec<_>>().join(", ")));

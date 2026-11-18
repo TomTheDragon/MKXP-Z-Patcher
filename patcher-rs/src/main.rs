@@ -36,6 +36,10 @@ Options:
   --source-archive F  take the mkxp-z source from this .tar.gz instead of
                       downloading it (with --fetch-source, or when building)
   --no-soundfont      don't bundle a SoundFont for MIDI music in Windows patches
+  --keep-exe          Windows: leave Game.exe as it is and add the launcher next
+                      to it as \"Game (mkxp-z).exe\" (default: the launcher becomes
+                      Game.exe, the original is kept as Game.original.exe; Steam
+                      versions then need launch options, see mkxp-z/README.txt)
   --engines DIR       folder with the built engines (default: see below)
   --mkxpz-src DIR     mkxp-z source folder (fetched automatically if missing)
   --msys2 DIR         Windows: folder for the portable MSYS2
@@ -102,6 +106,7 @@ struct Args {
     no_build: bool,
     build_only: Option<Vec<Platform>>,
     no_soundfont: bool,
+    keep_exe: bool,
     engines: Option<PathBuf>,
     src: Option<PathBuf>,
     msys2: Option<PathBuf>,
@@ -114,7 +119,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args { game: None, platforms: None, check: false, fetch_source: false, source_archive: None, unpatch: false, no_build: false, build_only: None,
-                       no_soundfont: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false };
+                       no_soundfont: false, keep_exe: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().into_owned();
@@ -143,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
             "--unpatch" => a.unpatch = true,
             "--no-build" => a.no_build = true,
             "--no-soundfont" => a.no_soundfont = true,
+            "--keep-exe" => a.keep_exe = true,
             "--gui" => a.gui = true,
             "--appimage" => a.appimage = true,
             _ if s.starts_with('-') => return Err(format!("unknown option {} (see --help)", s)),
@@ -247,12 +253,16 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
         rtp: a.rtp.clone(),
         rgss: a.rgss,
         bundle_soundfont: !a.no_soundfont,
+        replace_exe: !a.keep_exe,
     };
     eprintln!("Analyzing {} ...", game.display());
     let mut p = plan::Plan::new(&game, &opts)?;
     println!("{}", p.summary());
     if a.check {
         return Ok(());
+    }
+    if !p.errors.is_empty() {
+        return Err(p.errors.join("\n"));
     }
     println!();
     if !p.ready() {

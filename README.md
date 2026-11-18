@@ -75,7 +75,11 @@ minutes per engine; it downloads mkxp-z and compiles all its libraries).
 The game then starts with:
 
 - Linux: `Game.sh` in the game folder
-- Windows: `Game (mkxp-z).exe` in the game folder
+- Windows: `Game.exe` in the game folder, as before: the patcher puts its
+  launcher there and keeps the original as `Game.original.exe` ("Remove
+  patch" puts it back), so shortcuts and Steam start the game with mkxp-z. To leave
+  `Game.exe` alone instead, untick "replace Game.exe" (command line:
+  `--keep-exe`): the launcher is then added next to it as `Game (mkxp-z).exe`
 
 From the command line:
 
@@ -87,9 +91,11 @@ mkxpz-patcher --unpatch "path/to/game"
 mkxpz-patcher --help
 ```
 
-Steam versions are started through Steam with launch options that run the
-mkxp-z launcher instead of Game.exe; the patcher writes them into
-`mkxp-z/README.txt` in the game folder.
+Steam versions are started through Steam as usual (on Linux with Proton): Steam
+starts `Game.exe`, which is then the mkxp-z launcher, so no launch options are
+needed. After Steam "verifies" the game files, patch the game again. With
+"replace Game.exe" off, Steam needs launch options instead; the patcher writes
+them into `mkxp-z/README.txt` in the game folder.
 
 ## Building
 
@@ -123,7 +129,7 @@ where there is none.
 | `patcher-rs/` | the patcher (Rust): analysis, patching, engine builds, GTK and Win32 windows |
 | `patcher-rs/assets/mkxpz-patches/` | the patcher's changes to mkxp-z, applied before each engine build |
 | `patcher-rs/assets/compat/` | compatibility scripts added to games that need them |
-| `launcher/` | the tiny `Game (mkxp-z).exe` launcher for Windows |
+| `launcher/` | the tiny Windows launcher that takes the place of `Game.exe` |
 | `tools/` | helpers for cross-building the patcher |
 | `docs/screenshots/` | the pictures above |
 

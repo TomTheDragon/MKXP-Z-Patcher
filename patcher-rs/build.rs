@@ -1,5 +1,5 @@
 // Embed the tiny Windows launcher (../launcher, built with rust-lld for
-// i686-pc-windows-msvc) so the patcher can write "Game (mkxp-z).exe" on any OS.
+// i686-pc-windows-msvc) so the patcher can write it as Game.exe on any OS.
 use std::path::PathBuf;
 
 fn main() {

@@ -9,6 +9,17 @@ use std::path::{Component, Path};
 pub const MANIFEST: &str = ".mkxpz-patcher";
 const BACKUP_SUFFIX: &str = ".pre-mkxpz";
 
+/// Where an existing file the patch replaces is kept: Game.exe ->
+/// Game.original.exe, anything else -> <name>.pre-mkxpz; n > 0 when that's
+/// taken (Game.original.1.exe).
+fn backup_name(name: &str, n: usize) -> String {
+    let num = if n > 0 { format!(".{}", n) } else { String::new() };
+    match name.len().checked_sub(4).filter(|&i| name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe")) {
+        Some(i) => format!("{}.original{}{}", &name[..i], num, &name[i..]),
+        None => format!("{}{}{}", name, BACKUP_SUFFIX, num),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub platforms: Vec<String>,
@@ -206,10 +217,18 @@ pub fn have_exe_launcher() -> bool {
     !LAUNCHER_EXE.is_empty()
 }
 
-/// The game's own icon, from Game.exe.
+/// The game's own icon, from Game.exe (read before the launcher replaces it).
 fn game_icon(plan: &Plan) -> Option<crate::pe::Icon> {
     let game_exe = plan.game_dir.join(format!("{}.exe", plan.exec_name));
     std::fs::read(&game_exe).ok().and_then(|d| crate::pe::icon_from_exe(&d))
+}
+
+/// Whether an exe is our launcher (a small exe with its error message), e.g. a
+/// Game.exe left by a patch whose manifest is gone: never back that up as the
+/// game's original.
+fn is_our_launcher(data: &[u8]) -> bool {
+    let needle = b"The mkxp-z engine for this game wasn't found";
+    data.len() < 1 << 20 && data.windows(needle.len()).any(|w| w == needle)
 }
 
 /// The RTP inside ENGINE_SUBDIR when it's bundled (Plan::bundle_rtp).
@@ -218,14 +237,18 @@ const BUNDLED_RTP: &str = "RTP";
 /// File name of the game's icon in ENGINE_SUBDIR, for mkxp-z's window.
 const ICON_FILE: &str = "icon.png";
 
-/// "Game (mkxp-z).exe" with the game's own icon (from Game.exe), or mkxp-z's.
-fn windows_launcher_exe(plan: &Plan, log: &dyn Fn(String)) -> Vec<u8> {
-    let icon = game_icon(plan);
-    if icon.is_none() {
-        log(format!("{}.exe has no icon to copy; using mkxp-z's.", plan.exec_name));
-    }
-    let icon = icon.or_else(|| crate::pe::icon_from_ico(MKXPZ_ICON));
-    match icon.map(|i| crate::pe::with_icon(LAUNCHER_EXE, &i)) {
+/// The launcher (written as Game.exe) with the game's own icon, or mkxp-z's.
+fn windows_launcher_exe(plan: &Plan, icon: Option<&crate::pe::Icon>, log: &dyn Fn(String)) -> Vec<u8> {
+    let fallback;
+    let icon = match icon {
+        Some(i) => Some(i),
+        None => {
+            log(format!("{}.exe has no icon to copy; using mkxp-z's.", plan.exec_name));
+            fallback = crate::pe::icon_from_ico(MKXPZ_ICON);
+            fallback.as_ref()
+        }
+    };
+    match icon.map(|i| crate::pe::with_icon(LAUNCHER_EXE, i)) {
         Some(Ok(exe)) => exe,
         Some(Err(e)) => {
             log(format!("Couldn't add the icon to the launcher ({}); it gets the default one.", e));
@@ -240,11 +263,26 @@ fn windows_launcher_exe(plan: &Plan, log: &dyn Fn(String)) -> Vec<u8> {
 const LAUNCHER_WINDOWS: &str = "@echo off\r\nrem Starts this game with mkxp-z (added by the MKXP-Z Patcher).\r\n\
                                 start \"\" \"%~dp0__SUBDIR__\\__PLATDIR__\\__EXE__\" %*\r\n";
 
-/// Steam launch options for Linux (Proton): swap the game's exe in Steam's
-/// command for the mkxp-z launcher, so Proton runs that instead.
+/// Steam launch options on Windows when Game.exe stays (see Plan::replace_exe).
+pub const WINDOWS_LAUNCH_OPTIONS: &str = "\"<game folder>\\mkxp-z\\windows\\mkxp-z.i686.exe\" %command%";
+
+/// Steam launch options for Linux (Proton) when Game.exe stays: swap the
+/// game's exe in Steam's command for the mkxp-z launcher.
 pub fn proton_launch_options(exec_name: &str) -> String {
     format!("bash -c 'exec \"${{@/%{0}.exe/{0} (mkxp-z).exe}}\"' -- %command%", exec_name)
 }
+
+const STEAM_REPLACED: &str = "start the game through Steam as usual (on Linux with Proton); Steam starts
+Game.exe, which is now the mkxp-z launcher, so no launch options are needed.
+If Steam \"verifies\" the game files it puts the original Game.exe back; patch
+the game again afterwards.";
+
+const STEAM_NEXT_TO: &str = "start the game through Steam (started directly, Steam restarts Game.exe).
+In Steam: right-click the game > Properties > Launch options:
+  Windows:
+    {WINDOWS}
+  Linux (Proton; replaces Game.exe in Steam's command with the mkxp-z launcher):
+    {PROTON}";
 
 const README: &str = "Added by the MKXP-Z Patcher: the mkxp-z engine for this game.
 
@@ -254,8 +292,7 @@ const README: &str = "Added by the MKXP-Z Patcher: the mkxp-z engine for this ga
 Start the game with:
 {launchers}
 Files added to the game folder: {added}
-Run the patcher again and choose \"Remove patch\" to take them out again.
-The game's original files are unchanged, so Game.exe still works as before.
+{replaced}Run the patcher again and choose \"Remove patch\" to take them out again{restore}.
 
 Layout of this folder:
   linux/, linux32/, windows/   the engine for each platform, its Ruby standard
@@ -297,12 +334,7 @@ the FPS display (F2) shows the game's rate and the rate sent to the display,
 e.g. \"60/144 FPS\".
 
 Steam versions: the 32-bit Windows engine uses the game's own steam_api.dll, so
-start the game through Steam (started directly, Steam restarts Game.exe).
-In Steam: right-click the game > Properties > Launch options:
-  Windows:
-    \"<game folder>\\mkxp-z\\windows\\mkxp-z.i686.exe\" %command%
-  Linux (Proton; replaces Game.exe in Steam's command with the mkxp-z launcher):
-    {PROTON}
+{STEAM}
 The native Linux engine can't load the Windows Steam DLL, so Steam versions quit
 at startup with it.
 To check the Steam functions (e.g. that achievements reach Steam), create an
@@ -392,6 +424,9 @@ fn linux_launcher(plan: &Plan) -> String {
 
 pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
     let g = plan.game_dir.clone();
+    if !plan.errors.is_empty() {
+        return Err(plan.errors.join("\n"));
+    }
     if !plan.ready() {
         return Err(format!("Engines not built yet: {}",
                            plan.missing_engines.iter().map(|p| p.label()).collect::<Vec<_>>().join(", ")));
@@ -417,16 +452,28 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
 
     let launchers = plan.launchers();
     let root_files: Vec<String> = launchers.iter().map(|(_, n)| n.clone()).collect();
+    let exe_name = format!("{}.exe", plan.exec_name);
+    if root_files.contains(&exe_name) {
+        let data = std::fs::read(g.join(&exe_name)).unwrap_or_default();
+        if is_our_launcher(&data) {
+            return Err(format!("{} is already the mkxp-z launcher, but this folder has no patch record ({}), \
+                                so the original {} can't be restored. Put the original back first (e.g. from \
+                                {} or by verifying the game files in Steam).",
+                               exe_name, MANIFEST, exe_name, backup_name(&exe_name, 0)));
+        }
+    }
+    // the icon comes from the original Game.exe, before the launcher takes its place
+    let icon = game_icon(plan);
     let mut m = Manifest { platforms: plan.platforms.iter().map(|p| p.key().to_string()).collect(),
                            files: Vec::new(), backups: Vec::new() };
     for name in &root_files {
         let p = g.join(name);
         if p.exists() || std::fs::symlink_metadata(&p).is_ok() {
-            let mut backup = format!("{}{}", name, BACKUP_SUFFIX);
-            let mut n = 1;
+            let mut n = 0;
+            let mut backup = backup_name(name, n);
             while g.join(&backup).exists() {
-                backup = format!("{}{}.{}", name, BACKUP_SUFFIX, n);
                 n += 1;
+                backup = backup_name(name, n);
             }
             log(format!("Backing up existing {} -> {}", name, backup));
             std::fs::rename(&p, g.join(&backup)).map_err(|e| e.to_string())?;
@@ -444,7 +491,6 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
 
         std::fs::create_dir_all(shared.join(SHADERS_DIR)).map_err(io)?;
         std::fs::write(shared.join(SHADERS_DIR).join(SHADERS_README_FILE), SHADERS_README).map_err(io)?;
-        let icon = game_icon(plan);
         plan.icon_png = icon.as_ref().and_then(|i| i.to_png());
         if let Some(png) = &plan.icon_png {
             std::fs::create_dir_all(&shared).map_err(io)?;
@@ -505,7 +551,7 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
             if p.is_windows() {
                 let e = plan.engine(*p).ok_or("engine vanished")?;
                 if have_exe_launcher() {
-                    std::fs::write(g.join(name), windows_launcher_exe(plan, log)).map_err(io)?;
+                    std::fs::write(g.join(name), windows_launcher_exe(plan, icon.as_ref(), log)).map_err(io)?;
                 } else {
                     let text = LAUNCHER_WINDOWS.replace("__SUBDIR__", ENGINE_SUBDIR)
                         .replace("__PLATDIR__", p.sub()).replace("__EXE__", e.platform.exe());
@@ -521,11 +567,23 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
         let mut added = root_files.clone();
         added.push(format!("{}/", ENGINE_SUBDIR));
         added.push(MANIFEST.into());
+        let backed_up: Vec<String> = m.backups.iter().map(|(o, b)| format!("{} (moved to {})", o, b)).collect();
+        let replaced = if backed_up.is_empty() { String::new() } else {
+            format!("Replaced by the launcher: {}\n", backed_up.join(", "))
+        };
+        let restore = if backed_up.is_empty() { "" } else { " and put the originals back" };
+        let replaces_exe = root_files.iter().any(|n| n.eq_ignore_ascii_case(&format!("{}.exe", plan.exec_name)));
+        let steam = if replaces_exe { STEAM_REPLACED.to_string() } else {
+            STEAM_NEXT_TO.replace("{WINDOWS}", WINDOWS_LAUNCH_OPTIONS)
+                .replace("{PROTON}", &proton_launch_options(&plan.exec_name))
+        };
         let readme = README.replace("{title}", &plan.title)
             .replace("{rgss}", crate::game::RGSS_NAMES[plan.rgss])
             .replace("{launchers}", &(lines.join("\n") + "\n"))
             .replace("{added}", &added.join(", "))
-            .replace("{PROTON}", &proton_launch_options(&plan.exec_name));
+            .replace("{replaced}", &replaced)
+            .replace("{restore}", restore)
+            .replace("{STEAM}", &steam);
         std::fs::write(shared.join("README.txt"), readme).map_err(io)?;
         Ok(())
     })();
@@ -544,6 +602,22 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
 #[cfg(test)]
 mod shader_dir_tests {
     use super::*;
+
+    #[test]
+    fn recognizes_launcher() {
+        if have_exe_launcher() {
+            assert!(is_our_launcher(LAUNCHER_EXE));
+        }
+        assert!(!is_our_launcher(b"MZ an RGSS Game.exe"));
+    }
+
+    #[test]
+    fn backup_names() {
+        assert_eq!(backup_name("Game.exe", 0), "Game.original.exe");
+        assert_eq!(backup_name("Game.EXE", 2), "Game.original.2.EXE");
+        assert_eq!(backup_name("Game.sh", 0), "Game.sh.pre-mkxpz");
+        assert_eq!(backup_name("Game (mkxp-z).cmd", 1), "Game (mkxp-z).cmd.pre-mkxpz.1");
+    }
 
     #[test]
     fn keeps_player_settings() {

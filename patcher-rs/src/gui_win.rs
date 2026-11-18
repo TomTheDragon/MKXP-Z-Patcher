@@ -52,6 +52,7 @@ const ID_LINUX32: i32 = 302;
 const ID_WINDOWS: i32 = 303;
 const ID_ARCH: i32 = 304;
 const ID_SOUNDFONT: i32 = 305;
+const ID_REPLACE_EXE: i32 = 306;
 const ID_PATCH: i32 = 501;
 const ID_UNPATCH: i32 = 502;
 const ID_START: i32 = 503;
@@ -135,6 +136,7 @@ struct Key {
     rtp: String,
     platforms: Vec<Platform>,
     soundfont: bool,
+    replace_exe: bool,
 }
 
 #[derive(Default)]
@@ -148,6 +150,7 @@ struct Controls {
     windows: HWND,
     arch: HWND,
     soundfont: HWND,
+    replace_exe: HWND,
     hint: HWND,
     summary: HWND,
     log: HWND,
@@ -309,6 +312,7 @@ pub fn run(game: Option<PathBuf>, paths: Paths, linux_engine: Option<PathBuf>) -
     set_text(c.edits[3], &paths.source.display().to_string());
     set_checked(c.windows, true);
     set_checked(c.soundfont, true);
+    set_checked(c.replace_exe, true);
     unsafe { SendMessageW(c.arch, CB_SETCURSEL, 0, 0) };
     let (tx, rx) = channel();
     APP.with(|a| *a.borrow_mut() = Some(App {
@@ -386,6 +390,9 @@ fn create_controls(parent: HWND, hinst: isize, scale: f32) -> Controls {
         unsafe { SendMessageW(c.arch, CB_ADDSTRING, 0, wide(item).as_ptr() as LPARAM) };
     }
     c.soundfont = make("BUTTON", "bundle a SoundFont for MIDI music", WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_SOUNDFONT, font);
+    // off: "Game (mkxp-z).exe" next to Game.exe (Steam versions then need launch options)
+    c.replace_exe = make("BUTTON", "replace Game.exe (the original is kept as Game.original.exe)",
+                         WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_REPLACE_EXE, font);
     c.hint = make("STATIC", "32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and ARM64 can't load them.",
                   SS_LEFT, 0, 0, font);
     let text_style = WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL;
@@ -424,7 +431,7 @@ fn layout(hwnd: HWND) {
             y += rowh + gap;
         }
         // platform group
-        let gh = rowh * 2 + px(34.0);
+        let gh = rowh * 3 + px(38.0);
         mv(c.group, m, y, width - 2 * m, gh);
         let (gx, gy) = (m + px(12.0), y + px(20.0));
         mv(c.linux64, gx, gy, px(110.0), rowh);
@@ -432,7 +439,8 @@ fn layout(hwnd: HWND) {
         mv(c.windows, gx + px(250.0), gy, px(90.0), rowh);
         mv(c.arch, gx + px(345.0), gy, px(170.0), px(200.0));
         mv(c.soundfont, gx + px(530.0), gy, px(260.0), rowh);
-        mv(c.hint, gx, gy + rowh + px(4.0), width - 2 * m - px(24.0), rowh);
+        mv(c.replace_exe, gx, gy + rowh + px(4.0), width - 2 * m - px(24.0), rowh);
+        mv(c.hint, gx, gy + 2 * (rowh + px(4.0)), width - 2 * m - px(24.0), rowh);
         y += gh + gap;
         // text areas and buttons
         let bottom_h = px(30.0);
@@ -539,7 +547,7 @@ fn on_command(hwnd: HWND, id: i32, code: u32) {
         return;
     }
     match (id, code) {
-        (ID_LINUX64 | ID_LINUX32 | ID_WINDOWS | ID_SOUNDFONT, BN_CLICKED) | (ID_ARCH, CBN_SELCHANGE) => {
+        (ID_LINUX64 | ID_LINUX32 | ID_WINDOWS | ID_SOUNDFONT | ID_REPLACE_EXE, BN_CLICKED) | (ID_ARCH, CBN_SELCHANGE) => {
             with(update_controls);
             schedule_analyze(hwnd, 0);
         }
@@ -576,7 +584,7 @@ fn key(c: &Controls) -> Key {
     }
     Key { game: get_text(c.edits[0]).trim().into(), engines: get_text(c.edits[1]).trim().into(),
           rtp: get_text(c.edits[2]).trim().into(), source: get_text(c.edits[3]).trim().into(),
-          platforms, soundfont: checked(c.soundfont) }
+          platforms, soundfont: checked(c.soundfont), replace_exe: checked(c.replace_exe) }
 }
 
 fn options(a: &App, k: &Key) -> Options {
@@ -587,6 +595,7 @@ fn options(a: &App, k: &Key) -> Options {
         rtp: (!k.rtp.is_empty()).then(|| PathBuf::from(&k.rtp)),
         rgss: None,
         bundle_soundfont: k.soundfont,
+        replace_exe: k.replace_exe,
     }
 }
 
@@ -705,8 +714,9 @@ fn host_launcher(a: &App) -> Option<PathBuf> {
     if !m.platforms.iter().any(|x| x.starts_with("windows")) {
         return None;
     }
-    [format!("{} (mkxp-z).exe", plan.exec_name), format!("{} (mkxp-z).cmd", plan.exec_name)]
-        .into_iter().map(|n| plan.game_dir.join(n)).find(|p| p.is_file())
+    // Game.exe or "Game (mkxp-z).exe/.cmd", as the patch recorded it
+    m.files.iter().filter(|f| f.ends_with(".exe") || f.ends_with(".cmd"))
+        .map(|n| plan.game_dir.join(n)).find(|p| p.is_file())
 }
 
 fn start_game() {
@@ -857,13 +867,14 @@ fn update_controls(a: &mut App) {
     let win = checked(c.windows);
     enable(c.arch, !busy && win);
     enable(c.soundfont, !busy && win);
+    enable(c.replace_exe, !busy && win);
     let plan = a.plan.as_ref();
     set_text(c.patch, match plan {
         Some(p) if !p.missing_engines.is_empty() => "Build && patch",
         Some(p) if p.patched() => "Re-patch game",
         _ => "Patch game",
     });
-    enable(c.patch, plan.is_some() && !busy);
+    enable(c.patch, plan.map_or(false, |p| p.errors.is_empty()) && !busy);
     enable(c.unpatch, plan.map_or(false, |p| p.patched()) && !busy);
     enable(c.start, !busy && host_launcher(a).is_some());
     let status = if let Some(b) = &a.busy {

@@ -27,6 +27,7 @@ struct Key {
     rtp: String,
     platforms: Vec<Platform>,
     soundfont: bool,
+    replace_exe: bool,
 }
 
 struct Widgets {
@@ -43,6 +44,7 @@ struct Widgets {
     windows: gtk::CheckButton,
     arch: gtk::ComboBoxText,
     soundfont: gtk::CheckButton,
+    replace_exe: gtk::CheckButton,
     summary: gtk::TextBuffer,
     log: gtk::TextBuffer,
     log_view: gtk::TextView,
@@ -185,6 +187,11 @@ fn build_widgets() -> Widgets {
     arch.set_active_id(Some("32"));
     let soundfont = gtk::CheckButton::with_label("bundle a SoundFont for MIDI music");
     soundfont.set_active(true);
+    let replace_exe = gtk::CheckButton::with_label("replace Game.exe (the original is kept as Game.original.exe)");
+    replace_exe.set_tooltip_text(Some("On: the mkxp-z launcher takes the place of Game.exe, so shortcuts and Steam start \
+                                       mkxp-z unchanged. Off: it's added next to Game.exe as \"Game (mkxp-z).exe\", and \
+                                       Steam versions need launch options (see mkxp-z/README.txt)."));
+    replace_exe.set_active(true);
     let sep = gtk::Separator::new(gtk::Orientation::Vertical);
     row.pack_start(&linux64, false, false, 0);
     row.pack_start(&linux32, false, false, 0);
@@ -195,6 +202,7 @@ fn build_widgets() -> Widgets {
     row.pack_start(&arch, false, false, 0);
     row.pack_start(&soundfont, false, false, 0);
     fbox.pack_start(&row, false, false, 0);
+    fbox.pack_start(&replace_exe, false, false, 0);
     let hint = gtk::Label::new(Some("32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and ARM64 can't load them."));
     hint.set_xalign(0.0);
     hint.style_context().add_class("dim-label");
@@ -230,7 +238,7 @@ fn build_widgets() -> Widgets {
     window.add(&vbox);
 
     Widgets { window, game, engines, source, rtp, browse: vec![game_b, engines_b, rtp_b, source_b], linux64, linux32,
-              linux_arm64, linux_armhf, windows, arch, soundfont, summary, log, log_view, spinner, status, patch, unpatch,
+              linux_arm64, linux_armhf, windows, arch, soundfont, replace_exe, summary, log, log_view, spinner, status, patch, unpatch,
               start, appimage }
 }
 
@@ -257,7 +265,7 @@ fn key(w: &Widgets) -> Key {
     }
     Key { game: w.game.text().trim().to_string(), engines: w.engines.text().trim().to_string(),
           source: w.source.text().trim().to_string(), rtp: w.rtp.text().trim().to_string(),
-          platforms, soundfont: w.soundfont.is_active() }
+          platforms, soundfont: w.soundfont.is_active(), replace_exe: w.replace_exe.is_active() }
 }
 
 fn options(app: &App, k: &Key) -> Options {
@@ -269,6 +277,7 @@ fn options(app: &App, k: &Key) -> Options {
         rtp: (!k.rtp.is_empty()).then(|| PathBuf::from(&k.rtp)),
         rgss: None,
         bundle_soundfont: k.soundfont,
+        replace_exe: k.replace_exe,
     }
 }
 
@@ -311,7 +320,7 @@ fn connect(app: &Rc<App>) {
             a.s.borrow_mut().chooser = Some(d); // keep it alive until it answers
         });
     }
-    for c in [&w.linux64, &w.linux32, &w.linux_arm64, &w.linux_armhf, &w.windows, &w.soundfont] {
+    for c in [&w.linux64, &w.linux32, &w.linux_arm64, &w.linux_armhf, &w.windows, &w.soundfont, &w.replace_exe] {
         let a = app.clone();
         c.connect_toggled(move |_| {
             update_controls(&a);
@@ -543,9 +552,9 @@ fn host_launcher(app: &App) -> Option<PathBuf> {
     let s = app.s.borrow();
     let plan = s.plan.as_ref()?;
     let m = plan.manifest.as_ref()?;
-    let has = |k: &str| m.platforms.iter().any(|x| x == k);
-    let names: Vec<String> = if cfg!(windows) && (has("windows") || has("windows64")) {
-        vec![format!("{} (mkxp-z).exe", plan.exec_name), format!("{} (mkxp-z).cmd", plan.exec_name)]
+    let names: Vec<String> = if cfg!(windows) && m.platforms.iter().any(|k| k.starts_with("windows")) {
+        // the Windows launcher: Game.exe or "Game (mkxp-z).exe/.cmd", as the patch recorded it
+        m.files.iter().filter(|f| f.ends_with(".exe") || f.ends_with(".cmd")).cloned().collect()
     } else if cfg!(target_os = "linux") && m.platforms.iter().any(|k| k.starts_with("linux")) {
         vec![format!("{}.sh", plan.exec_name)]
     } else {
@@ -682,7 +691,7 @@ fn update_controls(app: &App) {
              Some(p) if p.patched() => "Re-patch game",
              _ => "Patch game",
          },
-         plan.is_some(), plan.map_or(false, |p| p.patched()), s.busy.clone())
+         plan.map_or(false, |p| p.errors.is_empty()), plan.map_or(false, |p| p.patched()), s.busy.clone())
     };
     for e in [&w.game, &w.engines, &w.rtp, &w.source] {
         e.set_sensitive(!busy);
@@ -696,6 +705,7 @@ fn update_controls(app: &App) {
     w.appimage.set_sensitive(!busy && can_patch && !appimage_platforms(app).is_empty());
     w.arch.set_sensitive(!busy && w.windows.is_active());
     w.soundfont.set_sensitive(!busy && w.windows.is_active());
+    w.replace_exe.set_sensitive(!busy && w.windows.is_active());
     w.patch.set_label(patch_label);
     w.patch.set_sensitive(can_patch && !busy);
     w.unpatch.set_sensitive(can_unpatch && !busy);

@@ -1,4 +1,5 @@
-//! Tiny Windows launcher for patched games ("Game (mkxp-z).exe").
+//! Tiny Windows launcher for patched games: it takes the place of Game.exe
+//! (the original is kept as Game.original.exe), so shortcuts and Steam start mkxp-z.
 //!
 //! Starts mkxp-z\windows\mkxp-z.<cpu>.exe next to itself with the same arguments
 //! (the engine that suits this computer's CPU best, see engine_order),
