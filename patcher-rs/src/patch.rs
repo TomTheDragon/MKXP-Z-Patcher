@@ -308,12 +308,24 @@ Layout of this folder:
                 installed one)
 
 Settings (F1): key bindings, and the options \"Reduce screen flickering\" (vsync),
-\"Smooth movement\" (frame interpolation), \"Start in fullscreen\" and the music
-and sound levels. They're saved in this folder (mkxp-z/mkxp.json, next to the key
+\"Smooth movement\" (frame interpolation), \"Start in fullscreen\",
+\"Widescreen\" (RPG Maker VX / VX Ace) and the music and sound levels. They're saved in this folder (mkxp-z/mkxp.json, next to the key
 bindings in keybindings.mkxp*; AppImages: ~/.config/<game title>), and take
 precedence over mkxp-z/<platform>/mkxp.json. They stay when the patch is removed
 or applied again; settings saved by older versions in the user's data folder
 (%APPDATA%\\<game title>, ~/.local/share/<game title>) are taken over once.
+
+Widescreen (VX / VX Ace, F1 > Widescreen; off by default; a click shows the
+next choice, a right click the one before):
+- \"16:9, scene colors at the sides\": a 16:9 window with the game in its own
+  size in the middle; the sides show the scene's colors, blurred and darker.
+  The game itself is unchanged. (Not with a screen shader: black sides.)
+- \"16:9 wider map view\" (experimental): maps are shown in 16:9 with more of
+  the map around the player; title, menus and battles keep the game's size,
+  in the middle with colored sides. Maps narrower than the screen and the
+  game's pictures stay centered (black bars beside full-screen pictures).
+  HUDs that the game's scripts place for the original screen stay where the
+  game put them.
 
 Screen shaders (CRT look, smoothing filters, ...): put libretro GLSL shaders
 (https://github.com/libretro/glsl-shaders) into mkxp-z/shaders and choose one

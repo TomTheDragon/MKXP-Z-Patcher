@@ -5,6 +5,7 @@
 # those parts, as soon as the game's script defines them, with mkxp-z's own
 # window functions, so its keys keep working on every platform:
 #   F5  fullscreen on/off      F6  next window size (1x, 2x, ... fit screen)
+# In a widescreen mode (F1 menu) the window sizes are 16:9.
 # Settings stay in Game.ini, section [Fullscreen++], as with the original.
 # mkxp-z's own Alt+Enter is followed too.
 
@@ -73,6 +74,13 @@ module MkxpzFullscreenPlus
   end
 
   # --- window
+  # The window's width at the screen's height: wider than the screen in the
+  # widescreen modes (widescreen.rb), where the window is 16:9.
+  def self.frame_width
+    w = defined?(MkxpzWidescreen) ? MkxpzWidescreen.frame_w : nil
+    w && w > 0 ? w : Graphics.width
+  end
+
   def self.apply(fullscreen, w, h)
     if fullscreen
       Graphics.fullscreen = true unless Graphics.fullscreen
@@ -116,6 +124,30 @@ module MkxpzFullscreenPlus
     def release_alt() end
     def resize_window(w, h)
       MkxpzFullscreenPlus.apply(@fullscreen, w, h)
+    end
+    # the original, with the window's width instead of the screen's
+    def ratio=(r)
+      return if vx_fullscreen?
+      initialize_fullscreen_rects
+      r = 0 if r < 0
+      fw = MkxpzFullscreenPlus.frame_width
+      if @fullscreen
+        @fullscreen_ratio = r
+        w_max, h_max = @fullscreen_rect.width, @fullscreen_rect.height
+      else
+        @windowed_ratio = r
+        w_max = @workarea_rect.width - @borders_size.width
+        h_max = @workarea_rect.height - @borders_size.height
+      end
+      if r == 0
+        w, h = w_max, w_max * height / fw
+        h, w = h_max, h_max * fw / height if h > h_max
+      else
+        w, h = fw * r, height * r
+        return self.ratio = 0 if w > w_max or h > h_max
+      end
+      resize_window(w, h)
+      save_fullscreen_settings
     end
     def load_fullscreen_settings
       @fullscreen       = MkxpzFullscreenPlus.ini_read('Fullscreen', '0') == '1'

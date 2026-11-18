@@ -1,0 +1,462 @@
+--- a/binding/graphics-binding.cpp
++++ b/binding/graphics-binding.cpp
+@@ -275,6 +275,30 @@ RB_METHOD_GUARD(graphicsSnapToBitmap)
+ }
+ RB_METHOD_GUARD_END
+ 
++/* Widescreen mode (see Graphics::widescreenResize) */
++RB_METHOD(graphicsWidescreenResize)
++{
++    RB_UNUSED_PARAM;
++    
++    int width, height, frameWidth;
++    rb_get_args(argc, argv, "iii", &width, &height, &frameWidth RB_ARG_END);
++    
++    GFX_LOCK;
++    shState->graphics().widescreenResize(width, height, frameWidth);
++    GFX_UNLOCK;
++    
++    return Qnil;
++}
++
++/* the player's choice in the F1 menu: 0 off, 1 colored sides,
++ * 2 wider map view */
++RB_METHOD(graphicsGetWidescreenMode)
++{
++    RB_UNUSED_PARAM;
++    
++    return rb_fix_new(shState->config().widescreen);
++}
++
+ RB_METHOD(graphicsResizeScreen)
+ {
+     RB_UNUSED_PARAM;
+@@ -439,6 +463,8 @@ void graphicsBindingInit()
+     _rb_define_module_function(module, "fadein", graphicsFadein);
+     _rb_define_module_function(module, "snap_to_bitmap", graphicsSnapToBitmap);
+     _rb_define_module_function(module, "resize_screen", graphicsResizeScreen);
++    _rb_define_module_function(module, "widescreen_resize", graphicsWidescreenResize);
++    _rb_define_module_function(module, "widescreen_mode", graphicsGetWidescreenMode);
+     _rb_define_module_function(module, "resize_window", graphicsResizeWindow);
+     _rb_define_module_function(module, "center", graphicsCenter);
+         
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -148,6 +148,7 @@ void Config::read(int argc, char *argv[]) {
+         {"printFPS", false},
+         {"winResizable", true},
+         {"fullscreen", false},
++        {"widescreen", 0},
+         {"fixedAspectRatio", true},
+         {"smoothScaling", 0},
+         {"smoothScalingDown", 0},
+@@ -294,6 +295,8 @@ try { exp } catch (...) {}
+     SET_OPT(displayFPS, boolean);
+     SET_OPT(printFPS, boolean);
+     SET_OPT(fullscreen, boolean);
++    SET_OPT(widescreen, integer);
++    widescreen = clamp(widescreen, 0, 2);
+     SET_OPT(fixedAspectRatio, boolean);
+     SET_OPT(smoothScaling, integer);
+     SET_OPT(smoothScalingDown, integer);
+@@ -460,6 +463,7 @@ bool Config::storeUserSettings() const {
+     auto &obj = conf.as_object();
+     obj["vsync"] = json::value(vsync);
+     obj["fullscreen"] = json::value(fullscreen);
++    obj["widescreen"] = json::value(widescreen);
+     obj["frameInterpolation"] = json::value(frameInterpolation);
+     obj["musicVolume"] = json::value((int) musicVolume);
+     obj["soundVolume"] = json::value((int) soundVolume);
+--- a/src/config.h
++++ b/src/config.h
+@@ -44,6 +44,12 @@ struct Config {
+     
+     bool winResizable;
+     bool fullscreen;
++    /* Widescreen mode (F1 menu, Graphics.widescreen_mode), used by the
++     * patcher's compatibility script for VX / VX Ace:
++     * 0: off; 1: a 16:9 window, the game's screen in the middle and its
++     * colors (blurred) at the sides; 2: (experimental) like 1, but maps are
++     * shown in 16:9 with more of the map around the player */
++    int widescreen;
+     bool fixedAspectRatio;
+     int smoothScaling;
+     int smoothScalingDown;
+--- a/src/display/graphics.cpp
++++ b/src/display/graphics.cpp
+@@ -904,6 +904,9 @@ struct GraphicsPrivate {
+     }
+     
+     ~GraphicsPrivate() {
++        if (ambientReady)
++            for (int i = 0; i < AMBIENT_STEPS; ++i)
++                TEXFBO::fini(ambientBuf[i]);
+         TEXFBO::fini(frozenScene);
+         TEXFBO::fini(integerScaleBuffer);
+         SDL_DestroyMutex(avgFPSLock);
+@@ -922,6 +925,10 @@ struct GraphicsPrivate {
+     void recalculateScreenSize(bool fixedAspectRatio) {
+         scSize = winSize;
+         
++        /* widescreen mode: the game's own 4:3 scenes in a 16:9 window */
++        if (threadData->config.widescreen > 0)
++            fixedAspectRatio = true;
++        
+         if (!fixedAspectRatio) {
+             if (!integerScaleActive || (integerScaleActive && integerLastMileScaling)) {
+                 scOffset = Vec2i(0, 0);
+@@ -1021,6 +1028,82 @@ struct GraphicsPrivate {
+         }
+     }
+     
++    /* After a new screen size that the window doesn't follow (widescreen
++     * mode): fit the screen into the window again, as a window resize
++     * would. (Without this, it stayed scaled to the old size: stretched
++     * or squeezed until the window was resized.) */
++    void screenSizeChanged() {
++        if (integerScaleActive && findHighestIntegerScale())
++            rebuildIntegerScaleBuffer();
++        recalculateScreenSize(threadData->config.fixedAspectRatio);
++        updateScreenResoRatio(threadData);
++        
++        SDL_Rect screen = {scOffset.x, scOffset.y, scSize.x, scSize.y};
++        threadData->ethread->notifyGameScreenChange(screen);
++    }
++    
++    /* Widescreen mode (added by the MKXP-Z Patcher): the bars beside the
++     * game's screen show its colors, blurred and darkened, instead of black.
++     * The frame is scaled down in steps (each one averages 2x2 pixels),
++     * then the smallest one is stretched over the whole window, under the
++     * game's screen. */
++    static const int AMBIENT_STEPS = 5;
++    TEXFBO ambientBuf[AMBIENT_STEPS];
++    bool ambientReady = false;
++    
++    bool ambientWanted() const {
++        return threadData->config.widescreen > 0 && (scOffset.x > 0 || scOffset.y > 0);
++    }
++    
++    void prepareAmbient(TEXFBO &source, const Vec2i &sourceSize) {
++        if (!ambientReady) {
++            for (int i = 0; i < AMBIENT_STEPS; ++i) {
++                TEXFBO::init(ambientBuf[i]);
++                TEXFBO::allocEmpty(ambientBuf[i], 256 >> i, 192 >> i);
++                TEXFBO::linkFBO(ambientBuf[i]);
++            }
++            ambientReady = true;
++        }
++        
++        TEXFBO *from = &source;
++        IntRect fromRect(0, 0, sourceSize.x, sourceSize.y);
++        for (int i = 0; i < AMBIENT_STEPS; ++i) {
++            TEXFBO &to = ambientBuf[i];
++            GLMeta::blitBegin(to, false, SameScale);
++            GLMeta::blitSource(*from, SameScale);
++            GLMeta::blitRectangle(fromRect, IntRect(0, 0, to.width, to.height), true);
++            GLMeta::blitEnd();
++            from = &to;
++            fromRect = IntRect(0, 0, to.width, to.height);
++        }
++        
++        /* darker, so the game's screen stands out */
++        TEXFBO &last = ambientBuf[AMBIENT_STEPS - 1];
++        FBO::bind(last.fbo);
++        glState.viewport.pushSet(IntRect(0, 0, last.width, last.height));
++        glState.blendMode.pushSet(BlendNormal);
++        glState.blend.pushSet(true);
++        FlatColorShader &shader = shState->shaders().flatColor;
++        shader.bind();
++        shader.applyViewportProj();
++        shader.setColor(Vec4(0, 0, 0, 0.4f));
++        Quad &quad = shState->gpQuad();
++        quad.setPosRect(FloatRect(0, 0, last.width, last.height));
++        quad.draw();
++        glState.blend.pop();
++        glState.blendMode.pop();
++        glState.viewport.pop();
++    }
++    
++    /* (between blitBeginScreen and blitEnd; the caller binds its own
++     * source again afterwards) */
++    void drawAmbient(int scaleIsSpecial) {
++        TEXFBO &last = ambientBuf[AMBIENT_STEPS - 1];
++        GLMeta::blitSource(last, scaleIsSpecial);
++        GLMeta::blitRectangle(IntRect(0, 0, last.width, last.height),
++                              IntRect(0, winSize.y, winSize.x, -winSize.y), true);
++    }
++    
+     void checkShutDownReset() {
+         shState->checkShutdown();
+         shState->checkReset();
+@@ -1055,6 +1138,13 @@ private:
+                 mkxp_angle_direct3d_resize_callback = nullptr;
+             }
+         } else {
++        const bool ambient = ambientWanted();
++        if (ambient) {
++            const bool whole = source == integerScaleBuffer;
++            prepareAmbient(source, Vec2i(whole ? source.width : std::min(scRes.x, source.width),
++                                         whole ? source.height : std::min(scRes.y, source.height)));
++        }
++        
+         GLMeta::blitBeginScreen(screenSize, scaleIsSpecial);
+         GLMeta::blitSource(source, scaleIsSpecial);
+ 
+@@ -1064,6 +1154,10 @@ private:
+                 repaintCount = 2;
+             };
+             FBO::clear();
++            if (ambient) {
++                drawAmbient(scaleIsSpecial);
++                GLMeta::blitSource(source, scaleIsSpecial);
++            }
+             metaBlitBufferFlippedScaled(args...);
+             SDL_GL_SwapWindow(threadData->window);
+             mkxp_angle_direct3d_resize_callback = nullptr;
+@@ -1744,7 +1838,7 @@ int Graphics::displayHeight() const {
+     return dm.h / p->backingScaleFactor;
+ }
+ 
+-void Graphics::resizeScreen(int width, int height) {
++void Graphics::resizeScreen(int width, int height, bool adjustWindow) {
+     p->threadData->rqWindowAdjust.wait();
+     p->checkResize(true);
+     
+@@ -1777,7 +1871,78 @@ void Graphics::resizeScreen(int width, int height) {
+     
+     glState.scissorBox.set(IntRect(0, 0, p->scRes.x, p->scRes.y));
+     
+-    shState->eThread().requestWindowResize(width, height);
++    if (adjustWindow)
++        shState->eThread().requestWindowResize(width, height);
++}
++
++/* Widescreen mode (added by the MKXP-Z Patcher): change the game's screen
++ * size without the window following it, e.g. between a 16:9 map and the
++ * game's own 4:3 menus. The screen shows letterboxed in the window, which
++ * only takes the aspect ratio of frameWidth x height: its height (and so
++ * its scale) stays, and fullscreen or maximized windows aren't touched.
++ * The picture frozen for the next transition is kept, centered, so scene
++ * changes still fade from the old scene. */
++void Graphics::widescreenResize(int width, int height, int frameWidth) {
++    width = clamp(width, 16, 8192);
++    height = clamp(height, 16, 8192);
++    
++    if (p->scResLores != Vec2i(width, height)) {
++        const int oldW = p->frozenScene.width, oldH = p->frozenScene.height;
++        const bool keep = oldW > 0 && oldH > 0;
++        TEXFBO saved;
++        
++        if (keep) {
++            TEXFBO::init(saved);
++            TEXFBO::allocEmpty(saved, oldW, oldH);
++            TEXFBO::linkFBO(saved);
++            GLMeta::blitBegin(saved);
++            GLMeta::blitSource(p->frozenScene);
++            GLMeta::blitRectangle(IntRect(0, 0, oldW, oldH), Vec2i(0, 0));
++            GLMeta::blitEnd();
++        }
++        
++        resizeScreen(width, height, false);
++        p->screenSizeChanged();
++        
++        if (keep) {
++            const int newW = p->frozenScene.width, newH = p->frozenScene.height;
++            const int w = std::min(oldW, newW), h = std::min(oldH, newH);
++            
++            glState.clearColor.pushSet(Vec4(0, 0, 0, 1));
++            FBO::bind(p->frozenScene.fbo);
++            FBO::clear();
++            glState.clearColor.pop();
++            
++            GLMeta::blitBegin(p->frozenScene);
++            GLMeta::blitSource(saved);
++            GLMeta::blitRectangle(IntRect((oldW - w) / 2, (oldH - h) / 2, w, h),
++                                  Vec2i((newW - w) / 2, (newH - h) / 2));
++            GLMeta::blitEnd();
++            TEXFBO::fini(saved);
++        }
++    }
++    
++    /* the window: the frame's aspect ratio at its current height */
++    if (frameWidth <= 0 || getFullscreen())
++        return;
++    SDL_Window *win = shState->sdlWindow();
++    if (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED)
++        return;
++    
++    p->threadData->rqWindowAdjust.wait();
++    p->checkResize();
++    const int winW = (int) (p->winSize.x / p->backingScaleFactor);
++    const int winH = (int) (p->winSize.y / p->backingScaleFactor);
++    const int want = (int) lround((double) winH * frameWidth / height);
++    if (winH <= 0 || std::abs(want - winW) <= 2)
++        return;
++    
++    /* grow or shrink around the window's middle */
++    int x = 0, y = 0;
++    SDL_GetWindowPosition(win, &x, &y);
++    shState->eThread().requestWindowResize(want, winH);
++    p->threadData->rqWindowAdjust.wait();
++    shState->eThread().requestWindowReposition(x - (want - winW) / 2, y);
+ }
+ 
+ void Graphics::resizeWindow(int width, int height, bool center) {
+--- a/src/display/graphics.h
++++ b/src/display/graphics.h
+@@ -65,7 +65,10 @@ public:
+     int displayContentHeight() const;
+     int displayWidth() const;
+     int displayHeight() const;
+-	void resizeScreen(int width, int height);
++	void resizeScreen(int width, int height, bool adjustWindow = true);
++	/* Widescreen mode: a new screen size that the window doesn't follow
++	 * (see graphics.cpp) */
++	void widescreenResize(int width, int height, int frameWidth);
+     void resizeWindow(int width, int height, bool center=false);
+ 	void drawMovieFrame(const THEORAPLAY_VideoFrame* video, Bitmap *videoBitmap);
+ 	bool updateMovieInput(Movie *movie);
+--- a/src/settingsmenu.cpp
++++ b/src/settingsmenu.cpp
+@@ -305,6 +305,30 @@ protected:
+ 	void clickHandler(int x, int, uint8_t button);
+ };
+ 
++/* One of a few choices: a click shows the next one, a right click the one
++ * before */
++struct Choice : Widget
++{
++	const char *str;
++	int *value;
++	const char *const *names;
++	int count;
++
++	Choice(SMP *p, const IntRect &rect, const char *str, int *value,
++	       const char *const *names, int count)
++	    : Widget(p, rect), str(str), value(value), names(names), count(count),
++	      hovered(false)
++	{}
++
++protected:
++	bool hovered;
++
++	void drawHandler(SDL_Surface *surf);
++	void motionHandler(int, int);
++	void leaveHandler();
++	void clickHandler(int, int, uint8_t button);
++};
++
+ /* Shows the chosen screen shader; a click opens the list to choose from */
+ struct ShaderField : Widget
+ {
+@@ -366,6 +390,7 @@ struct SettingsMenuPrivate
+ 	Label optionsLabel;
+ 	Label optionsNote;
+ 	std::vector<ShaderField> shaderFields;
++	std::vector<Choice> choices;
+ 	Slider *dragged;
+ 
+ 	/* The shader list (state ChoosingShader) */
+@@ -387,6 +412,7 @@ struct SettingsMenuPrivate
+ 		int interpOff, interpMax;
+ 		std::vector<int> interpStops;
+ 		bool fullscreen;
++		int widescreen;
+ 		int musicVolume;
+ 		int soundVolume;
+ 		std::string shader;
+@@ -1058,6 +1084,7 @@ struct SettingsMenuPrivate
+ 		const bool changed = c.vsync != opt.vsync
+ 		    || c.frameInterpolation != interpolation
+ 		    || c.fullscreen != opt.fullscreen
++		    || c.widescreen != opt.widescreen
+ 		    || c.musicVolume != opt.musicVolume
+ 		    || c.soundVolume != opt.soundVolume
+ 		    || c.shader != opt.shader;
+@@ -1067,6 +1094,8 @@ struct SettingsMenuPrivate
+ 		c.vsync = opt.vsync;
+ 		c.frameInterpolation = interpolation;
+ 		c.fullscreen = opt.fullscreen;
++		/* picked up by the widescreen script at the next frame */
++		c.widescreen = opt.widescreen;
+ 		c.musicVolume = opt.musicVolume;
+ 		c.soundVolume = opt.soundVolume;
+ 		if (c.shader != opt.shader)
+@@ -1445,6 +1474,49 @@ void Slider::drawHandler(SDL_Surface *surf)
+ 	p->drawText(surf, buf, tx + tw + 10, midY, valueW(), Left);
+ }
+ 
++void Choice::drawHandler(SDL_Surface *surf)
++{
++	const int labelW = 96;
++	p->drawText(surf, str, 4, rect.h/2, labelW - 8, Left);
++
++	const int bx = labelW, bw = rect.w - labelW - 4;
++	if (hovered)
++		p->fillRect(surf, cBgDark, bx, 1, bw, rect.h - 2);
++	p->strokeRectInner(surf, cLine, bx, 1, bw, rect.h - 2, 2);
++	const int v = clamp(*value, 0, count - 1);
++	p->drawText(surf, names[v], bx + 8, rect.h/2, bw - 40, Left);
++	p->drawText(surf, "<>", bx + bw - 26, rect.h/2, 22, Left);
++}
++
++void Choice::motionHandler(int, int)
++{
++	if (!hovered)
++	{
++		hovered = true;
++		p->redraw();
++	}
++}
++
++void Choice::leaveHandler()
++{
++	if (hovered)
++	{
++		hovered = false;
++		p->redraw();
++	}
++}
++
++void Choice::clickHandler(int, int, uint8_t button)
++{
++	if (button == SDL_BUTTON_LEFT)
++		*value = (clamp(*value, 0, count - 1) + 1) % count;
++	else if (button == SDL_BUTTON_RIGHT)
++		*value = (clamp(*value, 0, count - 1) + count - 1) % count;
++	else
++		return;
++	p->redraw();
++}
++
+ void ShaderField::drawHandler(SDL_Surface *surf)
+ {
+ 	const int labelW = 150;
+@@ -1594,6 +1666,7 @@ SettingsMenu::SettingsMenu(RGSSThreadData &rtData)
+ 	p->opt.interpolation = p->interpolationToSlider(conf.frameInterpolation);
+ 	p->opt.interpolationStart = p->opt.interpolation;
+ 	p->opt.fullscreen = conf.fullscreen;
++	p->opt.widescreen = conf.widescreen;
+ 	p->opt.musicVolume = conf.musicVolume;
+ 	p->opt.soundVolume = conf.soundVolume;
+ 	p->opt.shader = conf.shader;
+@@ -1615,6 +1688,19 @@ SettingsMenu::SettingsMenu(RGSSThreadData &rtData)
+ 	                                 "Start in fullscreen", &p->opt.fullscreen));
+ 	for (size_t i = 0; i < p->checkBoxes.size(); ++i)
+ 		p->widgets.push_back(&p->checkBoxes[i]);
++	/* VX / VX Ace only (the patcher's script does it; the XP tilemap has
++	 * a fixed size) */
++	if (conf.rgssVersion >= 2)
++	{
++		static const char *const widescreenNames[] = {
++			"Off",
++			"16:9, scene colors at the sides",
++			"16:9 wider map view (experimental)",
++		};
++		p->choices.push_back(Choice(p, IntRect(12, optY + 20 + rowH*2, colW - 24, rowH),
++		                            "Widescreen", &p->opt.widescreen, widescreenNames, 3));
++		p->widgets.push_back(&p->choices[0]);
++	}
+ 
+ 	p->sliders.push_back(Slider(p, IntRect(colW + 12, optY + 20, colW - 28, rowH),
+ 	                            "Music (BGM, ME)", &p->opt.musicVolume));

@@ -176,7 +176,7 @@ const ENGINE_SKIP: [&str; 8] = [ENGINE_STAMP, ".rpgm-patcher-engine", "mkxp.json
 /// Written into engines the patcher builds. Engines without the current revision
 /// were built from source without the patcher's fixes (fix_source) and are rebuilt.
 const ENGINE_STAMP: &str = ".mkxpz-patcher-engine";
-const ENGINE_REV: &str = "19";
+const ENGINE_REV: &str = "21";
 
 fn engine_current(dir: &Path) -> bool {
     // also the stamp written under the patcher's old name (rpgm-patcher)
@@ -709,6 +709,23 @@ pub fn ensure_source_from(src: &Path, archive: Option<&Path>, log: &(dyn Fn(Stri
     let tmp = parent.join(format!(".{}.download", src.file_name().unwrap_or_default().to_string_lossy()));
     let _ = util::remove_path(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let unpacked = tmp.join("src");
+    let n = unpack_source(archive, &tmp, &unpacked, log)?;
+    save_originals(&unpacked)?;
+    // Not a git checkout: tell mkxp-z's build which commit this is.
+    let gh = unpacked.join("git-hash");
+    let mut text = std::fs::read_to_string(&gh).unwrap_or_default();
+    text.push_str(&format!("{}\n", MKXPZ_COMMIT));
+    std::fs::write(&gh, text).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir(src); // an empty leftover
+    std::fs::rename(&unpacked, src).map_err(|e| format!("couldn't move the source into place: {}", e))?;
+    let _ = util::remove_path(&tmp);
+    log(format!("mkxp-z source ready ({} files): {}", n, src.display()));
+    Ok(())
+}
+
+/// Download (unless given) and unpack the source archive into `dest`.
+fn unpack_source(archive: Option<&Path>, tmp: &Path, dest: &Path, log: &(dyn Fn(String) + Sync)) -> Result<usize, String> {
     let archive = match archive {
         Some(a) => a.to_path_buf(),
         None => {
@@ -723,20 +740,75 @@ pub fn ensure_source_from(src: &Path, archive: Option<&Path>, log: &(dyn Fn(Stri
     };
     log(format!("Unpacking {} ...", archive.display()));
     let data = std::fs::read(&archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
-    let unpacked = tmp.join("src");
-    let n = crate::targz::extract(&data, &unpacked, 1).map_err(|e| format!("unpacking the mkxp-z source failed: {}", e))?;
-    if !unpacked.join("meson.build").is_file() {
+    let n = crate::targz::extract(&data, dest, 1).map_err(|e| format!("unpacking the mkxp-z source failed: {}", e))?;
+    if !dest.join("meson.build").is_file() {
         return Err("the archive doesn't contain the mkxp-z source".into());
     }
-    // Not a git checkout: tell mkxp-z's build which commit this is.
-    let gh = unpacked.join("git-hash");
-    let mut text = std::fs::read_to_string(&gh).unwrap_or_default();
-    text.push_str(&format!("{}\n", MKXPZ_COMMIT));
-    std::fs::write(&gh, text).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_dir(src); // an empty leftover
-    std::fs::rename(&unpacked, src).map_err(|e| format!("couldn't move the source into place: {}", e))?;
-    let _ = util::remove_path(&tmp);
-    log(format!("mkxp-z source ready ({} files): {}", n, src.display()));
+    Ok(n)
+}
+
+/// Unchanged copies of the files the patcher changes, kept in the source
+/// folder, so a source patched by an older version can start over (see
+/// fix_source) without losing its build folders.
+const ORIGINALS_DIR: &str = ".mkxpz-patcher-original";
+
+/// The files fix_source changes (relative to the source folder).
+fn patched_files() -> Vec<String> {
+    let mut files = vec!["src/filesystem/filesystemImpl.cpp".to_string()];
+    for (_, patch) in SOURCE_PATCHES.iter() {
+        for f in crate::srcpatch::changed_files(patch) {
+            if !files.contains(&f) {
+                files.push(f);
+            }
+        }
+    }
+    files
+}
+
+/// Copy the files fix_source changes from an unchanged source into its
+/// ORIGINALS_DIR (the ones missing there).
+fn save_originals(pristine: &Path) -> Result<(), String> {
+    save_originals_into(pristine, &pristine.join(ORIGINALS_DIR))
+}
+
+fn save_originals_into(pristine: &Path, dir: &Path) -> Result<(), String> {
+    for f in patched_files() {
+        let to = dir.join(&f);
+        let from = pristine.join(&f);
+        if to.is_file() || !from.is_file() {
+            continue;
+        }
+        if let Some(d) = to.parent() {
+            std::fs::create_dir_all(d).map_err(|e| format!("{}: {}", d.display(), e))?;
+        }
+        std::fs::copy(&from, &to).map_err(|e| format!("{}: {}", to.display(), e))?;
+    }
+    Ok(())
+}
+
+/// Put the original mkxp-z files back (fetching them first if this source
+/// folder doesn't have them), so all patches can be applied anew.
+fn restore_originals(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+    let dir = src.join(ORIGINALS_DIR);
+    let files = patched_files();
+    if files.iter().any(|f| !dir.join(f).is_file()) {
+        let tmp = src.join(".mkxpz-patcher-download");
+        let _ = util::remove_path(&tmp);
+        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        let unpacked = tmp.join("src");
+        let r = unpack_source(None, &tmp, &unpacked, log).and_then(|_| save_originals_into(&unpacked, &dir));
+        let _ = util::remove_path(&tmp);
+        r?;
+    }
+    for f in &files {
+        let from = dir.join(f);
+        if from.is_file() {
+            std::fs::copy(&from, src.join(f)).map_err(|e| format!("{}: {}", src.join(f).display(), e))?;
+        }
+    }
+    let _ = std::fs::remove_file(src.join(PATCH_STAMP));
+    let _ = std::fs::remove_file(src.join(OLD_PATCH_STAMP));
+    log("Restored mkxp-z's original files, to apply the patcher's changes anew.".into());
     Ok(())
 }
 
@@ -750,8 +822,30 @@ const GAMEFOLDER_FIX: &str = "    // rpgm-patcher: resolve a relative path befor
     fs::path stdPath;\n    try {\n        stdPath = fs::absolute(fs::path(path));\n        \
     fs::current_path(stdPath);\n    } catch (...) {\n        return false;\n    }\n";
 
-/// Apply the patcher's fixes to the mkxp-z source (idempotent).
+/// Apply the patcher's fixes to the mkxp-z source (idempotent). A source
+/// changed by an older version of a patch (it can't take the new version on
+/// top) gets its original files back first.
 pub fn fix_source(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+    let keys: Vec<String> = SOURCE_PATCHES.iter().map(|(name, patch)| patch_key(name, patch)).collect();
+    let listed: Vec<String> = std::fs::read_to_string(src.join(PATCH_STAMP))
+        .map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default();
+    let outdated = listed.iter().any(|k| !keys.contains(k));
+    if outdated {
+        log("The mkxp-z source has changes from an older patcher version.".into());
+        restore_originals(src, log)?;
+    }
+    match fix_source_once(src, log) {
+        Err(e) if !outdated => {
+            log(format!("{}; starting again from mkxp-z's original files.", e));
+            restore_originals(src, log)?;
+            fix_source_once(src, log)
+        }
+        r => r,
+    }
+}
+
+fn fix_source_once(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
     let file = src.join("src/filesystem/filesystemImpl.cpp");
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
     if !text.contains(GAMEFOLDER_FIX) {
@@ -853,8 +947,13 @@ pub const INTERPOLATION_RATE_PATCH: &str = include_str!("../assets/mkxpz-patches
 /// instead of the user's data folder; settings saved there before move along.
 pub const DATA_PATH_PATCH: &str = include_str!("../assets/mkxpz-patches/data-path.patch");
 
+/// Widescreen mode: "widescreen" in mkxp.json / the F1 menu, and
+/// Graphics.widescreen? / Graphics.widescreen_resize for the patcher's
+/// widescreen.rb (16:9 maps, the rest letterboxed in the same window).
+pub const WIDESCREEN_PATCH: &str = include_str!("../assets/mkxpz-patches/widescreen.patch");
+
 /// The patcher's additions to mkxp-z, applied in this order before every build.
-const SOURCE_PATCHES: [(&str, &str); 7] = [
+const SOURCE_PATCHES: [(&str, &str); 8] = [
     ("frame interpolation", FRAME_INTERPOLATION_PATCH),
     ("the F12 reset fix", RESET_ERRINFO_PATCH),
     ("the options in the F1 menu", SETTINGS_MENU_PATCH),
@@ -862,6 +961,7 @@ const SOURCE_PATCHES: [(&str, &str); 7] = [
     ("screen shaders", SCREEN_SHADERS_PATCH),
     ("the frame interpolation rate", INTERPOLATION_RATE_PATCH),
     ("the data folder setting", DATA_PATH_PATCH),
+    ("widescreen mode", WIDESCREEN_PATCH),
 ];
 
 fn fix_gamefolder(text: &str) -> Option<String> {

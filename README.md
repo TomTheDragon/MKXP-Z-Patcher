@@ -26,12 +26,26 @@ mkxp-z settings, key bindings and shaders stay).
   Fullscreen++ (F5/F6 keep working), "fast Bitmap Marshal" save screenshots
   (save files stay compatible with the original Game.exe), RGSS memory reads.
 - **Settings menu (F1)** inside the game: key bindings, vsync, fullscreen at
-  start, music and sound volume, frame interpolation and a screen shader.
+  start, widescreen, music and sound volume, frame interpolation and a screen
+  shader.
   Saved per game in `mkxp-z/mkxp.json` and `mkxp-z/keybindings.mkxp*`.
 - **Smooth movement:** frame interpolation for displays faster than the game
   (e.g. 60 FPS games on 120/144/165 Hz screens), adjustable in 1 FPS steps up
   to the display's refresh rate, or unlimited; the multiples of the game's rate
   (2x, 3x ...) are marked.
+- **Widescreen (VX / VX Ace, off by default):** F1 > "Widescreen" has three
+  choices:
+  - *Off*
+  - *16:9, scene colors at the sides*: a 16:9 window with the game in its own
+    size in the middle; the sides show the scene's colors, blurred and
+    darkened. The game itself is unchanged. (With a screen shader the sides
+    stay black.)
+  - *16:9 wider map view* (experimental): maps are shown in 16:9 (736x416)
+    with more of the map around the player. Title, menus and battles keep the
+    game's own size, in the middle with colored sides; maps narrower than the
+    screen and the game's pictures stay centered, with black bars beside
+    full-screen pictures. Custom HUDs placed for the original screen stay
+    where the game put them (left part of the view).
 - **Screen shaders:** libretro GLSL shaders and presets
   ([libretro/glsl-shaders](https://github.com/libretro/glsl-shaders)), e.g.
   CRT effects, chosen in the F1 menu.

@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 pub const ENGINE_SUBDIR: &str = "mkxp-z";
 /// Patcher-made compatibility scripts (preloaded from <game>/mkxp-z/compat/).
-const COMPAT_SCRIPTS: [(&str, &str); 4] = [
+const COMPAT_SCRIPTS: [(&str, &str); 5] = [
     ("no_rgss_memory.rb", include_str!("../assets/compat/no_rgss_memory.rb")),
     ("bitmap_marshal.rb", include_str!("../assets/compat/bitmap_marshal.rb")),
     ("fullscreen_plus.rb", include_str!("../assets/compat/fullscreen_plus.rb")),
     ("steam_log.rb", include_str!("../assets/compat/steam_log.rb")),
+    ("widescreen.rb", include_str!("../assets/compat/widescreen.rb")),
 ];
 
 pub fn compat_script(name: &str) -> Option<&'static str> {
@@ -299,6 +300,10 @@ impl Plan {
             }
         }
 
+        // VX / VX Ace: widescreen mode, off until chosen in the F1 menu
+        if rgss >= 2 {
+            compat.push("widescreen.rb".into());
+        }
         for c in &compat {
             preload.push(format!("{}/compat/{}", ENGINE_SUBDIR, c));
         }

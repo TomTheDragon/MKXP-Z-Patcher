@@ -116,6 +116,11 @@ pub fn apply(root: &Path, patch: &str) -> Result<usize, String> {
     Ok(writes.len())
 }
 
+/// The files a patch changes (not the ones it creates), relative to the root.
+pub fn changed_files(patch: &str) -> Vec<String> {
+    parse(patch).map(|f| f.into_iter().filter(|f| !f.new_file).map(|f| f.path).collect()).unwrap_or_default()
+}
+
 /// Whether every change of the patch is in place below `root`.
 pub fn is_applied(root: &Path, patch: &str) -> bool {
     let files = match parse(patch) {
