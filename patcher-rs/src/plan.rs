@@ -200,8 +200,17 @@ impl Plan {
         let scripts_src = engines.iter().find_map(|e| e.scripts.clone());
         let license_src = engines.iter().find_map(|e| e.license.clone());
         let has = |p: Platform| platforms.contains(&p);
-        let any_linux = platforms.iter().any(|p| !p.is_windows());
+        let any_linux = platforms.iter().any(|p| p.is_linux());
         let any_win = platforms.iter().any(|p| p.is_windows());
+        let any_android = platforms.iter().any(|p| p.is_android());
+        if any_android {
+            notes.push(format!("Android: the game goes into an APK next to the game folder (the folder itself stays as \
+                                it is). Install it on Android 8.0 or newer; the first start copies the game into the \
+                                app's storage, where it keeps its saves. Without a keyboard or controller there are \
+                                no controls yet{}.", if has(Platform::AndroidX64) && !has(Platform::AndroidArm64) {
+                                    " (x86 64-bit: the Android emulator, Waydroid, some Chromebooks; phones need ARM 64-bit)"
+                                } else { "" }));
+        }
         if has(Platform::WindowsXP) {
             notes.push("Windows XP: the legacy engine is added (mkxp-z.xp.exe). Game.exe starts it on Windows XP, \
                         and on newer Windows too unless a normal Windows engine is there. It draws with OpenGL (the graphics driver needs OpenGL \
@@ -362,16 +371,19 @@ impl Plan {
         // MIDI
         let mut soundfont = None;
         if game::has_midi(&game_dir) {
-            if any_win && o.bundle_soundfont {
+            // Windows and Android have no SoundFont of their own
+            let bundles = if any_android { "Android" } else { "Windows" };
+            if (any_win || any_android) && o.bundle_soundfont {
                 match find_soundfonts().into_iter().next() {
                     Some(sf) => {
                         let mb = std::fs::metadata(&sf).map(|m| m.len() >> 20).unwrap_or(0);
-                        notes.push(format!("Uses MIDI music: bundling SoundFont {} ({} MB) for Windows.",
-                                           sf.file_name().unwrap_or_default().to_string_lossy(), mb));
+                        notes.push(format!("Uses MIDI music: bundling SoundFont {} ({} MB) for {}.",
+                                           sf.file_name().unwrap_or_default().to_string_lossy(), mb, bundles));
                         soundfont = Some(sf);
                     }
-                    None => warnings.push("Uses MIDI music, but no .sf2 SoundFont is installed here to bundle for \
-                                           Windows; put one at mkxp-z\\soundfont.sf2 or MIDI music stays silent there.".into()),
+                    None => warnings.push(format!("Uses MIDI music, but no .sf2 SoundFont is installed here to bundle \
+                                                   for {}; MIDI music stays silent there (install one, e.g. \
+                                                   fluid-soundfont-gm, or put one at mkxp-z/soundfont.sf2).", bundles)),
                 }
             } else if any_win {
                 notes.push("Uses MIDI music: put a SoundFont at mkxp-z\\soundfont.sf2 for Windows.".into());
@@ -419,10 +431,11 @@ impl Plan {
         }
     }
 
-    /// Distinct launchers (both Linux engines share one Game.sh).
+    /// Distinct launchers (both Linux engines share one Game.sh). Android has
+    /// none: its APK starts the game (android.rs).
     pub fn launchers(&self) -> Vec<(Platform, String)> {
         let mut out: Vec<(Platform, String)> = Vec::new();
-        for &p in &self.platforms {
+        for &p in self.platforms.iter().filter(|p| !p.is_android()) {
             let n = self.launcher_name(p);
             if !out.iter().any(|(_, x)| *x == n) {
                 out.push((p, n));

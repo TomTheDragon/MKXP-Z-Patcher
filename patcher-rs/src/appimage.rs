@@ -35,7 +35,7 @@ pub fn arch(p: Platform) -> Option<&'static str> {
 }
 
 /// Folder and file names from a game title: letters, digits, " -_." only.
-fn safe_name(title: &str) -> String {
+pub(crate) fn safe_name(title: &str) -> String {
     let s: String = title.chars()
         .map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' })
         .collect();
@@ -143,7 +143,7 @@ fn is_save(name: &str) -> bool {
 /// Copy the game for the AppImage, without the player's saves (an AppImage
 /// may be passed on), links (e.g. to system files) and AppImages made earlier.
 /// Returns how many were left out.
-fn copy_game(src: &Path, dst: &Path) -> std::io::Result<usize> {
+pub(crate) fn copy_game(src: &Path, dst: &Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dst)?;
     let mut skipped = 0;
     for e in std::fs::read_dir(src)? {

@@ -24,12 +24,19 @@ Options:
                         linux-arm64, linux-armhf (32-bit ARM), windows-arm64,
                         windows-xp (legacy 32-bit engine for Windows XP; added
                         next to a Windows engine, Game.exe starts it on XP)
+                        android-arm64 (phones, tablets), android-x86_64 (the
+                        Android emulator, Waydroid): with --apk
+                        android = android-arm64,android-x86_64
                         both = linux,windows   all = linux,linux32,windows
                         arm = linux-arm64,linux-armhf,windows-arm64
                       (default: this computer's platform)
   --appimage          pack the game with its Linux engine into an AppImage
                       (one per Linux platform chosen, next to the game folder;
                       the game folder itself stays as it is)
+  --apk               pack the game with its Android engines into an APK (next
+                      to the game folder; the game folder itself stays as it
+                      is). Linux x86-64 only; downloads Google's Android tools
+                      (about 1.1 GB, 3.9 GB unpacked) when first needed
   --check             only analyze the game and print the report
   --unpatch           remove a previously applied patch
   --no-build          don't build missing engines (fail instead)
@@ -84,6 +91,7 @@ pub fn parse_platforms(list: &str) -> Result<Vec<Platform>, String> {
             "both" => out.extend([Platform::Linux64, Platform::Windows32]),
             "all" => out.extend([Platform::Linux64, Platform::Linux32, Platform::Windows32]),
             "arm" => out.extend([Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64]),
+            "android" => out.extend([Platform::AndroidArm64, Platform::AndroidX64]),
             _ => out.push(Platform::from_key(k).ok_or_else(|| format!("unknown platform '{}'", k))?),
         }
     }
@@ -118,11 +126,12 @@ struct Args {
     rgss: Option<usize>,
     gui: bool,
     appimage: bool,
+    apk: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args { game: None, platforms: None, check: false, fetch_source: false, source_archive: None, unpatch: false, no_build: false, build_only: None,
-                       no_soundfont: false, keep_exe: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false };
+                       no_soundfont: false, keep_exe: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false, apk: false };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().into_owned();
@@ -154,6 +163,7 @@ fn parse_args() -> Result<Args, String> {
             "--keep-exe" => a.keep_exe = true,
             "--gui" => a.gui = true,
             "--appimage" => a.appimage = true,
+            "--apk" => a.apk = true,
             _ if s.starts_with('-') => return Err(format!("unknown option {} (see --help)", s)),
             _ if a.game.is_none() => a.game = Some(arg.into()),
             _ => return Err(format!("unexpected argument {}", s)),
@@ -258,6 +268,19 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
         bundle_soundfont: !a.no_soundfont,
         replace_exe: !a.keep_exe,
     };
+    let android = opts.platforms.iter().any(|p| p.is_android());
+    if a.apk && !android {
+        return Err("--apk needs an Android engine: --platform android-arm64 (phones) or android-x86_64 (emulator)".into());
+    }
+    if android && !a.apk && !a.check {
+        return Err("Android engines go into an APK: add --apk (the game folder itself stays as it is)".into());
+    }
+    if a.apk && opts.platforms.iter().any(|p| !p.is_android()) {
+        return Err("--apk takes only Android engines (patch the folder for other systems separately)".into());
+    }
+    if a.apk {
+        mkxpz_patcher::android::check_apk_tools()?;
+    }
     eprintln!("Analyzing {} ...", game.display());
     let mut p = plan::Plan::new(&game, &opts)?;
     println!("{}", p.summary());
@@ -278,6 +301,10 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
     }
     if a.appimage {
         mkxpz_patcher::appimage::create(&game, &opts, &log_line)?;
+        return Ok(());
+    }
+    if a.apk {
+        mkxpz_patcher::android::create(&game, &opts, &log_line)?;
         return Ok(());
     }
     patch::apply(&mut p, &log_line)

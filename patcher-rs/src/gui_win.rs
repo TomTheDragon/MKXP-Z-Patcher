@@ -48,9 +48,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const ID_EDIT: [i32; 4] = [101, 102, 103, 104]; // game, engines, rtp, source
 const ID_BROWSE: [i32; 4] = [201, 202, 203, 204];
 // radio buttons: the systems (System::ALL), then the CPU types (Cpu::ALL)
-const ID_CHOICE: [i32; 7] = [301, 302, 303, 304, 305, 306, 307];
-const ID_SOUNDFONT: i32 = 308;
-const ID_REPLACE_EXE: i32 = 309;
+const ID_CHOICE: [i32; 8] = [301, 302, 303, 304, 305, 306, 307, 308];
+const ID_SOUNDFONT: i32 = 309;
+const ID_REPLACE_EXE: i32 = 310;
 const ID_PATCH: i32 = 501;
 const ID_UNPATCH: i32 = 502;
 const ID_START: i32 = 503;
@@ -144,7 +144,7 @@ struct Controls {
     /// "System:" and "CPU:"
     headings: [HWND; 2],
     /// see ID_CHOICE
-    choice: [HWND; 7],
+    choice: [HWND; 8],
     soundfont: HWND,
     replace_exe: HWND,
     hint: HWND,
@@ -296,7 +296,7 @@ pub fn run(game: Option<PathBuf>, paths: Paths, linux_engine: Option<PathBuf>) -
     let px = |v: f32| (v * scale) as i32;
     let hwnd = unsafe {
         CreateWindowExW(0, class.as_ptr(), wide("MKXP-Z Patcher").as_ptr(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                        CW_USEDEFAULT, CW_USEDEFAULT, px(1000.0), px(720.0), 0, 0, hinst, std::ptr::null())
+                        CW_USEDEFAULT, CW_USEDEFAULT, px(1080.0), px(720.0), 0, 0, hinst, std::ptr::null())
     };
     if hwnd == 0 {
         return Err("couldn't create the window".into());
@@ -380,10 +380,13 @@ fn create_controls(parent: HWND, hinst: isize, scale: f32) -> Controls {
     c.group = make("BUTTON", "Patch for", BS_GROUPBOX, 0, 0, font);
     c.headings = ["System:", "CPU:"].map(|t| make("STATIC", t, SS_LEFT | SS_CENTERIMAGE, 0, 0, font));
     // Windows legacy: only the 32-bit engine for Windows XP (Game.exe also starts it on newer Windows)
-    let names = ["Linux", "Windows", "Windows legacy (XP)", "32-bit", "64-bit", "ARM 32-bit", "ARM 64-bit"];
-    for i in 0..7 {
+    // Android: APKs are made on Linux only (Google's NDK), so it's shown but off here
+    let names = ["Linux", "Windows", "Windows legacy (XP)", "Android (on Linux)", "32-bit", "64-bit", "ARM 32-bit",
+                 "ARM 64-bit"];
+    let first_cpu = System::ALL.len();
+    for i in 0..names.len() {
         // WS_GROUP starts each set of radio buttons (systems, CPU types)
-        let group = if i == 0 || i == 3 { WS_GROUP_ | WS_TABSTOP } else { 0 };
+        let group = if i == 0 || i == first_cpu { WS_GROUP_ | WS_TABSTOP } else { 0 };
         c.choice[i] = make("BUTTON", names[i], group | BS_AUTORADIOBUTTON, 0, ID_CHOICE[i], font);
     }
     c.soundfont = make("BUTTON", "bundle a SoundFont for MIDI music", WS_GROUP_ | WS_TABSTOP | BS_AUTOCHECKBOX, 0,
@@ -433,12 +436,13 @@ fn layout(hwnd: HWND) {
         let gh = rowh * 3 + px(38.0);
         mv(c.group, m, y, width - 2 * m, gh);
         let (gx, gy) = (m + px(12.0), y + px(20.0));
-        let widths = [70.0, 90.0, 160.0, 75.0, 75.0, 100.0, 100.0];
+        let widths = [70.0, 90.0, 160.0, 150.0, 75.0, 75.0, 100.0, 100.0];
+        let first_cpu = System::ALL.len();
         let mut x = gx;
-        for i in 0..7 {
-            if i == 0 || i == 3 {
+        for i in 0..widths.len() {
+            if i == 0 || i == first_cpu {
                 let hw = px(if i == 0 { 60.0 } else { 40.0 });
-                if i == 3 {
+                if i == first_cpu {
                     x += px(20.0);
                 }
                 mv(c.headings[if i == 0 { 0 } else { 1 }], x, gy, hw, rowh);
@@ -885,10 +889,11 @@ fn update_controls(a: &mut App) {
     }
     let system = choice(c).system;
     for (i, h) in c.choice.iter().enumerate() {
-        let ok = i < System::ALL.len() || system.has(Cpu::ALL[i - System::ALL.len()]);
+        let ok = if i < System::ALL.len() { System::ALL[i] != System::Android }
+                 else { system.has(Cpu::ALL[i - System::ALL.len()]) };
         enable(*h, !busy && ok);
     }
-    let win = system != System::Linux;
+    let win = matches!(system, System::Windows | System::Legacy);
     enable(c.soundfont, !busy && win);
     enable(c.replace_exe, !busy && win);
     let plan = a.plan.as_ref();

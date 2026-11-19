@@ -1,6 +1,7 @@
 //! MKXP-Z Patcher: run RPG Maker XP / VX / VX Ace games on the mkxp-z engine.
 //! The window uses GTK 3 on Linux and native Win32 controls on Windows.
 
+pub mod android;
 pub mod appimage;
 pub mod archive;
 pub mod engines;

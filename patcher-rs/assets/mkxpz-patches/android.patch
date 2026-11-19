@@ -1,0 +1,454 @@
+--- a/meson.build
++++ b/meson.build
+@@ -182,6 +182,22 @@
+     override_options: {'c_std': c_std, 'cpp_std': cpp_std},
+ )
+ 
++if host_system == 'android'
++    # MKXP-Z Patcher: on Android the engine is libmain.so, which SDL's Java
++    # code (SDLActivity) loads; it calls SDL_main and SDL's JNI functions
++    shared_library(
++        'main',
++        sources: [git_hash_file],
++        link_whole: libmkxp,
++        include_directories: global_include_dirs,
++        link_args: global_link_args + ['-Wl,-u,JNI_OnLoad', '-Wl,--export-dynamic-symbol=SDL_main',
++                                       '-Wl,--export-dynamic-symbol=Java_*', '-Wl,--export-dynamic-symbol=JNI_OnLoad',
++                                       '-static-libstdc++', '-Wl,-z,max-page-size=16384'],
++        install: true,
++        install_dir: '.',
++        install_tag: meson.project_name(),
++    )
++else
+ executable(
+     exe_name,
+     sources: [
+@@ -198,6 +214,7 @@
+     install_dir: '.',
+     install_tag: meson.project_name(),
+ )
++endif
+ 
+ global_install_tags = [meson.project_name()]
+ if host_system == 'darwin'
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -62,6 +62,12 @@
+     'b_coverage': 'false',
+ }
+ 
++# MKXP-Z Patcher: OpenSL ES, Android's audio API for OpenAL, is a system
++# library of the NDK without pkg-config
++if host_system == 'android'
++    meson.override_dependency('opensl', declare_dependency(link_args: ['-lOpenSLES']), static: true)
++endif
++
+ meson_base_options = cmake_override_options + {
+     'default_library': 'static',
+     'c_std': c_std,
+--- a/src/filesystem/filesystem.cpp
++++ b/src/filesystem/filesystem.cpp
+@@ -295,6 +295,11 @@
+ }
+ 
+ FileSystem::FileSystem(const char *argv0, bool allowSymlinks) {
++#ifdef __ANDROID__
++  /* PhysFS takes argv0 for a PHYSFS_AndroidInit* on Android (MKXP-Z
++   * Patcher); without one its base folder is "/", which mkxp-z doesn't use */
++  argv0 = nullptr;
++#endif
+   if (PHYSFS_init(argv0) == 0)
+     throwPhysfsError("Error initializing PhysFS");
+ 
+--- a/subprojects/common/sonametool.py
++++ b/subprojects/common/sonametool.py
+@@ -5,7 +5,7 @@
+ 
+ host_machine_is_bsd = host_machine_system in ('dragonfly', 'freebsd', 'netbsd', 'openbsd')
+ host_machine_is_darwin = host_machine_system == 'darwin'
+-host_machine_is_linux = host_machine_system == 'linux'
++host_machine_is_linux = host_machine_system in ('linux', 'android')
+ host_machine_is_unix = host_machine_is_bsd or host_machine_is_linux
+ host_machine_is_windows = host_machine_system in ('cygwin', 'windows')
+ 
+--- a/src/settingsmenu.cpp
++++ b/src/settingsmenu.cpp
+@@ -43,6 +43,100 @@
+ #include <cmath>
+ #include <assert.h>
+ 
++#ifdef __ANDROID__
++/* MKXP-Z Patcher: Android has only the game's window, so the menu draws into
++ * a surface that the app shows over the game (GameActivity); the app sends
++ * touches back as mouse events for androidMenuID, and keys go to the menu
++ * while it is open */
++#include <jni.h>
++#include <SDL_system.h>
++#include <SDL_events.h>
++#include <vector>
++
++static const uint32_t androidMenuID = 0x6d6b7870;
++
++/* GameActivity.<method>(width, height, RGBA pixels), or <method>() without a
++ * surface */
++static void androidCallActivity(const char *method, SDL_Surface *surf)
++{
++	JNIEnv *env = (JNIEnv*) SDL_AndroidGetJNIEnv();
++	jobject act = env ? (jobject) SDL_AndroidGetActivity() : 0;
++	if (!act)
++		return;
++	jclass cls = env->GetObjectClass(act);
++	jmethodID m = env->GetMethodID(cls, method, surf ? "(II[B)V" : "()V");
++	if (m && surf)
++	{
++		const int row = surf->w * 4;
++		std::vector<uint8_t> px((size_t) row * surf->h);
++		for (int y = 0; y < surf->h; ++y)
++			memcpy(&px[(size_t) y * row], (const uint8_t*) surf->pixels + y * surf->pitch, row);
++		for (size_t i = 3; i < px.size(); i += 4)
++			px[i] = 255;
++		jbyteArray arr = env->NewByteArray((jsize) px.size());
++		if (arr)
++		{
++			env->SetByteArrayRegion(arr, 0, (jsize) px.size(), (const jbyte*) px.data());
++			env->CallVoidMethod(act, m, surf->w, surf->h, arr);
++			env->DeleteLocalRef(arr);
++		}
++	}
++	else if (m)
++	{
++		env->CallVoidMethod(act, m);
++	}
++	if (env->ExceptionCheck())
++		env->ExceptionClear();
++	env->DeleteLocalRef(cls);
++	env->DeleteLocalRef(act);
++}
++
++/* from GameActivity's settings overlay: kind 0 = motion (button: held),
++ * 1 = button down, 2 = button up (button: 1 left, 3 right), 3 = the finger
++ * left, 4 = Escape (Back) */
++extern "C" JNIEXPORT void JNICALL
++Java_org_mkxpz_patcher_GameActivity_nativeSettingsInput(JNIEnv*, jclass, jint kind, jint x, jint y, jint button)
++{
++	SDL_Event e;
++	SDL_zero(e);
++	switch (kind)
++	{
++	case 0:
++		e.type = SDL_MOUSEMOTION;
++		e.motion.windowID = androidMenuID;
++		e.motion.x = x;
++		e.motion.y = y;
++		e.motion.state = button ? SDL_BUTTON_LMASK : 0;
++		break;
++	case 1:
++	case 2:
++		e.type = kind == 1 ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
++		e.button.windowID = androidMenuID;
++		e.button.button = button == 3 ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
++		e.button.state = kind == 1 ? SDL_PRESSED : SDL_RELEASED;
++		e.button.clicks = 1;
++		e.button.x = x;
++		e.button.y = y;
++		break;
++	case 3:
++		e.type = SDL_WINDOWEVENT;
++		e.window.windowID = androidMenuID;
++		e.window.event = SDL_WINDOWEVENT_LEAVE;
++		break;
++	case 4:
++		e.type = SDL_KEYDOWN;
++		e.key.windowID = androidMenuID;
++		e.key.state = SDL_PRESSED;
++		e.key.keysym.scancode = SDL_SCANCODE_ESCAPE;
++		e.key.keysym.sym = SDLK_ESCAPE;
++		break;
++	default:
++		return;
++	}
++	SDL_PushEvent(&e);
++}
++#endif
++
+ /* Key bindings on top, the player's options below them */
+ const int optionsH = 182;
+ const Vec2i winSize(840, 356 + optionsH);
+@@ -397,6 +491,11 @@
+ 	std::vector<std::string> shaderList;
+ 	int listScroll;
+ 	int listHover;
++#ifdef __ANDROID__
++	/* a finger on the shader list: dragging scrolls, a tap chooses */
++	bool listPressed, listDragging;
++	int listPressY, listPressScroll;
++#endif
+ 
+ 	/* Options as shown, taken over on "Accept" */
+ 	struct
+@@ -711,7 +810,11 @@
+ 		if (state == ChoosingShader)
+ 			drawShaderList();
+ 
++#ifdef __ANDROID__
++		androidCallActivity("mkxpzSettingsFrame", winSurf);
++#else
+ 		SDL_UpdateWindowSurface(window);
++#endif
+ 	}
+ 
+ 	/* --- screen shader list */
+@@ -803,7 +906,11 @@
+ 		strokeRectInner(winSurf, cLine, r.x, r.y, r.w, r.h, 2);
+ 
+ 		char title[160];
++#ifdef __ANDROID__
++		snprintf(title, sizeof(title), "Screen shader (%d found in %s) - drag to scroll, Back closes",
++#else
+ 		snprintf(title, sizeof(title), "Screen shader (%d found in %s) - mouse wheel scrolls, Esc closes",
++#endif
+ 		         (int) shaderList.size(), RetroShader::FOLDER);
+ 		drawText(winSurf, title, r.x + 10, r.y + 16, r.w - 20, Left, true);
+ 
+@@ -898,6 +1005,17 @@
+ 
+ 		if (state == ChoosingShader)
+ 		{
++#ifdef __ANDROID__
++			if (e.button == SDL_BUTTON_LEFT)
++			{
++				/* chosen when the finger lifts without scrolling */
++				listPressed = true;
++				listDragging = false;
++				listPressY = e.y;
++				listPressScroll = listScroll;
++				return;
++			}
++#endif
+ 			if (e.button == SDL_BUTTON_LEFT)
+ 				onShaderListClick(e.x, e.y);
+ 			else
+@@ -918,6 +1036,22 @@
+ 
+ 		if (state == ChoosingShader)
+ 		{
++#ifdef __ANDROID__
++			if (listPressed && (e.state & SDL_BUTTON_LMASK))
++			{
++				const int dy = e.y - listPressY;
++				if (!listDragging && std::abs(dy) > 10)
++					listDragging = true;
++				if (listDragging)
++				{
++					listScroll = listPressScroll - dy / listRowH;
++					clampListScroll();
++					listHover = -1;
++					redraw();
++				}
++				return;
++			}
++#endif
+ 			onShaderListMotion(e.x, e.y);
+ 			return;
+ 		}
+@@ -1109,6 +1243,17 @@
+ 			c.storeUserSettings();
+ 	}
+ 
++#ifdef __ANDROID__
++	void onRelease(const SDL_MouseButtonEvent &e)
++	{
++		if (state != ChoosingShader || !listPressed)
++			return;
++		listPressed = false;
++		if (!listDragging)
++			onShaderListClick(e.x, e.y);
++	}
++#endif
++
+ 	void onAccept()
+ 	{
+ 		storeOptions();
+@@ -1578,6 +1723,14 @@
+ 	p->hasFocus = false;
+ 	p->destroyReq = false;
+ 
++#ifdef __ANDROID__
++	p->window = 0;
++	p->winSurf = SDL_CreateRGBSurfaceWithFormat(0, winSize.x, winSize.y, 32, SDL_PIXELFORMAT_ABGR8888);
++	p->winID = androidMenuID;
++	p->hasFocus = true;
++	p->listPressed = p->listDragging = false;
++	p->listPressY = p->listPressScroll = 0;
++#else
+ 	p->window = SDL_CreateWindow("Settings",
+ 	                             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+ 	                             winSize.x, winSize.y, SDL_WINDOW_INPUT_FOCUS);
+@@ -1594,6 +1747,7 @@
+ 
+ 	p->winSurf = SDL_GetWindowSurface(p->window);
+ 	p->winID = SDL_GetWindowID(p->window);
++#endif
+ 
+ 	p->font = SharedFontState::openBundled(fontSize);
+ 	p->smallFont = SharedFontState::openBundled(11);
+@@ -1643,7 +1797,11 @@
+ 		p->widgets.push_back(&p->buttons[i]);
+ 
+ 	/* Labels */
++#ifdef __ANDROID__
++	const char *info = "Tap a slot, then press a key or controller button for it; hold a slot to clear it";
++#else
+ 	const char *info = "Use left click to bind a slot, right click to clear its binding";
++#endif
+ 	p->infoLabel = Label(p, IntRect(16, 6, winSize.x, 16), info, cText, cText, cText);
+ 
+ 	const char *warn = "Warning: Same physical key bound to multiple slots";
+@@ -1684,8 +1842,14 @@
+ 
+ 	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20, colW - 24, rowH),
+ 	                                 "Reduce screen flickering (vsync)", &p->opt.vsync));
++#ifndef __ANDROID__
++	/* (Android: always the whole screen) */
+ 	p->checkBoxes.push_back(CheckBox(p, IntRect(12, optY + 20 + rowH, colW - 24, rowH),
+ 	                                 "Start in fullscreen", &p->opt.fullscreen));
++	const int widescreenRow = 2;
++#else
++	const int widescreenRow = 1;
++#endif
+ 	for (size_t i = 0; i < p->checkBoxes.size(); ++i)
+ 		p->widgets.push_back(&p->checkBoxes[i]);
+ 	/* VX / VX Ace only (the patcher's script does it; the XP tilemap has
+@@ -1697,7 +1861,7 @@
+ 			"16:9, scene colors at the sides",
+ 			"16:9 wider map view (experimental)",
+ 		};
+-		p->choices.push_back(Choice(p, IntRect(12, optY + 20 + rowH*2, colW - 24, rowH),
++		p->choices.push_back(Choice(p, IntRect(12, optY + 20 + rowH*widescreenRow, colW - 24, rowH),
+ 		                            "Widescreen", &p->opt.widescreen, widescreenNames, 3));
+ 		p->widgets.push_back(&p->choices[0]);
+ 	}
+@@ -1716,9 +1880,11 @@
+ 	for (size_t i = 0; i < p->sliders.size(); ++i)
+ 		p->widgets.push_back(&p->sliders[i]);
+ 
++#ifndef __ANDROID__
+ 	p->optionsNote = Label(p, IntRect(colW + 16, optY + 20 + rowH*2, colW - 32, rowH),
+ 	                       "Alt+Enter switches fullscreen right away", 170, 170, 170);
+ 	p->widgets.push_back(&p->optionsNote);
++#endif
+ 
+ 	p->shaderFields.push_back(ShaderField(p, IntRect(12, optY + 20 + rowH*4 + Slider::MARKS_H + 2, winSize.x - 28, rowH)));
+ 	p->widgets.push_back(&p->shaderFields[0]);
+@@ -1737,7 +1903,12 @@
+ 	TTF_CloseFont(p->font);
+ 	if (p->smallFont)
+ 		TTF_CloseFont(p->smallFont);
++#ifdef __ANDROID__
++	androidCallActivity("mkxpzSettingsClose", 0);
++	SDL_FreeSurface(p->winSurf);
++#else
+ 	SDL_DestroyWindow(p->window);
++#endif
+ 
+ 	delete p;
+ }
+@@ -1754,6 +1925,11 @@
+ 	case SDL_KEYDOWN :
+ 	case SDL_KEYUP :
+ 	case SDL_MOUSEWHEEL :
++#ifdef __ANDROID__
++		/* keys (keyboard, the touch controls) come for the game's window */
++		if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)
++			break;
++#endif
+ 		/* We can do this because windowID has the same
+ 		 * struct offset in all these event types */
+ 		if (event.window.windowID != p->winID)
+@@ -1777,6 +1953,9 @@
+ 	{
+ 	case SDL_MOUSEBUTTONUP :
+ 		p->dragged = 0;
++#ifdef __ANDROID__
++		p->onRelease(event.button);
++#endif
+ 		return true;
+ 
+ 	/* Ignore these event */
+@@ -1878,7 +2057,11 @@
+ 
+ void SettingsMenu::raise()
+ {
++#ifdef __ANDROID__
++	p->redraw();
++#else
+ 	SDL_RaiseWindow(p->window);
++#endif
+ }
+ 
+ bool SettingsMenu::destroyReq() const
+--- /dev/null
++++ b/subprojects/packagefiles/ruby-3.1-android.patch
+@@ -0,0 +1,29 @@
++# Android (the MKXP-Z Patcher's Android engines): the native fiber code for the
++# CPU and a linker for shared objects (configure knows neither for *-android),
++# no socket extension. No change for other systems.
++
++--- a/meson.build
+++++ b/meson.build
++@@ -40,6 +40,9 @@
++     dependency('zlib', required: true),
++ ]
++ 
+++# MKXP-Z Patcher, Android: no socket extension either (as for Windows XP)
+++winxp = winxp or host_machine.system() == 'android'
+++
++ ruby = declare_dependency(
++     dependencies: [
++         ruby_deps,
++@@ -82,6 +85,12 @@
++                 'LDFLAGS=' + run_command(subproject('common').get_variable('quotetool'), ldflags, check: true).stdout().strip() + ' ' + get_option('ldflags'),
++             ],
++             cross_configure_options: [
+++                # MKXP-Z Patcher: Android's host name (x86_64-unknown-android)
+++                # matches none of the Linux patterns, and the fallback
+++                # (pthread) needs pthread_cancel, which Android lacks
+++                host_machine.system() == 'android' ? '--with-coroutine=' + {'x86_64': 'amd64', 'aarch64': 'arm64', 'arm': 'arm32', 'x86': 'x86'}.get(host_machine.cpu_family(), 'ucontext') : [],
+++                # and its configure knows no linker for shared objects there
+++                host_machine.system() == 'android' ? 'LDSHARED=$(CC) -shared' : [],
++                 '--host=@HOST@',
++                 '--host=' + subproject('common').get_variable('host_triplet'),
++             ],
+--- /dev/null
++++ b/subprojects/packagefiles/sdl2_ttf-android.patch
+@@ -0,0 +1,15 @@
++# Android (the MKXP-Z Patcher's Android engines): built like on the other systems
++# (static, with mkxp-z's FreeType) instead of SDL_ttf's own Android setup.
++
++--- a/CMakeLists.txt
+++++ b/CMakeLists.txt
++@@ -12,7 +12,8 @@
++ cmake_minimum_required(VERSION 3.0)
++ project(SDL_ttf C)
++ 
++-if (ANDROID)
+++# MKXP-Z Patcher: Android builds like the other systems (static, mkxp-z's FreeType)
+++if (FALSE)
++     option(TTF_WITH_HARFBUZZ "use harfbuzz to improve text shaping" OFF)
++ 
++     add_library(SDL2_ttf SHARED)
+--- a/subprojects/ruby-3.1.wrap
++++ b/subprojects/ruby-3.1.wrap
+@@ -34,4 +34,5 @@ diff_files =
+     ruby-3.1-clock-gettime.patch,
+     ruby-3.1-mkxp-z-patches-windows-libs.patch,
+     ruby-3.1-windows-xp.patch,
++    ruby-3.1-android.patch,
+     end-of-diff-files.patch
+--- a/subprojects/sdl2_ttf.wrap
++++ b/subprojects/sdl2_ttf.wrap
+@@ -7,3 +7,4 @@ method = cmake
+ diff_files =
+     sdl2_ttf-deps.patch,
++    sdl2_ttf-android.patch,
+     end-of-diff-files.patch

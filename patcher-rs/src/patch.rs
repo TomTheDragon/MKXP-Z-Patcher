@@ -385,6 +385,10 @@ pub fn build_config(plan: &Plan, p: Platform) -> String {
         // MKXPZ_DATA_PATH (~/.config/<title>), which takes precedence
         ("dataPath", json(ENGINE_SUBDIR)),
     ];
+    if p.is_android() {
+        // the whole screen (Android apps have no windows)
+        opts.push(("fullscreen", "true".into()));
+    }
     if plan.icon_png.is_some() {
         // the game's icon for the window (instead of mkxp-z's)
         opts.push(("iconPath", json(&format!("{}/{}", ENGINE_SUBDIR, ICON_FILE))));
@@ -401,7 +405,7 @@ pub fn build_config(plan: &Plan, p: Platform) -> String {
     if let Some(r) = &plan.rtp {
         if plan.bundle_rtp {
             rtps.push(format!("{}/{}", ENGINE_SUBDIR, BUNDLED_RTP));
-        } else if p.is_windows() == cfg!(windows) {
+        } else if !p.is_android() && p.is_windows() == cfg!(windows) {
             rtps.push(r.display().to_string());
         }
     }
@@ -515,6 +519,10 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
             log(format!("Adding {} engine ...", p.label()));
             std::fs::create_dir_all(&dst).map_err(io)?;
             for (name, src) in &e.files {
+                // Android: the engine and its Java part go into the APK (lib/<cpu>/, classes.dex)
+                if p.is_android() && (name == p.exe() || name == crate::android::DEX || name == crate::android::SDL_JAVA) {
+                    continue;
+                }
                 util::copy_tree(src, &dst.join(name)).map_err(|err| format!("{}: {}", src.display(), err))?;
             }
             if p.is_windows() {
@@ -529,7 +537,9 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
                     }
                 }
             }
-            util::make_executable(&dst.join(p.exe())).map_err(io)?;
+            if !p.is_android() {
+                util::make_executable(&dst.join(p.exe())).map_err(io)?;
+            }
             std::fs::write(dst.join("mkxp.json"), build_config(plan, p)).map_err(io)?;
         }
         if let Some(s) = &plan.scripts_src {
@@ -609,7 +619,11 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
         return Err(e);
     }
     plan.manifest = Some(m);
-    log(format!("Done. Start the game with: {}", root_files.join(", ")));
+    if root_files.is_empty() {
+        log("Done.".into()); // Android: the APK starts it
+    } else {
+        log(format!("Done. Start the game with: {}", root_files.join(", ")));
+    }
     Ok(())
 }
 

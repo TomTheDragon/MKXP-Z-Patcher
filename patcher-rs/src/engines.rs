@@ -25,11 +25,16 @@ pub enum Platform {
     /// system functions, OpenGL only); next to the 32-bit engine in
     /// mkxp-z/windows, the launcher starts it on XP
     WindowsXP,
+    /// Android 8.0 and newer on 64-bit ARM (phones, tablets); the engine is
+    /// libmain.so in the game's APK (see android.rs)
+    AndroidArm64,
+    /// Android on x86-64 (the Android emulator, Waydroid, some Chromebooks)
+    AndroidX64,
 }
 
-pub const ALL_PLATFORMS: [Platform; 8] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
-                                          Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64,
-                                          Platform::WindowsXP];
+pub const ALL_PLATFORMS: [Platform; 10] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
+                                           Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64,
+                                           Platform::WindowsXP, Platform::AndroidArm64, Platform::AndroidX64];
 
 impl Platform {
     pub fn key(self) -> &'static str {
@@ -42,6 +47,8 @@ impl Platform {
             Platform::LinuxArmhf => "linux-armhf",
             Platform::WindowsArm64 => "windows-arm64",
             Platform::WindowsXP => "windows-xp",
+            Platform::AndroidArm64 => "android-arm64",
+            Platform::AndroidX64 => "android-x86_64",
         }
     }
     pub fn from_key(k: &str) -> Option<Platform> {
@@ -58,6 +65,8 @@ impl Platform {
             Platform::LinuxArmhf => "Linux ARM 32-bit",
             Platform::WindowsArm64 => "Windows ARM 64-bit",
             Platform::WindowsXP => "Windows XP (legacy, 32-bit)",
+            Platform::AndroidArm64 => "Android ARM 64-bit",
+            Platform::AndroidX64 => "Android x86 64-bit",
         }
     }
     /// Name of the build target / engines subfolder.
@@ -71,6 +80,8 @@ impl Platform {
             Platform::LinuxArmhf => "linux-armhf",
             Platform::WindowsArm64 => "windows-aarch64",
             Platform::WindowsXP => "windows-xp",
+            Platform::AndroidArm64 => "android-aarch64",
+            Platform::AndroidX64 => "android-x86_64",
         }
     }
     pub fn exe(self) -> &'static str {
@@ -83,6 +94,8 @@ impl Platform {
             Platform::LinuxArmhf => "mkxp-z.armhf",
             Platform::WindowsArm64 => "mkxp-z.aarch64.exe",
             Platform::WindowsXP => "mkxp-z.xp.exe",
+            // SDL's Java code loads it (it goes to lib/<cpu>/ in the APK)
+            Platform::AndroidArm64 | Platform::AndroidX64 => "libmain.so",
         }
     }
     /// Folder inside <game>/mkxp-z/. The Windows engines share one (one launcher).
@@ -93,13 +106,22 @@ impl Platform {
             Platform::LinuxArm64 => "linux-arm64",
             Platform::LinuxArmhf => "linux-armhf",
             Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 | Platform::WindowsXP => "windows",
+            // shared by the CPUs (each one's libmain.so is in the APK's lib/<cpu>/)
+            Platform::AndroidArm64 | Platform::AndroidX64 => "android",
         }
     }
     pub fn is_windows(self) -> bool {
         matches!(self, Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 | Platform::WindowsXP)
     }
     pub fn is_arm(self) -> bool {
-        matches!(self, Platform::LinuxArm64 | Platform::LinuxArmhf | Platform::WindowsArm64)
+        matches!(self, Platform::LinuxArm64 | Platform::LinuxArmhf | Platform::WindowsArm64 | Platform::AndroidArm64)
+    }
+    pub fn is_android(self) -> bool {
+        matches!(self, Platform::AndroidArm64 | Platform::AndroidX64)
+    }
+    /// Linux (a desktop system with Game.sh), not Windows or Android.
+    pub fn is_linux(self) -> bool {
+        !self.is_windows() && !self.is_android()
     }
     /// The platform of the computer this runs on, if there's an engine for it.
     pub fn host() -> Option<Platform> {
@@ -124,6 +146,8 @@ pub enum System {
     /// Windows with only the legacy engine for Windows XP (32-bit), which
     /// Game.exe also starts on newer Windows
     Legacy,
+    /// an APK of the game (64-bit ARM: phones; x86-64: emulator, Waydroid)
+    Android,
 }
 
 /// The CPU type chosen in the patcher's window.
@@ -136,13 +160,14 @@ pub enum Cpu {
 }
 
 impl System {
-    pub const ALL: [System; 3] = [System::Linux, System::Windows, System::Legacy];
+    pub const ALL: [System; 4] = [System::Linux, System::Windows, System::Legacy, System::Android];
     /// Whether there's an engine for this system on that CPU type.
     pub fn has(self, cpu: Cpu) -> bool {
         match self {
             System::Linux => true,
             System::Windows => cpu != Cpu::Arm32,
             System::Legacy => cpu == Cpu::X86,
+            System::Android => matches!(cpu, Cpu::X64 | Cpu::Arm64),
         }
     }
 }
@@ -171,9 +196,15 @@ impl Choice {
     }
 
     /// The same system with a CPU type it has an engine for (32-bit if the
-    /// chosen one has none).
+    /// chosen one has none; Android: ARM 64-bit, as on phones).
     pub fn fixed(self) -> Choice {
-        if self.system.has(self.cpu) { self } else { Choice { cpu: Cpu::X86, ..self } }
+        if self.system.has(self.cpu) {
+            self
+        } else if self.system == System::Android {
+            Choice { cpu: Cpu::Arm64, ..self }
+        } else {
+            Choice { cpu: Cpu::X86, ..self }
+        }
     }
 
     /// The engines to patch with (Windows legacy: just the XP engine).
@@ -187,6 +218,8 @@ impl Choice {
             (System::Windows, Cpu::X64) => vec![Platform::Windows64],
             (System::Windows, Cpu::Arm64) => vec![Platform::WindowsArm64],
             (System::Legacy, Cpu::X86) => vec![Platform::WindowsXP],
+            (System::Android, Cpu::X64) => vec![Platform::AndroidX64],
+            (System::Android, Cpu::Arm64) => vec![Platform::AndroidArm64],
             _ => Vec::new(),
         }
     }
@@ -380,6 +413,9 @@ pub const MSYS2_URL: &str = "https://repo.msys2.org/distrib/msys2-x86_64-latest.
 
 /// Can this computer build these engines?
 pub fn host_can_build(targets: &[Platform]) -> Result<(), String> {
+    if targets.iter().any(|p| p.is_android()) {
+        crate::android::host_ok()?;
+    }
     #[cfg(windows)]
     {
         // the portable MSYS2 (the compilers) needs a 64-bit Windows 10 or 11
@@ -404,7 +440,9 @@ pub fn host_can_build(targets: &[Platform]) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err("Engines can be built on Linux and Windows only.".into());
     }
-    if util::in_flatpak() {
+    // Android engines need no system compilers (Google's NDK is downloaded),
+    // only meson, ninja, cmake, bison and ruby, which a sandbox may well have
+    if util::in_flatpak() && !targets.iter().all(|p| p.is_android()) {
         return Err("This runs inside a Flatpak sandbox (e.g. VS Code's terminal), where the system's \
                     compilers aren't visible. Start the patcher from a normal terminal or the desktop.".into());
     }
@@ -432,6 +470,8 @@ fn packages(distro: Distro, what: &str) -> &'static str {
         (Distro::Arch, "linux-aarch64") => "aarch64-linux-gnu-gcc",
         (Distro::Arch, "linux-armhf") => "podman",
         (_, "windows-aarch64") => "curl tar xz",
+        // the Android tools are downloaded (NDK, SDK build tools, JDK)
+        (_, "android") => "curl unzip tar coreutils",
         _ => "",
     }
 }
@@ -498,6 +538,14 @@ pub fn check_build_tools(targets: &[Platform]) -> Result<(), String> {
     }
     let mut broken = Vec::new();
     for p in targets {
+        if p.is_android() {
+            let cmds = crate::android::missing_commands();
+            if !cmds.is_empty() {
+                broken.push(p.label());
+                need.push(packages(distro, "android"));
+            }
+            continue;
+        }
         let ok = match linux_arm_route(*p) {
             Some(r) => r.is_ok(),
             None if *p == Platform::WindowsArm64 => llvm_mingw_installed().is_some()
@@ -546,7 +594,7 @@ fn quiet(cmd: &mut Command) -> &mut Command {
 }
 
 /// Run a command, sending each output line (stdout and stderr) to `log`.
-fn run(cmd: &mut Command, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+pub(crate) fn run(cmd: &mut Command, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
     let shown = format!("{:?}", cmd).replace('"', "");
     log(format!("$ {}", shown));
     let mut child = quiet(cmd).stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null())
@@ -1074,9 +1122,10 @@ pub const WIDESCREEN_PATCH: &str = include_str!("../assets/mkxpz-patches/widescr
 /// latter two as patches in packagefiles, listed in their .wrap files). Builds
 /// for newer Windows don't change.
 pub const WINDOWS_XP_PATCH: &str = include_str!("../assets/mkxpz-patches/windows-xp.patch");
+pub const ANDROID_PATCH: &str = include_str!("../assets/mkxpz-patches/android.patch");
 
 /// The patcher's additions to mkxp-z, applied in this order before every build.
-const SOURCE_PATCHES: [(&str, &str); 9] = [
+const SOURCE_PATCHES: [(&str, &str); 10] = [
     ("frame interpolation", FRAME_INTERPOLATION_PATCH),
     ("the F12 reset fix", RESET_ERRINFO_PATCH),
     ("the options in the F1 menu", SETTINGS_MENU_PATCH),
@@ -1086,13 +1135,17 @@ const SOURCE_PATCHES: [(&str, &str); 9] = [
     ("the data folder setting", DATA_PATH_PATCH),
     ("widescreen mode", WIDESCREEN_PATCH),
     ("Windows XP support", WINDOWS_XP_PATCH),
+    ("Android support", ANDROID_PATCH),
 ];
 
-/// Patches the XP patch adds for mkxp-z's subprojects (meson applies them when
-/// it unpacks one): the unpacked folder and the patch file in packagefiles.
-const SUBPROJECT_PATCHES: [(&str, &str); 2] = [
+/// Patches the XP and Android patches add for mkxp-z's subprojects (meson
+/// applies them when it unpacks one): the unpacked folder and the patch file
+/// in packagefiles, in the order meson applies them.
+const SUBPROJECT_PATCHES: [(&str, &str); 4] = [
     ("ruby-3_1_3", "ruby-3.1-windows-xp.patch"),
     ("openal-soft-1.24.3", "openal-soft-windows-xp.patch"),
+    ("ruby-3_1_3", "ruby-3.1-android.patch"),
+    ("SDL_ttf-release-2.0.18", "sdl2_ttf-android.patch"),
 ];
 
 /// Subprojects meson unpacked before a patch for them was listed in their
@@ -1336,6 +1389,8 @@ fn cross_file_for(p: Platform, msys2: Option<&Path>, no_pc: &Path, llvm: Option<
     let isolated = format!("[properties]\npkg_config_libdir = ['{}']\n\n", no_pc.display());
     match (p, msys2) {
         (Platform::Linux64, _) => None,
+        // written by android::cross_file (needs the NDK's location)
+        (Platform::AndroidArm64 | Platform::AndroidX64, _) => None,
         // Windows host: 64-bit is a native MINGW64 build
         (Platform::Windows64, Some(_)) => None,
         // Windows host: 32-bit compiler from MSYS2's mingw32 tree, tools from MINGW64
@@ -1503,6 +1558,7 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     let mut b = Builder::new(paths);
     let msys2 = b.msys2.clone();
     let llvm = if p == Platform::WindowsArm64 { Some(ensure_llvm_mingw(paths, log)?) } else { None };
+    let android = if p.is_android() { Some(crate::android::ensure_tools(paths, log)?) } else { None };
     let mut in_container = false;
     if let Some(route) = linux_arm_route(p) {
         let route = route?;
@@ -1552,7 +1608,10 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     if !cfg!(windows) {
         let _ = std::fs::create_dir_all(&no_pc);
     }
-    let cross = cross_file_for(p, msys2.as_deref(), &no_pc, llvm.as_deref(), in_container);
+    let cross = match &android {
+        Some(t) => Some(crate::android::cross_file(p, t, &no_pc)),
+        None => cross_file_for(p, msys2.as_deref(), &no_pc, llvm.as_deref(), in_container),
+    };
     let record = bdir.join(".mkxpz-patcher-cross.txt");
     let old_record = bdir.join(".rpgm-patcher-cross.txt");
     if !record.is_file() && old_record.is_file() {
@@ -1572,6 +1631,8 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     // XP: no ANGLE (Direct3D 11) and no HTTPS (OpenSSL 3), which need newer Windows
     let options: Vec<String> = if p == Platform::WindowsXP {
         vec!["-Dangle=disabled".into(), "-Dopenssl=disabled".into()]
+    } else if p.is_android() {
+        crate::android::meson_options()
     } else {
         Vec::new()
     };
@@ -1622,6 +1683,10 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     if !stage.join(p.exe()).is_file() {
         return Err(format!("build finished, but {} is missing in {}", p.exe(), stage.display()));
     }
+    if android.is_some() {
+        // SDL's Java part, compiled into each APK (it has to match this SDL)
+        crate::android::save_sdl_java(src, &stage)?;
+    }
     log(format!("Copying the engine to {} ...", out.display()));
     let _ = util::remove_path(&out);
     util::copy_tree(&stage, &out).map_err(|e| format!("couldn't copy the engine to {}: {}", out.display(), e))?;
@@ -1643,7 +1708,7 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
                         bad.join(", ")));
         }
     }
-    if !p.is_windows() {
+    if p.is_linux() {
         if let Some(v) = glibc_needed(&out.join(p.exe())) {
             log(format!("The {} engine runs on Linux systems with glibc {} or newer.", p.label(), v));
         }
@@ -1690,6 +1755,8 @@ mod tests {
         }
         assert_eq!(Choice { system: System::Legacy, cpu: Cpu::X86 }.platforms(), [Platform::WindowsXP]);
         assert_eq!(Choice { system: System::Windows, cpu: Cpu::Arm32 }.fixed().cpu, Cpu::X86);
+        assert_eq!(Choice { system: System::Android, cpu: Cpu::X86 }.fixed().cpu, Cpu::Arm64);
+        assert_eq!(Choice { system: System::Android, cpu: Cpu::X64 }.platforms(), [Platform::AndroidX64]);
         assert!(!Choice::for_host().platforms().is_empty());
     }
 

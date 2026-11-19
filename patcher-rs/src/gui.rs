@@ -196,6 +196,9 @@ fn build_widgets() -> Widgets {
         ("Windows", "Windows 7 and newer."),
         ("Windows legacy (XP)", "Windows XP and newer: only the legacy 32-bit engine (OpenGL only, no HTTPS or \
                                  Ruby sockets), which also runs on newer Windows."),
+        ("Android", "An APK of the game for Android 8.0 and newer, next to the game folder (the folder itself \
+                     stays as it is). ARM 64-bit: phones and tablets; 64-bit: the Android emulator and Waydroid. \
+                     Downloads Google's Android tools (about 1.1 GB) when first needed."),
     ]);
     let cpus = radios(&[
         ("32-bit", "x86 PCs. For Windows the recommended one: it runs on 32- and 64-bit Windows and loads the game's \
@@ -450,6 +453,52 @@ fn start_appimage(app: &Rc<App>) {
         });
 }
 
+/// Android: the game goes into an APK next to its folder (android.rs).
+fn start_apk(app: &Rc<App>) {
+    if let Err(e) = crate::android::check_apk_tools() {
+        app.s.borrow_mut().result = Some(Err(e));
+        render_summary(app);
+        return;
+    }
+    let k = key(&app.w);
+    let opts = options(app, &k);
+    let missing: Vec<Platform> = app.s.borrow().plan.as_ref().map(|p| p.missing_engines.clone()).unwrap_or_default();
+    if !missing.is_empty() {
+        if let Err(e) = engines::check_build_tools(&missing) {
+            app.s.borrow_mut().result = Some(Err(format!("The missing engines can't be built here yet.\n\n{}", e)));
+            render_summary(app);
+            return;
+        }
+    }
+    let game = PathBuf::from(&k.game);
+    let out = app.s.borrow().plan.as_ref()
+        .map(|p| crate::android::output_path(&game, &p.title).display().to_string()).unwrap_or_default();
+    let tools = if crate::android::tools_dir(&opts.paths).join("android-ndk-r29").is_dir() { String::new() } else {
+        format!("\n\nFirst Google's Android tools are downloaded into {} (about 1.1 GB, 3.9 GB unpacked).",
+                crate::android::tools_dir(&opts.paths).display())
+    };
+    let a = app.clone();
+    confirm(app, "Create APK?", &format!(
+        "This makes:\n  {}\n\nThe game folder stays as it is.{}{}", out, tools,
+        if missing.is_empty() { String::new() } else {
+            format!("\n\nThen these engines are built (10-30 minutes each): {}",
+                    missing.iter().map(|p| p.label()).collect::<Vec<_>>().join(", "))
+        }),
+        move || {
+            let (opts, game, missing) = (opts.clone(), game.clone(), missing.clone());
+            spawn_task(&a, "Creating APK", move |log| {
+                for p in &missing {
+                    log(format!("Building the {} engine first (10-30 minutes) ...", p.label()));
+                    engines::build(*p, &opts.paths, log)?;
+                }
+                let made = crate::android::create(&game, &opts, log)?;
+                Ok(format!("Made:\n  {}\n\nCopy it to the Android device and open it there to install it (allow \
+                            installing apps from that source), or: adb install -r \"{}\"",
+                           made.display(), made.display()))
+            });
+        });
+}
+
 fn confirm(app: &Rc<App>, title: &str, text: &str, yes: impl Fn() + 'static) {
     let d = gtk::MessageDialog::new(Some(&app.w.window), gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
                                     gtk::MessageType::Question, gtk::ButtonsType::YesNo, title);
@@ -528,6 +577,10 @@ fn spawn_task(app: &Rc<App>, label: &str, f: impl FnOnce(&(dyn Fn(String) + Sync
 }
 
 fn start_patch(app: &Rc<App>) {
+    if choice(&app.w).system == System::Android {
+        start_apk(app);
+        return;
+    }
     let (missing, warnings) = match &app.s.borrow().plan {
         Some(p) => (p.missing_engines.clone(), p.warnings.clone()),
         None => return,
@@ -722,11 +775,14 @@ fn render_summary(app: &App) {
 
 fn update_controls(app: &App) {
     let w = &app.w;
+    let android = choice(w).system == System::Android;
     let (busy, pending, patch_label, can_patch, can_unpatch, status) = {
         let s = app.s.borrow();
         let plan = s.plan.as_ref();
         (s.busy.is_some(), s.pending.is_some(),
          match plan {
+             _ if android && plan.map_or(false, |p| !p.missing_engines.is_empty()) => "Build engine & create APK",
+             _ if android => "Create APK",
              Some(p) if !p.missing_engines.is_empty() => "Build engines & patch",
              Some(p) if p.patched() => "Re-patch game",
              _ => "Patch game",
@@ -747,8 +803,8 @@ fn update_controls(app: &App) {
         r.set_sensitive(!busy && system.has(cpu));
     }
     w.appimage.set_sensitive(!busy && can_patch && !appimage_platforms(app).is_empty());
-    let win = system != System::Linux;
-    w.soundfont.set_sensitive(!busy && win);
+    let win = matches!(system, System::Windows | System::Legacy);
+    w.soundfont.set_sensitive(!busy && system != System::Linux);
     w.replace_exe.set_sensitive(!busy && win);
     w.patch.set_label(patch_label);
     w.patch.set_sensitive(can_patch && !busy);

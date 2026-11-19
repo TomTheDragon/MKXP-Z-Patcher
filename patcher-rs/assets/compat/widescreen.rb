@@ -9,7 +9,9 @@
 #     player; maps narrower than that are centered
 #     - pictures (cut-scenes, overlays) stay in the middle, where the game
 #       placed them; black bars cover the sides while one fills the screen
-#     - the message box stays centered (VX) or spans the width (VX Ace)
+#     - message boxes keep the game's own width, in the middle, with their
+#       choices, number input, gold and item windows (VX Ace: also the
+#       scrolling text)
 # Save files stay compatible with Game.exe. It needs the patcher's engine
 # (Graphics.widescreen_mode / Graphics.widescreen_resize), else does nothing.
 
@@ -21,6 +23,7 @@ module MkxpzWidescreen
   @applied = nil             # [screen width, window frame width] last set
   @installed = false
   @running = nil             # the scene whose main is running
+  @narrow = 0                # > 0: Graphics.width is the game's own width
 
   class << self
     attr_accessor :running
@@ -46,6 +49,35 @@ module MkxpzWidescreen
   # how far the game's own screen area sits from the left edge
   def self.dx
     [(Graphics.width - @base_w) / 2, 0].max
+  end
+
+  # Graphics.width reads as the game's own width in the block (windows made
+  # or placed there get the game's sizes; shift then moves them to the middle)
+  def self.narrow
+    @narrow += 1
+    yield
+  ensure
+    @narrow -= 1
+  end
+
+  def self.narrow?
+    @narrow > 0
+  end
+
+  # moves a window placed for the game's own screen into the middle; again
+  # when the view's width changes, or when the game places it anew (in its
+  # own coordinates)
+  def self.shift(win)
+    return if win.nil? || win.disposed?
+    set = win.instance_variable_get(:@mkxpz_x)
+    want = dx
+    if set.nil? || win.x != set
+      win.x += want
+    elsif (moved = want - win.instance_variable_get(:@mkxpz_dx)) != 0
+      win.x += moved
+    end
+    win.instance_variable_set(:@mkxpz_x, win.x)
+    win.instance_variable_set(:@mkxpz_dx, want)
   end
 
   def self.current_scene
@@ -112,22 +144,15 @@ module MkxpzWidescreen
 
   def self.fix_message(scene)
     mw = scene.instance_variable_get(:@message_window)
-    return if mw.nil? || mw.disposed?
-    w = Graphics.width
-    if ACE && mw.width > w && !$game_message.busy?
-      # made while the screen was wider (setting switched off)
-      mw.width = w
-      mw.create_contents
+    if mw && !mw.disposed?
+      shift(mw)
+      shift(mw.instance_variable_get(:@gold_window))
+      # (VX places its number input at the message box itself)
+      %w[@choice_window @number_window @item_window].each { |n| shift(mw.instance_variable_get(n)) } if ACE
+      back = mw.instance_variable_get(:@back_sprite) # the dimmed background
+      back.x = mw.x if back && !back.disposed? && back.x != mw.x
     end
-    want = mw.width < w ? (w - mw.width) / 2 : 0
-    if mw.x == 0 || mw.x == @msg_x
-      mw.x = want
-      @msg_x = want
-      unless ACE
-        gw = mw.instance_variable_get(:@gold_window)
-        gw.x = mw.x + mw.width - gw.width if gw && !gw.disposed?
-      end
-    end
+    shift(scene.instance_variable_get(:@scroll_text_window)) if ACE
   end
 
   def self.set_rect(v, x, y, w, h)
@@ -253,6 +278,24 @@ module MkxpzWidescreen
     end
   end
 
+  # VX Ace message windows: made at the game's own width (Window_Message
+  # makes its choice, number, item and gold windows itself)
+  module NarrowInitHook
+    def initialize(*args)
+      MkxpzWidescreen.narrow { super }
+    end
+  end
+
+  # VX Ace choice list and number input: placed when they open
+  module NarrowPlacementHook
+    def update_placement(*args)
+      r = MkxpzWidescreen.narrow { super }
+      @mkxpz_x = nil # placed anew
+      MkxpzWidescreen.shift(self)
+      r
+    end
+  end
+
   # VX Ace: maps narrower than the view don't scroll (the stock script would
   # move them off to the left)
   module AceMapHook
@@ -332,6 +375,12 @@ module MkxpzWidescreen
     Sprite_Picture.prepend(PictureHook)
     if ACE
       Game_Map.prepend(AceMapHook)
+      %w[Window_Message Window_ScrollText].each do |n|
+        Object.const_get(n).prepend(NarrowInitHook) if Object.const_defined?(n)
+      end
+      %w[Window_ChoiceList Window_NumberInput].each do |n|
+        Object.const_get(n).prepend(NarrowPlacementHook) if Object.const_defined?(n)
+      end
     else
       Game_Map.prepend(VXMapHook)
       Game_Player.prepend(VXPlayerHook)
@@ -345,6 +394,12 @@ end
 # back at the prepended method: the two would call each other without end.
 # (Preload scripts run once, not again at an F12 reset.)
 class << Graphics
+  alias_method :mkxpz_ws_width, :width
+  def width
+    w = mkxpz_ws_width
+    MkxpzWidescreen.narrow? && w > MkxpzWidescreen.base_w ? MkxpzWidescreen.base_w : w
+  end
+
   alias_method :mkxpz_ws_update, :update
   def update(*args)
     MkxpzWidescreen.tick

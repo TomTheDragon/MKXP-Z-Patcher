@@ -40,6 +40,21 @@ mkxp-z settings, key bindings and shaders stay).
   Athlon XP). After building, the patcher checks that it uses nothing newer
   than XP. The patcher itself needs Windows 7, so patch the game on another
   computer and copy it over.
+- **Android (experimental):** "Android" (`--platform android-arm64 --apk`)
+  makes an APK of the game next to its folder: ARM 64-bit for phones and
+  tablets, 64-bit (`android-x86_64`) for the Android emulator and Waydroid
+  (`--platform android` puts both into one APK). Android 8.0 or newer; the
+  first start copies the game into the app's storage, where it keeps its
+  saves. Making APKs needs Linux (x86-64): Google's Android tools (NDK, SDK
+  build tools, a JDK; about 1.1 GB, 3.9 GB unpacked) are downloaded into
+  `android-sdk/` next to the engines folder, and APKs are signed with a key
+  made there once (`apk-signing.keystore`; keep it, later APKs of a game must
+  be signed with the same key to install as updates). On touchscreens the
+  app shows touch controls (a D-pad and OK / Back / Dash buttons; they hide
+  while a keyboard or controller is used). The menu button at the top right,
+  or the Back key, opens a menu with the settings (mkxp-z's F1 menu: volume,
+  smooth movement, widescreen, screen shader, key bindings for controllers),
+  resetting the game (F12) and quitting.
 - **Game analysis:** RGSS version, encrypted archives, fonts the game asks for
   (with a CJK fallback font when its text needs one), MIDI music (SoundFont),
   RTP, Win32API use, Steam versions.
@@ -163,6 +178,9 @@ are built with the computer's own compiler and need a system as new as it
 (`MKXPZ_NATIVE_BUILD=1` forces that). Windows ARM64 engines use llvm-mingw,
 which is downloaded; Linux ARM engines use the distribution's ARM cross
 compiler, or a Debian container (podman/docker) where there is none.
+Android engines (`./build-engines.sh android`) are built with Google's NDK,
+which the patcher downloads; they need meson, ninja, cmake, bison, ruby, curl,
+unzip and zip, but no compilers of the computer's own.
 
 ## Project layout
 
