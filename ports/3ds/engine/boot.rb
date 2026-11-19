@@ -60,26 +60,6 @@ Font.default_italic = false
 Font.default_color = Color.new(255, 255, 255, 255)
 Font.default_out_color = Color.new(0, 0, 0, 128)
 
-# no sound yet
-module Audio
-  module_function
-
-  def bgm_play(*) end
-  def bgm_stop(*) end
-  def bgm_fade(*) end
-  def bgm_pos; 0; end
-  def bgs_play(*) end
-  def bgs_stop(*) end
-  def bgs_fade(*) end
-  def bgs_pos; 0; end
-  def me_play(*) end
-  def me_stop(*) end
-  def me_fade(*) end
-  def se_play(*) end
-  def se_stop(*) end
-  def setup_midi(*) end
-end
-
 # Windows functions: none on the 3DS; calls do nothing
 class Win32API
   def initialize(*) end

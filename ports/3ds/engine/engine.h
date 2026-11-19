@@ -136,6 +136,8 @@ extern int screen_w, screen_h;
 void init_graphics(void);
 void init_input(void);
 void init_audio(void);
+bool audio_start(void); /* false: no sound (no DSP firmware) */
+void audio_stop(void);
 void init_kernel(void);
 void input_poll(void); /* once per frame, from Graphics.update */
 void engine_check_reset(void);
@@ -149,6 +151,7 @@ double num2dbl(VALUE v);
 	rb_define_method(klass, name "=", setter, 1)
 
 extern VALUE eRGSSError, eRGSSReset;
+void say(const char *fmt, ...); /* the bottom screen and mkxpz-3ds.log */
 extern int rgss_version; /* 1 XP, 2 VX, 3 VX Ace */
 
 #endif

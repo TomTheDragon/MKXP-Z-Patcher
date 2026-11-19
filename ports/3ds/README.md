@@ -77,15 +77,37 @@ and orientation test picture for 5 seconds.
 
 Not there yet: XP (RGSS1) windows and tilemaps, sprite waves, transition
 pictures (plain cross-fade), Graphics.snap_to_bitmap draws in software
-(without the map), flash_data, sound, the game's files in romfs.
+(without the map), flash_data, the game's files in romfs.
 
 Fixes found on the way: the 3DS C library's `fcntl` fails for files, and Ruby
 aborts when `F_GETFD` fails with EBADF, so the `fcntl` wrapper answers the
 simple requests itself.
 
+## Step 3: sound
+
+`engine/audio.c` uses the 3DS's DSP (libctru's ndsp): BGM, BGS and ME are
+streamed on their own channels (an audio thread decodes ahead into 4 buffers
+of 4096 frames; on a New 3DS it runs on core 2, on the original 3DS on a 30%
+share of the system core, so decoding costs the game nothing). Sound effects
+are decoded once and cached (48 sounds), on a pool of 16 channels. Formats:
+Ogg Vorbis (Tremor, with RPG Maker's LOOPSTART / LOOPLENGTH loop points) and
+WAV (8/16-bit PCM); MIDI and MP3 are silent for now. An ME pauses the BGM,
+which continues afterwards; playing the same BGM again only changes its
+volume (games fade in that way); fades; bgm_pos / bgs_pos for resuming.
+
+The DSP needs its firmware, `sdmc:/3ds/dspfirm.cdc` (made once on the console
+by the "DSP1" homebrew); without it the game runs silently. The Azahar
+emulator needs the file on its virtual SD card too (any file works there,
+its DSP is emulated). Confirmed working on a real console and in Azahar.
+
+Tested in Azahar (with its sound output off): Dazed's title (fire sounds
+fading in, thunder effects), a 44.1 kHz stereo BGM at full speed on the map
+(frame times unchanged), an ME pausing and resuming the BGM.
+
 ## Next steps
 
 - Real hardware numbers (old and New 3DS) decide how much more speed is
   needed: e.g. draw sprites from vertex buffers too, fewer state changes.
-- Audio (ndsp: Ogg Vorbis with Tremor, WAV; MIDI is hard), RGSS1 (XP),
-  romfs packaging, and a patcher option that makes a .3dsx / .cia.
+- MIDI (XP/VX games' RTP music: a small SoundFont synthesizer would be
+  heavy on the original 3DS), MP3 (libmpg123 is there), RGSS1 (XP), romfs
+  packaging, and a patcher option that makes a .3dsx / .cia.

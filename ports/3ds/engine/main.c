@@ -20,7 +20,7 @@ void fonts_scan(const char *engine_dir);
 
 static FILE *log_file;
 
-static void say(const char *fmt, ...)
+void say(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
@@ -225,8 +225,11 @@ int main(int argc, char **argv)
 		init_scene();
 		init_window();
 		gpu_init();
+		if (!audio_start())
+			say("No sound: the DSP firmware is missing (run \"DSP1\" once: sdmc:/3ds/dspfirm.cdc)\n");
 		init_graphics();
 		init_input();
+		init_audio();
 		if (rgss_version >= 2)
 			init_tilemap();
 		say("step: classes\n");
@@ -253,6 +256,7 @@ int main(int argc, char **argv)
 			show_error();
 			wait_start();
 		}
+		audio_stop();
 		ruby_cleanup(0);
 	}
 	finished = true;
