@@ -25,7 +25,7 @@ const RUNTIME_URL: &str = "https://github.com/AppImage/type2-runtime/releases/do
 
 /// CPU name as AppImages (and their runtimes) use it.
 pub fn arch(p: Platform) -> Option<&'static str> {
-    match p {
+    match p.base() {
         Platform::Linux64 => Some("x86_64"),
         Platform::Linux32 => Some("i686"),
         Platform::LinuxArm64 => Some("aarch64"),

@@ -30,11 +30,17 @@ pub enum Platform {
     AndroidArm64,
     /// Android on x86-64 (the Android emulator, Waydroid, some Chromebooks)
     AndroidX64,
+    /// Linux legacy, 64-bit: built in an Ubuntu 20.04 container (podman or
+    /// docker); goes to mkxp-z/linux like the normal one
+    LinuxLegacy64,
+    /// Linux legacy, 32-bit (mkxp-z/linux32)
+    LinuxLegacy32,
 }
 
-pub const ALL_PLATFORMS: [Platform; 10] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
+pub const ALL_PLATFORMS: [Platform; 12] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
                                            Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64,
-                                           Platform::WindowsXP, Platform::AndroidArm64, Platform::AndroidX64];
+                                           Platform::WindowsXP, Platform::AndroidArm64, Platform::AndroidX64,
+                                           Platform::LinuxLegacy64, Platform::LinuxLegacy32];
 
 impl Platform {
     pub fn key(self) -> &'static str {
@@ -49,6 +55,8 @@ impl Platform {
             Platform::WindowsXP => "windows-xp",
             Platform::AndroidArm64 => "android-arm64",
             Platform::AndroidX64 => "android-x86_64",
+            Platform::LinuxLegacy64 => "linux-legacy",
+            Platform::LinuxLegacy32 => "linux32-legacy",
         }
     }
     pub fn from_key(k: &str) -> Option<Platform> {
@@ -67,6 +75,8 @@ impl Platform {
             Platform::WindowsXP => "Windows XP (legacy, 32-bit)",
             Platform::AndroidArm64 => "Android ARM 64-bit",
             Platform::AndroidX64 => "Android x86 64-bit",
+            Platform::LinuxLegacy64 => "Linux legacy 64-bit",
+            Platform::LinuxLegacy32 => "Linux legacy 32-bit",
         }
     }
     /// Name of the build target / engines subfolder.
@@ -82,12 +92,14 @@ impl Platform {
             Platform::WindowsXP => "windows-xp",
             Platform::AndroidArm64 => "android-aarch64",
             Platform::AndroidX64 => "android-x86_64",
+            Platform::LinuxLegacy64 => "linux-x86_64-legacy",
+            Platform::LinuxLegacy32 => "linux-i686-legacy",
         }
     }
     pub fn exe(self) -> &'static str {
         match self {
-            Platform::Linux64 => "mkxp-z.x86_64",
-            Platform::Linux32 => "mkxp-z.i686",
+            Platform::Linux64 | Platform::LinuxLegacy64 => "mkxp-z.x86_64",
+            Platform::Linux32 | Platform::LinuxLegacy32 => "mkxp-z.i686",
             Platform::Windows32 => "mkxp-z.i686.exe",
             Platform::Windows64 => "mkxp-z.x86_64.exe",
             Platform::LinuxArm64 => "mkxp-z.aarch64",
@@ -101,8 +113,8 @@ impl Platform {
     /// Folder inside <game>/mkxp-z/. The Windows engines share one (one launcher).
     pub fn sub(self) -> &'static str {
         match self {
-            Platform::Linux64 => "linux",
-            Platform::Linux32 => "linux32",
+            Platform::Linux64 | Platform::LinuxLegacy64 => "linux",
+            Platform::Linux32 | Platform::LinuxLegacy32 => "linux32",
             Platform::LinuxArm64 => "linux-arm64",
             Platform::LinuxArmhf => "linux-armhf",
             Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 | Platform::WindowsXP => "windows",
@@ -115,6 +127,18 @@ impl Platform {
     }
     pub fn is_arm(self) -> bool {
         matches!(self, Platform::LinuxArm64 | Platform::LinuxArmhf | Platform::WindowsArm64 | Platform::AndroidArm64)
+    }
+    pub fn is_legacy_linux(self) -> bool {
+        matches!(self, Platform::LinuxLegacy64 | Platform::LinuxLegacy32)
+    }
+    /// The same engine as built normally (Linux legacy: Linux), for what
+    /// only depends on the system and CPU.
+    pub fn base(self) -> Platform {
+        match self {
+            Platform::LinuxLegacy64 => Platform::Linux64,
+            Platform::LinuxLegacy32 => Platform::Linux32,
+            p => p,
+        }
     }
     pub fn is_android(self) -> bool {
         matches!(self, Platform::AndroidArm64 | Platform::AndroidX64)
@@ -141,7 +165,11 @@ impl Platform {
 /// The system chosen in the patcher's window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum System {
+    /// built with this computer's compiler against an old C library (glibc
+    /// 2.31), no container needed
     Linux,
+    /// built in an Ubuntu 20.04 container (podman or docker), like before
+    LinuxLegacy,
     Windows,
     /// Windows with only the legacy engine for Windows XP (32-bit), which
     /// Game.exe also starts on newer Windows
@@ -160,11 +188,12 @@ pub enum Cpu {
 }
 
 impl System {
-    pub const ALL: [System; 4] = [System::Linux, System::Windows, System::Legacy, System::Android];
+    pub const ALL: [System; 5] = [System::Linux, System::LinuxLegacy, System::Windows, System::Legacy, System::Android];
     /// Whether there's an engine for this system on that CPU type.
     pub fn has(self, cpu: Cpu) -> bool {
         match self {
             System::Linux => true,
+            System::LinuxLegacy => matches!(cpu, Cpu::X86 | Cpu::X64),
             System::Windows => cpu != Cpu::Arm32,
             System::Legacy => cpu == Cpu::X86,
             System::Android => matches!(cpu, Cpu::X64 | Cpu::Arm64),
@@ -202,6 +231,8 @@ impl Choice {
             self
         } else if self.system == System::Android {
             Choice { cpu: Cpu::Arm64, ..self }
+        } else if self.system == System::LinuxLegacy {
+            Choice { cpu: Cpu::X64, ..self }
         } else {
             Choice { cpu: Cpu::X86, ..self }
         }
@@ -214,6 +245,8 @@ impl Choice {
             (System::Linux, Cpu::X64) => vec![Platform::Linux64],
             (System::Linux, Cpu::Arm32) => vec![Platform::LinuxArmhf],
             (System::Linux, Cpu::Arm64) => vec![Platform::LinuxArm64],
+            (System::LinuxLegacy, Cpu::X86) => vec![Platform::LinuxLegacy32],
+            (System::LinuxLegacy, Cpu::X64) => vec![Platform::LinuxLegacy64],
             (System::Windows, Cpu::X86) => vec![Platform::Windows32],
             (System::Windows, Cpu::X64) => vec![Platform::Windows64],
             (System::Windows, Cpu::Arm64) => vec![Platform::WindowsArm64],
@@ -309,16 +342,6 @@ fn engine_current(p: Platform, dir: &Path) -> bool {
         .map_or(false, |s| s.trim() == engine_rev(p))
 }
 
-/// A raw meson build dir of the source: current if built after fix_source ran.
-fn build_dir_current(p: Platform, dir: &Path, src: &Path) -> bool {
-    let fixed = src.join("src/filesystem/filesystemImpl.cpp");
-    let mtime = |f: &Path| std::fs::metadata(f).and_then(|m| m.modified()).ok();
-    let exe = mtime(&dir.join(p.exe()));
-    std::fs::read_to_string(&fixed).map_or(false, |t| t.contains(GAMEFOLDER_FIX))
-        && [fixed, src.join("src/display/frameinterp.cpp"), src.join("src/display/graphics.cpp")].iter()
-            .all(|f| matches!((exe, mtime(f)), (Some(e), Some(s)) if e >= s))
-}
-
 pub struct Engine {
     pub platform: Platform,
     pub dir: PathBuf,
@@ -342,12 +365,7 @@ fn candidates(p: Platform, paths: &Paths, explicit: Option<&Path>) -> Vec<PathBu
     if let Some(e) = explicit {
         return vec![e.to_path_buf()];
     }
-    let mut c = vec![paths.engines.join(p.target())];
-    if p == Platform::Linux64 {
-        // an existing native meson build dir from earlier work
-        c.push(paths.source.join("build"));
-    }
-    c
+    vec![paths.engines.join(p.target())]
 }
 
 pub fn locate(p: Platform, paths: &Paths, explicit: Option<&Path>) -> Result<Engine, String> {
@@ -357,8 +375,7 @@ pub fn locate(p: Platform, paths: &Paths, explicit: Option<&Path>) -> Result<Eng
         let dir = if c.is_file() { c.parent().map(Path::to_path_buf).unwrap_or_default() } else { c.clone() };
         if dir.join(p.exe()).is_file() {
             // an engine the user picked is taken as it is
-            let current = explicit.is_some()
-                || if *c == paths.engines.join(p.target()) { engine_current(p, &dir) } else { build_dir_current(p, &dir, &paths.source) };
+            let current = explicit.is_some() || engine_current(p, &dir);
             if current {
                 return Ok(load_engine(p, &dir));
             }
@@ -441,8 +458,11 @@ pub fn host_can_build(targets: &[Platform]) -> Result<(), String> {
         return Err("Engines can be built on Linux and Windows only.".into());
     }
     // Android engines need no system compilers (Google's NDK is downloaded),
-    // only meson, ninja, cmake, bison and ruby, which a sandbox may well have
-    if util::in_flatpak() && !targets.iter().all(|p| p.is_android()) {
+    // only meson, ninja, cmake, bison and ruby, which a sandbox may well have;
+    // a sandbox with its own g++ can build the normal Linux engines too
+    let sandbox_ok = |p: &Platform| p.is_android()
+        || (matches!(p, Platform::Linux64 | Platform::Linux32) && util::which("g++").is_some());
+    if util::in_flatpak() && !targets.iter().all(sandbox_ok) {
         return Err("This runs inside a Flatpak sandbox (e.g. VS Code's terminal), where the system's \
                     compilers aren't visible. Start the patcher from a normal terminal or the desktop.".into());
     }
@@ -470,6 +490,9 @@ fn packages(distro: Distro, what: &str) -> &'static str {
         (Distro::Arch, "linux-aarch64") => "aarch64-linux-gnu-gcc",
         (Distro::Arch, "linux-armhf") => "podman",
         (_, "windows-aarch64") => "curl tar xz",
+        // the old C library for normal Linux engines is downloaded (linux_sysroot.rs)
+        (_, "linux-sysroot") => "curl tar xz coreutils",
+        (_, "container") => "podman",
         // the Android tools are downloaded (NDK, SDK build tools, JDK)
         (_, "android") => "curl unzip tar coreutils",
         _ => "",
@@ -524,7 +547,14 @@ pub fn check_build_tools(targets: &[Platform]) -> Result<(), String> {
     }
     let distro = util::distro();
     let mut need: Vec<&str> = Vec::new();
-    // Linux x86 engines are built in a container with its own tools (see LINUX_IMAGE)
+    // Linux legacy engines are built in a container with its own tools (see LINUX_IMAGE)
+    if let Some(p) = targets.iter().find(|p| linux_x86_in_container(**p)) {
+        if container_runtime().is_none() {
+            return Err(format!("The {} engine is built in an Ubuntu 20.04 container, which needs podman (or \
+                                docker): {}\nOr choose \"Linux\", which needs no container.",
+                               p.label(), install_hint(&[packages(distro, "container")])));
+        }
+    }
     let targets: Vec<Platform> = targets.iter().copied().filter(|p| !linux_x86_in_container(*p)).collect();
     let targets = &targets[..];
     if targets.is_empty() {
@@ -545,6 +575,9 @@ pub fn check_build_tools(targets: &[Platform]) -> Result<(), String> {
                 need.push(packages(distro, "android"));
             }
             continue;
+        }
+        if linux_x86_with_sysroot(*p) && !crate::linux_sysroot::missing_commands().is_empty() {
+            need.push(packages(distro, "linux-sysroot"));
         }
         let ok = match linux_arm_route(*p) {
             Some(r) => r.is_ok(),
@@ -1301,10 +1334,17 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Whether this Linux x86 engine is built in the Ubuntu 20.04 container.
+/// Whether this engine is built in the Ubuntu 20.04 container (Linux legacy).
 fn linux_x86_in_container(p: Platform) -> bool {
+    cfg!(target_os = "linux") && p.is_legacy_linux()
+}
+
+/// Whether this normal Linux x86 engine is built against the old C library
+/// (linux_sysroot.rs); MKXPZ_NATIVE_BUILD=1: a plain build instead, for this
+/// computer's system only.
+fn linux_x86_with_sysroot(p: Platform) -> bool {
     cfg!(target_os = "linux") && matches!(p, Platform::Linux64 | Platform::Linux32)
-        && std::env::var_os("MKXPZ_NATIVE_BUILD").is_none() && container_runtime().is_some()
+        && std::env::var_os("MKXPZ_NATIVE_BUILD").is_none()
 }
 
 /// The newest glibc version an engine needs (from the version names it refers to).
@@ -1387,8 +1427,9 @@ fn cross_file_for(p: Platform, msys2: Option<&Path>, no_pc: &Path, llvm: Option<
     // on the processors of XP's time without SSE2 (Pentium III, Athlon XP)
     let xp_extra = ", '-mstackrealign'";
     let isolated = format!("[properties]\npkg_config_libdir = ['{}']\n\n", no_pc.display());
-    match (p, msys2) {
-        (Platform::Linux64, _) => None,
+    match (p.base(), msys2) {
+        // (normal Linux engines: see linux_sysroot::cross_file; base() has no legacy ones)
+        (Platform::Linux64 | Platform::LinuxLegacy64 | Platform::LinuxLegacy32, _) => None,
         // written by android::cross_file (needs the NDK's location)
         (Platform::AndroidArm64 | Platform::AndroidX64, _) => None,
         // Windows host: 64-bit is a native MINGW64 build
@@ -1574,31 +1615,32 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
             in_container = true;
         }
     }
+    let mut sysroot_cross = None;
     if linux_x86_in_container(p) {
-        let rt = container_runtime().ok_or("no podman or docker")?;
-        log(format!("Building the {} engine in an Ubuntu 20.04 container, so it runs on older Linux systems too ({})",
-                    p.label(), LINUX_BASELINE));
+        let rt = container_runtime().ok_or("Linux legacy engines are built in a container: install podman \
+                                            (or docker), or choose \"Linux\" instead")?;
+        log(format!("Building the {} engine in an Ubuntu 20.04 container ({})", p.label(), LINUX_BASELINE));
         ensure_image(&rt, LINUX_IMAGE, &linux_dockerfile(&paths.source)?,
                      "an Ubuntu 20.04 container with the compilers", log)?;
         b.container = Some(Container { runtime: rt, image: LINUX_IMAGE.into(), share: paths.source.clone() });
         in_container = true;
+    } else if linux_x86_with_sysroot(p) {
+        log(format!("Building the {} engine with this computer's compiler against an old C library ({})",
+                    p.label(), crate::linux_sysroot::BASELINE));
+        let no_pc = paths.source.join("pkgconfig-none");
+        let _ = std::fs::create_dir_all(&no_pc);
+        sysroot_cross = Some(crate::linux_sysroot::cross_file(p, paths, &no_pc, log)?);
     } else if cfg!(target_os = "linux") && matches!(p, Platform::Linux64 | Platform::Linux32) {
-        log(format!("Building the {} engine with this computer's compiler: it will only run on Linux systems \
-                     at least as new as this one. Install podman (or docker) for an engine that runs on older \
-                     ones too ({}).", p.label(), LINUX_BASELINE));
+        log(format!("Building the {} engine with this computer's compiler and C library (MKXPZ_NATIVE_BUILD): \
+                     it will only run on Linux systems at least as new as this one.", p.label()));
     }
     let src = &paths.source;
     let out = paths.engines.join(p.target());
     let stage = src.join(format!("install-{}", p.target()));
-    let mut bdir = src.join(format!("build-{}", p.target()));
-    if in_container && linux_x86_in_container(p) {
-        // not mixed with a build by this computer's own compiler
-        bdir = src.join(format!("build-{}-focal", p.target()));
-    }
-    // reuse an existing native build dir instead of building everything again
-    if p == Platform::Linux64 && !in_container && !bdir.exists() && src.join("build/build.ninja").is_file() {
-        bdir = src.join("build");
-    }
+    // Linux legacy: the folders the container builds used before there was
+    // a choice (so they needn't start over)
+    let bdir = if p.is_legacy_linux() { src.join(format!("build-{}-focal", p.base().target())) }
+               else { src.join(format!("build-{}", p.target())) };
     std::fs::create_dir_all(&paths.engines).map_err(|e| e.to_string())?;
     log(format!("=== Building {} engine in {}", p.label(), bdir.display()));
 
@@ -1608,9 +1650,10 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     if !cfg!(windows) {
         let _ = std::fs::create_dir_all(&no_pc);
     }
-    let cross = match &android {
-        Some(t) => Some(crate::android::cross_file(p, t, &no_pc)),
-        None => cross_file_for(p, msys2.as_deref(), &no_pc, llvm.as_deref(), in_container),
+    let cross = match (&android, sysroot_cross) {
+        (Some(t), _) => Some(crate::android::cross_file(p, t, &no_pc)),
+        (None, Some(c)) => Some(c),
+        (None, None) => cross_file_for(p, msys2.as_deref(), &no_pc, llvm.as_deref(), in_container),
     };
     let record = bdir.join(".mkxpz-patcher-cross.txt");
     let old_record = bdir.join(".rpgm-patcher-cross.txt");
@@ -1754,6 +1797,14 @@ mod tests {
             }
         }
         assert_eq!(Choice { system: System::Legacy, cpu: Cpu::X86 }.platforms(), [Platform::WindowsXP]);
+        assert_eq!(Choice { system: System::LinuxLegacy, cpu: Cpu::X64 }.platforms(), [Platform::LinuxLegacy64]);
+        assert_eq!(Choice { system: System::LinuxLegacy, cpu: Cpu::Arm64 }.fixed().cpu, Cpu::X64);
+        for p in [Platform::LinuxLegacy64, Platform::LinuxLegacy32] {
+            // the same place in the game, its own folder among the engines
+            assert_eq!((p.sub(), p.exe()), (p.base().sub(), p.base().exe()));
+            assert_ne!(p.target(), p.base().target());
+            assert!(p.is_linux() && Platform::from_key(p.key()) == Some(p));
+        }
         assert_eq!(Choice { system: System::Windows, cpu: Cpu::Arm32 }.fixed().cpu, Cpu::X86);
         assert_eq!(Choice { system: System::Android, cpu: Cpu::X86 }.fixed().cpu, Cpu::Arm64);
         assert_eq!(Choice { system: System::Android, cpu: Cpu::X64 }.platforms(), [Platform::AndroidX64]);

@@ -21,6 +21,9 @@ Usage:
 Options:
   --platform LIST     engines to add, comma-separated:
                         linux, linux32, windows (32-bit), windows64,
+                        linux-legacy, linux32-legacy (Linux, built in an
+                        Ubuntu 20.04 container with podman/docker, like
+                        earlier patcher versions; instead of linux/linux32)
                         linux-arm64, linux-armhf (32-bit ARM), windows-arm64,
                         windows-xp (legacy 32-bit engine for Windows XP; added
                         next to a Windows engine, Game.exe starts it on XP)
@@ -67,7 +70,9 @@ writable: ~/.local/share/mkxpz-patcher or %LOCALAPPDATA%\\mkxpz-patcher):
   msys2/           Windows only: portable MSYS2 with the compilers (set up when needed;
                    on a network or shared drive it goes to %LOCALAPPDATA%\\mkxpz-patcher)
 
-Engines are built on demand. Linux builds all of them (Windows ones are cross-
+Engines are built on demand. Linux builds all of them (Linux x86 ones with this
+computer's compiler against Ubuntu 20.04's C library, downloaded once into
+linux-sysroot/, so they run on systems from 2020 on; Windows ones are cross-
 compiled with MinGW-w64, Windows ARM64 with llvm-mingw, which is downloaded;
 Linux ARM ones with the distribution's ARM cross compiler, or in a Debian
 container with podman/docker where there is none, e.g. on Fedora); Windows
@@ -274,6 +279,9 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
     }
     if android && !a.apk && !a.check {
         return Err("Android engines go into an APK: add --apk (the game folder itself stays as it is)".into());
+    }
+    if let Some(p) = opts.platforms.iter().find(|p| p.is_legacy_linux() && opts.platforms.contains(&p.base())) {
+        return Err(format!("{} and {} both go to mkxp-z/{}: choose one", p.base().key(), p.key(), p.sub()));
     }
     if a.apk && opts.platforms.iter().any(|p| !p.is_android()) {
         return Err("--apk takes only Android engines (patch the folder for other systems separately)".into());

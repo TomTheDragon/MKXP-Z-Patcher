@@ -18,15 +18,16 @@ mkxp-z settings, key bindings and shaders stay).
 - **Platforms:** Linux (x86 64/32-bit, ARM 64/32-bit) and Windows
   (32-bit, 64-bit, ARM64). Linux builds every engine (Windows ones are
   cross-compiled); Windows builds the x86 Windows engines in a portable MSYS2
-  it sets up by itself. In the window you choose one system (Linux, Windows,
-  Windows legacy) and one CPU type (32-bit, 64-bit, ARM 32-bit, ARM 64-bit).
-  Windows has no ARM 32-bit engine, and Windows legacy is 32-bit only; CPU
-  types a system has no engine for are greyed out. The command line can add
+  it sets up by itself. In the window you choose one system (Linux, Linux
+  legacy, Windows, Windows legacy, Android) and one CPU type (32-bit, 64-bit,
+  ARM 32-bit, ARM 64-bit). Windows has no ARM 32-bit engine, Windows legacy is
+  32-bit only and Linux legacy x86 only; CPU types a system has no engine for
+  are greyed out. The command line can add
   several engines at once (`--platform linux,windows`).
 - **Older systems:** the patcher and the engines run on Windows 7 or newer
   (32-bit Windows: `mkxpz-patcher-windows-i686.exe`) and on Linux systems from
-  2020 on (glibc 2.31: Ubuntu 20.04, Debian 11, SteamOS 3 and newer; Linux x86
-  engines built in a container, see Building). On Windows 7/8 and 32-bit
+  2020 on (glibc 2.31: Ubuntu 20.04, Debian 11, SteamOS 3 and newer; see
+  Building for how the Linux x86 engines get there). On Windows 7/8 and 32-bit
   Windows the patcher patches with engines built elsewhere (building them
   needs 64-bit Windows 10 or newer, or Linux). Graphics: OpenGL 2.0, or
   Direct3D 11 on Windows.
@@ -172,10 +173,16 @@ Engines are built by the patcher when needed, or ahead of time with
 `./build-engines.sh` (e.g. `./build-engines.sh linux,windows`,
 `./build-engines.sh windows-xp` or `./build-engines.sh arm`). It asks for the build tools it's missing (meson,
 ninja, cmake, bison, ruby, MinGW-w64 for Windows targets). Linux x86 engines
-are built in an Ubuntu 20.04 container (podman or docker; set up once, about
-300 MB), so they run on Linux systems from 2020 on; without podman/docker they
-are built with the computer's own compiler and need a system as new as it
-(`MKXPZ_NATIVE_BUILD=1` forces that). Windows ARM64 engines use llvm-mingw,
+are built with the computer's own compiler (gcc/g++ with the static C++
+library: Fedora `libstdc++-static`) against Ubuntu 20.04's C library and Linux
+headers, which are downloaded once into `linux-sysroot/` next to the engines
+folder (about 6 MB, checksums pinned), so they run on Linux systems from 2020
+on without a container. "Linux legacy" (`--platform linux-legacy` or
+`linux32-legacy`) builds them in an Ubuntu 20.04 container instead (podman or
+docker; set up once, about 300 MB), like earlier versions of the patcher; its
+engines are kept separately (`mkxp-z/linux-x86_64-legacy`) and go to the same
+place in the game. `MKXPZ_NATIVE_BUILD=1` builds the normal ones against the
+computer's own C library (then they need a system as new as it). Windows ARM64 engines use llvm-mingw,
 which is downloaded; Linux ARM engines use the distribution's ARM cross
 compiler, or a Debian container (podman/docker) where there is none.
 Android engines (`./build-engines.sh android`) are built with Google's NDK,

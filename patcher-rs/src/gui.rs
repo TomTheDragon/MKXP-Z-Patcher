@@ -192,7 +192,10 @@ fn build_widgets() -> Widgets {
         out
     };
     let systems = radios(&[
-        ("Linux", ""),
+        ("Linux", "Built with this computer's compiler against an old C library: runs on Linux systems from \
+                   2020 on (glibc 2.31: Ubuntu 20.04, Debian 11, SteamOS 3 and newer). No container needed."),
+        ("Linux legacy", "Built in an Ubuntu 20.04 container (needs podman or docker), as earlier versions of the \
+                          patcher did. 32-bit and 64-bit only."),
         ("Windows", "Windows 7 and newer."),
         ("Windows legacy (XP)", "Windows XP and newer: only the legacy 32-bit engine (OpenGL only, no HTTPS or \
                                  Ruby sockets), which also runs on newer Windows."),
@@ -804,7 +807,7 @@ fn update_controls(app: &App) {
     }
     w.appimage.set_sensitive(!busy && can_patch && !appimage_platforms(app).is_empty());
     let win = matches!(system, System::Windows | System::Legacy);
-    w.soundfont.set_sensitive(!busy && system != System::Linux);
+    w.soundfont.set_sensitive(!busy && !matches!(system, System::Linux | System::LinuxLegacy));
     w.replace_exe.set_sensitive(!busy && win);
     w.patch.set_label(patch_label);
     w.patch.set_sensitive(can_patch && !busy);

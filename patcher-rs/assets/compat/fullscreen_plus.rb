@@ -81,8 +81,13 @@ module MkxpzFullscreenPlus
     w && w > 0 ? w : Graphics.width
   end
 
+  # Android: always the whole screen (see android_screen.rb)
+  def self.android?
+    ENV['ANDROID_ROOT'] && ENV['ANDROID_DATA'] ? true : false
+  end
+
   def self.apply(fullscreen, w, h)
-    if fullscreen
+    if fullscreen || android?
       Graphics.fullscreen = true unless Graphics.fullscreen
     else
       Graphics.fullscreen = false if Graphics.fullscreen

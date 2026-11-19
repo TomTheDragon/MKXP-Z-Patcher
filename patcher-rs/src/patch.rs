@@ -433,8 +433,9 @@ fn linux_launcher(plan: &Plan) -> String {
     let list = |ps: &[Platform]| ps.iter().filter(|p| plan.platforms.contains(p))
         .map(|p| format!("{}/{}", p.sub(), p.exe())).collect::<Vec<_>>().join(" ");
     LAUNCHER_LINUX.replace("__SUBDIR__", ENGINE_SUBDIR)
-        .replace("__CHOICES64__", &list(&[Platform::Linux64, Platform::Linux32]))
-        .replace("__CHOICES32__", &list(&[Platform::Linux32]))
+        .replace("__CHOICES64__", &list(&[Platform::Linux64, Platform::LinuxLegacy64, Platform::Linux32,
+                                           Platform::LinuxLegacy32]))
+        .replace("__CHOICES32__", &list(&[Platform::Linux32, Platform::LinuxLegacy32]))
         .replace("__CHOICESARM64__", &list(&[Platform::LinuxArm64, Platform::LinuxArmhf]))
         .replace("__CHOICESARMHF__", &list(&[Platform::LinuxArmhf]))
 }

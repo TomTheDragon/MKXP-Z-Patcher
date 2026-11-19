@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 pub const ENGINE_SUBDIR: &str = "mkxp-z";
 /// Patcher-made compatibility scripts (preloaded from <game>/mkxp-z/compat/).
-const COMPAT_SCRIPTS: [(&str, &str); 5] = [
+const COMPAT_SCRIPTS: [(&str, &str); 6] = [
+    ("android_screen.rb", include_str!("../assets/compat/android_screen.rb")),
     ("no_rgss_memory.rb", include_str!("../assets/compat/no_rgss_memory.rb")),
     ("bitmap_marshal.rb", include_str!("../assets/compat/bitmap_marshal.rb")),
     ("fullscreen_plus.rb", include_str!("../assets/compat/fullscreen_plus.rb")),
@@ -206,8 +207,8 @@ impl Plan {
         if any_android {
             notes.push(format!("Android: the game goes into an APK next to the game folder (the folder itself stays as \
                                 it is). Install it on Android 8.0 or newer; the first start copies the game into the \
-                                app's storage, where it keeps its saves. Without a keyboard or controller there are \
-                                no controls yet{}.", if has(Platform::AndroidX64) && !has(Platform::AndroidArm64) {
+                                app's storage, where it keeps its saves. On touchscreens it shows touch controls and a menu \
+                                button (settings, reset); keyboards and controllers work too{}.", if has(Platform::AndroidX64) && !has(Platform::AndroidArm64) {
                                     " (x86 64-bit: the Android emulator, Waydroid, some Chromebooks; phones need ARM 64-bit)"
                                 } else { "" }));
         }
@@ -223,6 +224,10 @@ impl Plan {
             .map(|s| s.iter().map(|(_, src)| String::from_utf8_lossy(src)).collect::<Vec<_>>().join("\n"));
         let mut preload = Vec::new();
         let mut compat: Vec<String> = Vec::new();
+        if any_android {
+            // first: the game always fills the screen (before other scripts take Graphics' methods)
+            compat.push("android_screen.rb".into());
+        }
         let uses_win32 = blob.as_ref().map_or(true, |b| b.contains("Win32API"));
         // RGSS1-3 ran on Ruby 1.8/1.9; restore methods those scripts expect.
         preload.push(format!("{}/scripts/preload/ruby_classic_wrap.rb", ENGINE_SUBDIR));
@@ -393,7 +398,7 @@ impl Plan {
                             (package fluid-soundfont-gm).".into());
             }
         }
-        if has(Platform::Linux32) {
+        if has(Platform::Linux32) || has(Platform::LinuxLegacy32) {
             notes.push("Linux 32-bit: on 64-bit systems Game.sh prefers the 64-bit engine; the 32-bit one runs there \
                         only with 32-bit glibc installed (Fedora: glibc.i686).".into());
         }

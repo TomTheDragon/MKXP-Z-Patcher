@@ -12,6 +12,7 @@ pub mod gui;
 #[cfg(windows)]
 pub mod gui_win;
 pub mod json;
+pub mod linux_sysroot;
 pub mod marshal;
 pub mod patch;
 pub mod pe;
