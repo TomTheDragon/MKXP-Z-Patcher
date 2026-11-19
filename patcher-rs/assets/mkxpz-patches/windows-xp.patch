@@ -1,0 +1,232 @@
+--- a/src/system/systemImpl.cpp
++++ b/src/system/systemImpl.cpp
+@@ -23,7 +23,18 @@ std::string systemImpl::getSystemLanguage() {
+ #if defined(__WIN32__)
+     wchar_t wbuf[50] = {0};
+     LANGID lid = GetUserDefaultLangID();
++#if _WIN32_WINNT >= 0x0600
+     LCIDToLocaleName(lid, wbuf, sizeof(wbuf), 0);
++#else
++    /* Windows XP (the patcher's legacy engine): no LCIDToLocaleName; the
++     * same "en-US" form from the language and country codes */
++    int n = GetLocaleInfoW(lid, LOCALE_SISO639LANGNAME, wbuf, 20);
++    if (n > 0) {
++        wbuf[n - 1] = L'-';
++        if (GetLocaleInfoW(lid, LOCALE_SISO3166CTRYNAME, wbuf + n, 20) <= 0)
++            wbuf[n - 1] = 0;
++    }
++#endif
+     wcstombs(buf, wbuf, sizeof(buf));
+ #else
+     strncpy(buf, std::locale("").name().c_str(), sizeof(buf));
+--- a/src/util/win-consoleutils.cpp
++++ b/src/util/win-consoleutils.cpp
+@@ -29,9 +29,16 @@ static int openStdHandle(const DWORD &nStdHandle);
+ // setting up the console.
+ void reopenWindowsStreams()
+ {
++#if _WIN32_WINNT >= 0x0600
+     freopen_s(&outStream, "CONOUT$", "w+", stdout);
+     freopen_s(&errStream, "CONOUT$", "w+", stderr);
+     freopen_s(&inStream, "CONIN$", "r", stdin);
++#else
++    /* Windows XP (the patcher's legacy engine): its C runtime has no freopen_s */
++    outStream = freopen("CONOUT$", "w+", stdout);
++    errStream = freopen("CONOUT$", "w+", stderr);
++    inStream = freopen("CONIN$", "r", stdin);
++#endif
+     std::cout.clear();
+     std::clog.clear();
+     std::cerr.clear();
+--- a/subprojects/openal-soft.wrap
++++ b/subprojects/openal-soft.wrap
+@@ -14,6 +14,7 @@ diff_files =
+     openal-soft-info.patch,
+     openal-soft-partial-dependency.patch,
+     openal-soft-simd.patch,
++    openal-soft-windows-xp.patch,
+     end-of-diff-files.patch
+ 
+ [provide]
+--- /dev/null
++++ b/subprojects/packagefiles/openal-soft-windows-xp.patch
+@@ -0,0 +1,53 @@
++# Windows XP (the MKXP-Z Patcher's legacy engine, built with _WIN32_WINNT=0x0501):
++# SHGetKnownFolderPath (Vista) only where Windows has it. No change for newer Windows.
++
++--- a/alc/alconfig.cpp
+++++ b/alc/alconfig.cpp
++@@ -25,6 +25,22 @@
++ #ifdef _WIN32
++ #include <windows.h>
++ #include <shlobj.h>
+++#if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0600
+++/* Windows XP (the MKXP-Z Patcher's legacy engine): SHGetKnownFolderPath only
+++ * where Windows has it; on XP these folders just aren't searched */
+++#ifndef KF_FLAG_DONT_UNEXPAND
+++#define KF_FLAG_DONT_UNEXPAND 0x00002000
+++#endif
+++static HRESULT mkxpz_SHGetKnownFolderPath(const KNOWNFOLDERID &id, DWORD flags, HANDLE token, PWSTR *out)
+++{
+++    using fn_t = HRESULT (WINAPI *)(const KNOWNFOLDERID &, DWORD, HANDLE, PWSTR *);
+++    static const fn_t fn{reinterpret_cast<fn_t>(reinterpret_cast<void *>(
+++        GetProcAddress(LoadLibraryW(L"shell32.dll"), "SHGetKnownFolderPath")))};
+++    *out = nullptr;
+++    return fn ? fn(id, flags, token, out) : E_NOTIMPL;
+++}
+++#define SHGetKnownFolderPath mkxpz_SHGetKnownFolderPath
+++#endif
++ #endif
++ #ifdef __APPLE__
++ #include <CoreFoundation/CoreFoundation.h>
++--- a/core/helpers.cpp
+++++ b/core/helpers.cpp
++@@ -73,6 +73,22 @@ void DirectorySearch(const fs::path &path, const std::string_view ext,
++ 
++ #include <cctype>
++ #include <shlobj.h>
+++#if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0600
+++/* Windows XP (the MKXP-Z Patcher's legacy engine): SHGetKnownFolderPath only
+++ * where Windows has it; on XP these folders just aren't searched */
+++#ifndef KF_FLAG_DONT_UNEXPAND
+++#define KF_FLAG_DONT_UNEXPAND 0x00002000
+++#endif
+++static HRESULT mkxpz_SHGetKnownFolderPath(const KNOWNFOLDERID &id, DWORD flags, HANDLE token, PWSTR *out)
+++{
+++    using fn_t = HRESULT (WINAPI *)(const KNOWNFOLDERID &, DWORD, HANDLE, PWSTR *);
+++    static const fn_t fn{reinterpret_cast<fn_t>(reinterpret_cast<void *>(
+++        GetProcAddress(LoadLibraryW(L"shell32.dll"), "SHGetKnownFolderPath")))};
+++    *out = nullptr;
+++    return fn ? fn(id, flags, token, out) : E_NOTIMPL;
+++}
+++#define SHGetKnownFolderPath mkxpz_SHGetKnownFolderPath
+++#endif
++ 
++ const PathNamePair &GetProcBinary()
++ {
+--- /dev/null
++++ b/subprojects/packagefiles/ruby-3.1-windows-xp.patch
+@@ -0,0 +1,115 @@
++# Windows XP (the MKXP-Z Patcher's legacy engine, built with _WIN32_WINNT=0x0501):
++# CryptGenRandom instead of bcrypt.dll, no qsort_s / _wfreopen_s (not in XP's C
++# runtime), no socket extension (if_nametoindex), GetThreadId looked up at run
++# time (Server 2003 and newer). No change for newer Windows.
++
++--- a/meson.build
+++++ b/meson.build
++@@ -30,6 +30,10 @@ endif
++ 
++ baseruby = run_command(subproject('common').get_variable('quotetool'), (meson.version().version_compare('>=1.10.0') ? find_program('ruby').cmd_array() : find_program('ruby')), check: true).stdout().strip()
++ 
+++# Windows XP (the MKXP-Z Patcher's legacy engine, built with _WIN32_WINNT
+++# 0x0501): without the socket extension, which needs Vista's if_nametoindex
+++winxp = host_machine.system() == 'windows' and meson.get_compiler('c').get_define('_WIN32_WINNT') in ['0x0501', '0x501', '0x0502', '0x502']
+++
++ ruby_deps = [
++     dependency('libffi', required: true),
++     dependency('yaml-0.1', required: true),
++@@ -58,7 +62,7 @@ ruby = declare_dependency(
++                 '--with-soname=ruby',
++                 '--disable-shared',
++                 '--disable-install-doc',
++-                '--with-out-ext=openssl,readline,dbm,gdbm',
+++                '--with-out-ext=openssl,readline,dbm,gdbm' + (winxp ? ',socket' : ''),
++                 '--with-static-linked-ext',
++                 '--disable-rubygems',
++                 '--without-gmp',
++@@ -187,7 +191,7 @@ ruby = declare_dependency(
++         meson.project_build_root() / 'build' / 'ext' / 'racc' / 'cparse' / 'cparse.a',
++         meson.project_build_root() / 'build' / 'ext' / 'rbconfig' / 'sizeof' / 'sizeof.a',
++         meson.project_build_root() / 'build' / 'ext' / 'ripper' / 'ripper.a',
++-        meson.project_build_root() / 'build' / 'ext' / 'socket' / 'socket.a',
+++        winxp ? [] : [meson.project_build_root() / 'build' / 'ext' / 'socket' / 'socket.a'],
++         meson.project_build_root() / 'build' / 'ext' / 'stringio' / 'stringio.a',
++         meson.project_build_root() / 'build' / 'ext' / 'strscan' / 'strscan.a',
++         meson.project_build_root() / 'build' / 'ext' / 'zlib' / 'zlib.a',
++--- a/random.c
+++++ b/random.c
++@@ -597,6 +597,11 @@ fill_random_bytes_crypt(void *seed, size_t size)
++ static int
++ fill_random_bytes_bcrypt(void *seed, size_t size)
++ {
+++#if defined _WIN32_WINNT && _WIN32_WINNT < 0x0600
+++    /* Windows XP (the MKXP-Z Patcher's legacy engine) has no bcrypt.dll:
+++     * CryptGenRandom (fill_random_bytes_crypt) is used instead */
+++    return -1;
+++#else
++     while (size > 0) {
++         ULONG n = (size > (size_t)ULONG_MAX) ? LONG_MAX : (ULONG)size;
++         if (BCryptGenRandom(NULL, seed, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG))
++@@ -605,6 +610,7 @@ fill_random_bytes_bcrypt(void *seed, size_t size)
++         size -= n;
++     }
++     return 0;
+++#endif
++ }
++ 
++ static int
++--- a/util.c
+++++ b/util.c
++@@ -218,6 +218,12 @@ ruby_strtoul(const char *str, char **endptr, int base)
++ 
++ typedef int (cmpfunc_t)(const void*, const void*, void*);
++ 
+++#if defined _WIN32 && defined _WIN32_WINNT && _WIN32_WINNT < 0x0600
+++/* Windows XP's C runtime has no qsort_s (MKXP-Z Patcher, legacy engine):
+++ * Ruby's own sort below */
+++# undef HAVE_QSORT_S
+++#endif
+++
++ #if defined HAVE_QSORT_S && defined RUBY_MSVCRT_VERSION
++ /* In contrast to its name, Visual Studio qsort_s is incompatible with
++  * C11 in the order of the comparison function's arguments, and same
++--- a/win32/file.c
+++++ b/win32/file.c
++@@ -683,7 +683,8 @@ rb_freopen(VALUE fname, const char *mode, FILE *file)
++     len = MultiByteToWideChar(CP_UTF8, 0, name, n, wname, len);
++     wname[len] = L'\0';
++     RB_GC_GUARD(fname);
++-#if RUBY_MSVCRT_VERSION < 80 && !defined(HAVE__WFREOPEN_S)
+++#if (RUBY_MSVCRT_VERSION < 80 && !defined(HAVE__WFREOPEN_S)) || \
+++    (defined _WIN32_WINNT && _WIN32_WINNT < 0x0600) /* Windows XP: no _wfreopen_s (MKXP-Z Patcher) */
++     e = _wfreopen(wname, wmode, file) ? 0 : errno;
++ #else
++     {
++--- a/thread_win32.c
+++++ b/thread_win32.c
++@@ -841,7 +841,27 @@
++ static VALUE
++ native_thread_native_thread_id(rb_thread_t *th)
++ {
+++#if defined _WIN32_WINNT && _WIN32_WINNT < 0x0600
+++    /* Windows XP (the MKXP-Z Patcher's legacy engine) has no GetThreadId:
+++     * looked up at run time, else only the current thread's id is known */
+++    typedef DWORD (WINAPI *get_thread_id_func)(HANDLE);
+++    static get_thread_id_func get_thread_id;
+++    static int looked_up;
+++    DWORD tid;
+++    if (!looked_up) {
+++        get_thread_id = (get_thread_id_func)(void (*)(void))
+++            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadId");
+++        looked_up = 1;
+++    }
+++    if (get_thread_id)
+++        tid = get_thread_id(th->thread_id);
+++    else if (th == GET_THREAD())
+++        tid = GetCurrentThreadId();
+++    else
+++        return Qnil;
+++#else
++     DWORD tid = GetThreadId(th->thread_id);
+++#endif
++     if (tid == 0) rb_sys_fail("GetThreadId");
++     return ULONG2NUM(tid);
++ }
+--- a/subprojects/ruby-3.1.wrap
++++ b/subprojects/ruby-3.1.wrap
+@@ -33,4 +33,5 @@ diff_files =
+     ruby-3.1-mkxp-z-patches.patch,
+     ruby-3.1-clock-gettime.patch,
+     ruby-3.1-mkxp-z-patches-windows-libs.patch,
++    ruby-3.1-windows-xp.patch,
+     end-of-diff-files.patch

@@ -21,10 +21,15 @@ pub enum Platform {
     LinuxArmhf,
     /// Windows on ARM (aarch64)
     WindowsArm64,
+    /// Windows XP (and newer), 32-bit: the legacy engine (built for XP's
+    /// system functions, OpenGL only); next to the 32-bit engine in
+    /// mkxp-z/windows, the launcher starts it on XP
+    WindowsXP,
 }
 
-pub const ALL_PLATFORMS: [Platform; 7] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
-                                          Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64];
+pub const ALL_PLATFORMS: [Platform; 8] = [Platform::Linux64, Platform::Linux32, Platform::Windows32, Platform::Windows64,
+                                          Platform::LinuxArm64, Platform::LinuxArmhf, Platform::WindowsArm64,
+                                          Platform::WindowsXP];
 
 impl Platform {
     pub fn key(self) -> &'static str {
@@ -36,6 +41,7 @@ impl Platform {
             Platform::LinuxArm64 => "linux-arm64",
             Platform::LinuxArmhf => "linux-armhf",
             Platform::WindowsArm64 => "windows-arm64",
+            Platform::WindowsXP => "windows-xp",
         }
     }
     pub fn from_key(k: &str) -> Option<Platform> {
@@ -51,6 +57,7 @@ impl Platform {
             Platform::LinuxArm64 => "Linux ARM 64-bit",
             Platform::LinuxArmhf => "Linux ARM 32-bit",
             Platform::WindowsArm64 => "Windows ARM 64-bit",
+            Platform::WindowsXP => "Windows XP (legacy, 32-bit)",
         }
     }
     /// Name of the build target / engines subfolder.
@@ -63,6 +70,7 @@ impl Platform {
             Platform::LinuxArm64 => "linux-aarch64",
             Platform::LinuxArmhf => "linux-armhf",
             Platform::WindowsArm64 => "windows-aarch64",
+            Platform::WindowsXP => "windows-xp",
         }
     }
     pub fn exe(self) -> &'static str {
@@ -74,6 +82,7 @@ impl Platform {
             Platform::LinuxArm64 => "mkxp-z.aarch64",
             Platform::LinuxArmhf => "mkxp-z.armhf",
             Platform::WindowsArm64 => "mkxp-z.aarch64.exe",
+            Platform::WindowsXP => "mkxp-z.xp.exe",
         }
     }
     /// Folder inside <game>/mkxp-z/. The Windows engines share one (one launcher).
@@ -83,11 +92,11 @@ impl Platform {
             Platform::Linux32 => "linux32",
             Platform::LinuxArm64 => "linux-arm64",
             Platform::LinuxArmhf => "linux-armhf",
-            Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 => "windows",
+            Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 | Platform::WindowsXP => "windows",
         }
     }
     pub fn is_windows(self) -> bool {
-        matches!(self, Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64)
+        matches!(self, Platform::Windows32 | Platform::Windows64 | Platform::WindowsArm64 | Platform::WindowsXP)
     }
     pub fn is_arm(self) -> bool {
         matches!(self, Platform::LinuxArm64 | Platform::LinuxArmhf | Platform::WindowsArm64)
@@ -103,6 +112,82 @@ impl Platform {
             ("windows", "x86_64") => Some(Platform::Windows64),
             ("windows", "aarch64") => Some(Platform::WindowsArm64),
             _ => None,
+        }
+    }
+}
+
+/// The system chosen in the patcher's window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum System {
+    Linux,
+    Windows,
+    /// Windows with only the legacy engine for Windows XP (32-bit), which
+    /// Game.exe also starts on newer Windows
+    Legacy,
+}
+
+/// The CPU type chosen in the patcher's window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cpu {
+    X86,
+    X64,
+    Arm32,
+    Arm64,
+}
+
+impl System {
+    pub const ALL: [System; 3] = [System::Linux, System::Windows, System::Legacy];
+    /// Whether there's an engine for this system on that CPU type.
+    pub fn has(self, cpu: Cpu) -> bool {
+        match self {
+            System::Linux => true,
+            System::Windows => cpu != Cpu::Arm32,
+            System::Legacy => cpu == Cpu::X86,
+        }
+    }
+}
+
+impl Cpu {
+    pub const ALL: [Cpu; 4] = [Cpu::X86, Cpu::X64, Cpu::Arm32, Cpu::Arm64];
+}
+
+/// One system and one CPU type, as chosen in the patcher's window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Choice {
+    pub system: System,
+    pub cpu: Cpu,
+}
+
+impl Choice {
+    /// The host's system and CPU (Windows: 32-bit, which runs the games' own DLLs).
+    pub fn for_host() -> Choice {
+        match Platform::host() {
+            Some(Platform::Linux64) => Choice { system: System::Linux, cpu: Cpu::X64 },
+            Some(Platform::Linux32) => Choice { system: System::Linux, cpu: Cpu::X86 },
+            Some(Platform::LinuxArm64) => Choice { system: System::Linux, cpu: Cpu::Arm64 },
+            Some(Platform::LinuxArmhf) => Choice { system: System::Linux, cpu: Cpu::Arm32 },
+            _ => Choice { system: System::Windows, cpu: Cpu::X86 },
+        }
+    }
+
+    /// The same system with a CPU type it has an engine for (32-bit if the
+    /// chosen one has none).
+    pub fn fixed(self) -> Choice {
+        if self.system.has(self.cpu) { self } else { Choice { cpu: Cpu::X86, ..self } }
+    }
+
+    /// The engines to patch with (Windows legacy: just the XP engine).
+    pub fn platforms(&self) -> Vec<Platform> {
+        match (self.system, self.cpu) {
+            (System::Linux, Cpu::X86) => vec![Platform::Linux32],
+            (System::Linux, Cpu::X64) => vec![Platform::Linux64],
+            (System::Linux, Cpu::Arm32) => vec![Platform::LinuxArmhf],
+            (System::Linux, Cpu::Arm64) => vec![Platform::LinuxArm64],
+            (System::Windows, Cpu::X86) => vec![Platform::Windows32],
+            (System::Windows, Cpu::X64) => vec![Platform::Windows64],
+            (System::Windows, Cpu::Arm64) => vec![Platform::WindowsArm64],
+            (System::Legacy, Cpu::X86) => vec![Platform::WindowsXP],
+            _ => Vec::new(),
         }
     }
 }
@@ -176,13 +261,19 @@ const ENGINE_SKIP: [&str; 8] = [ENGINE_STAMP, ".rpgm-patcher-engine", "mkxp.json
 /// Written into engines the patcher builds. Engines without the current revision
 /// were built from source without the patcher's fixes (fix_source) and are rebuilt.
 const ENGINE_STAMP: &str = ".mkxpz-patcher-engine";
-const ENGINE_REV: &str = "21";
+const ENGINE_REV: &str = "22";
+/// Fixes that only concern the XP engine rebuild just that one.
+const XP_ENGINE_REV: &str = "2";
 
-fn engine_current(dir: &Path) -> bool {
+fn engine_rev(p: Platform) -> String {
+    if p == Platform::WindowsXP { format!("{}-xp{}", ENGINE_REV, XP_ENGINE_REV) } else { ENGINE_REV.to_string() }
+}
+
+fn engine_current(p: Platform, dir: &Path) -> bool {
     // also the stamp written under the patcher's old name (rpgm-patcher)
     [ENGINE_STAMP, ".rpgm-patcher-engine"].iter()
         .find_map(|n| std::fs::read_to_string(dir.join(n)).ok())
-        .map_or(false, |s| s.trim() == ENGINE_REV)
+        .map_or(false, |s| s.trim() == engine_rev(p))
 }
 
 /// A raw meson build dir of the source: current if built after fix_source ran.
@@ -234,7 +325,7 @@ pub fn locate(p: Platform, paths: &Paths, explicit: Option<&Path>) -> Result<Eng
         if dir.join(p.exe()).is_file() {
             // an engine the user picked is taken as it is
             let current = explicit.is_some()
-                || if *c == paths.engines.join(p.target()) { engine_current(&dir) } else { build_dir_current(p, &dir, &paths.source) };
+                || if *c == paths.engines.join(p.target()) { engine_current(p, &dir) } else { build_dir_current(p, &dir, &paths.source) };
             if current {
                 return Ok(load_engine(p, &dir));
             }
@@ -289,6 +380,20 @@ pub const MSYS2_URL: &str = "https://repo.msys2.org/distrib/msys2-x86_64-latest.
 
 /// Can this computer build these engines?
 pub fn host_can_build(targets: &[Platform]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // the portable MSYS2 (the compilers) needs a 64-bit Windows 10 or 11
+        if !util::windows_64_bit() {
+            return Err("Engines can't be built on a 32-bit Windows (the compilers need 64-bit Windows 10 or \
+                        newer). Copy built engine folders (mkxp-z/<platform>) next to the patcher instead, \
+                        or build them on another computer.".into());
+        }
+        if !util::windows_10_or_newer() {
+            return Err("Engines can't be built on Windows 7 or 8 (the compilers need Windows 10 or newer). \
+                        Copy built engine folders (mkxp-z/<platform>) next to the patcher instead, or build \
+                        them on another computer.".into());
+        }
+    }
     if cfg!(windows) {
         if let Some(p) = targets.iter().find(|p| !p.is_windows() || p.is_arm()) {
             return Err(format!("The {} engine can only be built on Linux. Build it there, or copy a built \
@@ -341,6 +446,11 @@ fn install_hint(pkgs: &[&str]) -> String {
     }
 }
 
+/// The compiler a platform's engine is built with (the XP engine: the 32-bit Windows one).
+fn toolchain_target(p: Platform) -> &'static str {
+    if p == Platform::WindowsXP { Platform::Windows32.target() } else { p.target() }
+}
+
 /// Try compiling + linking a tiny C++ program the way mkxp-z links for `target` (Linux hosts).
 fn toolchain_works(target: &str) -> bool {
     let tmp = std::env::temp_dir().join(format!("mkxpz-patcher-tc-{}-{}", target, std::process::id()));
@@ -374,6 +484,12 @@ pub fn check_build_tools(targets: &[Platform]) -> Result<(), String> {
     }
     let distro = util::distro();
     let mut need: Vec<&str> = Vec::new();
+    // Linux x86 engines are built in a container with its own tools (see LINUX_IMAGE)
+    let targets: Vec<Platform> = targets.iter().copied().filter(|p| !linux_x86_in_container(*p)).collect();
+    let targets = &targets[..];
+    if targets.is_empty() {
+        return Ok(());
+    }
     for tool in ["meson", "ninja", "cmake", "bison", "ruby", "git"] {
         if util::which(tool).is_none() {
             need.push(packages(distro, "base"));
@@ -386,14 +502,14 @@ pub fn check_build_tools(targets: &[Platform]) -> Result<(), String> {
             Some(r) => r.is_ok(),
             None if *p == Platform::WindowsArm64 => llvm_mingw_installed().is_some()
                 || (util::which("curl").is_some() && util::which("tar").is_some() && util::which("xz").is_some()),
-            None => toolchain_works(p.target()),
+            None => toolchain_works(toolchain_target(*p)),
         };
         if !ok {
             broken.push(p.label());
             if need.is_empty() {
                 need.push(packages(distro, "base"));
             }
-            need.push(packages(distro, p.target()));
+            need.push(packages(distro, toolchain_target(*p)));
         }
     }
     if need.is_empty() {
@@ -490,7 +606,7 @@ impl Builder {
             let share = c.share.display().to_string();
             // ":z": allowed through SELinux (Fedora)
             cmd.arg("-v").arg(format!("{}:{}:z", share, share)).arg("-w").arg(&share)
-                .args(["-e", "HOME=/tmp", "-e", "CCACHE_DISABLE=1"]).arg(&c.image).arg(program).args(args);
+                .args(["-e", "HOME=/tmp", "-e", "CCACHE_DISABLE=1", "-e", "LANG=C.UTF-8"]).arg(&c.image).arg(program).args(args);
             return cmd;
         }
         match &self.msys2 {
@@ -524,7 +640,7 @@ fn build_packages(targets: &[Platform]) -> Vec<&'static str> {
     let mut pkgs = vec!["bison", "diffutils", "make", "patch", "git", "mingw-w64-x86_64-gcc", "mingw-w64-x86_64-cmake",
                         "mingw-w64-x86_64-meson", "mingw-w64-x86_64-ninja", "mingw-w64-x86_64-ruby",
                         "mingw-w64-x86_64-pkgconf"];
-    if targets.contains(&Platform::Windows32) {
+    if targets.contains(&Platform::Windows32) || targets.contains(&Platform::WindowsXP) {
         pkgs.push("mingw-w64-i686-gcc"); // only the compiler; the build tools stay 64-bit
     }
     pkgs
@@ -842,7 +958,8 @@ pub fn fix_source(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), Strin
             fix_source_once(src, log)
         }
         r => r,
-    }
+    }?;
+    fix_subprojects(src, log)
 }
 
 fn fix_source_once(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
@@ -952,8 +1069,14 @@ pub const DATA_PATH_PATCH: &str = include_str!("../assets/mkxpz-patches/data-pat
 /// widescreen.rb (16:9 maps, the rest letterboxed in the same window).
 pub const WIDESCREEN_PATCH: &str = include_str!("../assets/mkxpz-patches/widescreen.patch");
 
+/// Windows XP (the legacy 32-bit engine, built with _WIN32_WINNT=0x0501): no
+/// Vista-only calls in mkxp-z, Ruby and OpenAL Soft when built for XP (the
+/// latter two as patches in packagefiles, listed in their .wrap files). Builds
+/// for newer Windows don't change.
+pub const WINDOWS_XP_PATCH: &str = include_str!("../assets/mkxpz-patches/windows-xp.patch");
+
 /// The patcher's additions to mkxp-z, applied in this order before every build.
-const SOURCE_PATCHES: [(&str, &str); 8] = [
+const SOURCE_PATCHES: [(&str, &str); 9] = [
     ("frame interpolation", FRAME_INTERPOLATION_PATCH),
     ("the F12 reset fix", RESET_ERRINFO_PATCH),
     ("the options in the F1 menu", SETTINGS_MENU_PATCH),
@@ -962,7 +1085,34 @@ const SOURCE_PATCHES: [(&str, &str); 8] = [
     ("the frame interpolation rate", INTERPOLATION_RATE_PATCH),
     ("the data folder setting", DATA_PATH_PATCH),
     ("widescreen mode", WIDESCREEN_PATCH),
+    ("Windows XP support", WINDOWS_XP_PATCH),
 ];
+
+/// Patches the XP patch adds for mkxp-z's subprojects (meson applies them when
+/// it unpacks one): the unpacked folder and the patch file in packagefiles.
+const SUBPROJECT_PATCHES: [(&str, &str); 2] = [
+    ("ruby-3_1_3", "ruby-3.1-windows-xp.patch"),
+    ("openal-soft-1.24.3", "openal-soft-windows-xp.patch"),
+];
+
+/// Subprojects meson unpacked before a patch for them was listed in their
+/// .wrap file don't get it from meson any more: apply it to them here.
+fn fix_subprojects(src: &Path, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+    for (dir, file) in SUBPROJECT_PATCHES {
+        let root = src.join("subprojects").join(dir);
+        if !root.is_dir() {
+            continue; // meson applies it when it unpacks the subproject
+        }
+        let pf = src.join("subprojects/packagefiles").join(file);
+        let patch = std::fs::read_to_string(&pf).map_err(|e| format!("{}: {}", pf.display(), e))?;
+        let n = crate::srcpatch::apply(&root, &patch)
+            .map_err(|e| format!("couldn't apply {} to subprojects/{}: {}", file, dir, e))?;
+        if n > 0 {
+            log(format!("Applied {} to subprojects/{} ({} file{}).", file, dir, n, if n == 1 { "" } else { "s" }));
+        }
+    }
+    Ok(())
+}
 
 fn fix_gamefolder(text: &str) -> Option<String> {
     let t = text.replace("\r\n", "\n");
@@ -1056,19 +1206,85 @@ meson ninja-build patch pkgconf python3 ruby gcc g++ gcc-aarch64-linux-gnu g++-a
 gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf && rm -rf /var/lib/apt/lists/*\n";
 
 fn ensure_build_image(runtime: &str, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
-    let have = Command::new(runtime).args(["image", "inspect", BUILD_IMAGE]).stdout(Stdio::null()).stderr(Stdio::null())
+    ensure_image(runtime, BUILD_IMAGE, BUILD_IMAGE_DOCKERFILE, "a Debian container with the ARM cross compilers", log)
+}
+
+/// Linux x86 engines are built in an Ubuntu 20.04 container, so they run on
+/// Linux systems from 2020 on (glibc 2.31: Ubuntu 20.04, Debian 11, SteamOS 3
+/// and newer), not just on ones as new as the build computer. Its own GCC is
+/// too old for ANGLE (C++20), so GCC 14 comes from the Ubuntu toolchain PPA
+/// (like mkxp-z's CI, whose source has the PPA's key); meson and cmake from pip.
+/// Set MKXPZ_NATIVE_BUILD=1 to build with this computer's compiler instead.
+const LINUX_IMAGE: &str = "localhost/mkxpz-patcher-build:focal-1";
+const LINUX_BASELINE: &str = "glibc 2.31: Ubuntu 20.04, Debian 11 and newer";
+
+fn linux_dockerfile(src: &Path) -> Result<String, String> {
+    let key_file = src.join("keyrings/ubuntu-toolchain-r.gpg");
+    let key = std::fs::read(&key_file).map_err(|e| format!("{}: {}", key_file.display(), e))?;
+    Ok(format!("FROM docker.io/library/ubuntu:20.04\n\
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8\n\
+RUN echo '{key}' | base64 -d > /usr/share/keyrings/ubuntu-toolchain-r.gpg \
+ && echo 'deb [signed-by=/usr/share/keyrings/ubuntu-toolchain-r.gpg] http://ppa.launchpad.net/ubuntu-toolchain-r/test/ubuntu focal main' \
+    > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \
+ && apt-get update && apt-get install -y --no-install-recommends bison ca-certificates diffutils file gettext git make \
+    ninja-build patch perl pkg-config python3 python3-pip python3-setuptools ruby xz-utils \
+    gcc-14 g++-14 gcc-14-multilib g++-14-multilib \
+ && rm -rf /var/lib/apt/lists/* \
+ && for t in gcc g++ cpp gcc-ar gcc-nm gcc-ranlib; do ln -s /usr/bin/$t-14 /usr/local/bin/$t; done \
+ && ln -s gcc /usr/local/bin/cc && ln -s g++ /usr/local/bin/c++ \
+ && python3 -m pip install --no-cache-dir --upgrade pip \
+ && python3 -m pip install --no-cache-dir meson cmake packaging mako pyyaml\n", key = base64(&key)))
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// Whether this Linux x86 engine is built in the Ubuntu 20.04 container.
+fn linux_x86_in_container(p: Platform) -> bool {
+    cfg!(target_os = "linux") && matches!(p, Platform::Linux64 | Platform::Linux32)
+        && std::env::var_os("MKXPZ_NATIVE_BUILD").is_none() && container_runtime().is_some()
+}
+
+/// The newest glibc version an engine needs (from the version names it refers to).
+fn glibc_needed(file: &Path) -> Option<String> {
+    let data = std::fs::read(file).ok()?;
+    let pat = b"GLIBC_2.";
+    let mut best: Option<u32> = None;
+    let mut i = 0;
+    while let Some(pos) = data[i..].windows(pat.len()).position(|w| w == pat) {
+        let start = i + pos + pat.len();
+        let digits: String = data[start..].iter().take_while(|b| b.is_ascii_digit()).map(|&b| b as char).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            best = Some(best.map_or(n, |b| b.max(n)));
+        }
+        i = start;
+    }
+    best.map(|n| format!("2.{}", n))
+}
+
+fn ensure_image(runtime: &str, image: &str, dockerfile: &str, what: &str, log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+    let have = Command::new(runtime).args(["image", "inspect", image]).stdout(Stdio::null()).stderr(Stdio::null())
         .status().map_or(false, |s| s.success());
     if have {
         return Ok(());
     }
-    log(format!("Preparing a Debian container with the ARM cross compilers ({}, once) ...", runtime));
-    let mut child = Command::new(runtime).args(["build", "-t", BUILD_IMAGE, "-"])
+    log(format!("Preparing {} ({}, once; downloads about 300 MB) ...", what, runtime));
+    let mut child = Command::new(runtime).args(["build", "-t", image, "-"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| format!("couldn't start {}: {}", runtime, e))?;
     {
         use std::io::Write;
         let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(BUILD_IMAGE_DOCKERFILE.as_bytes()).map_err(|e| e.to_string())?;
+        stdin.write_all(dockerfile.as_bytes()).map_err(|e| e.to_string())?;
     }
     let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     std::thread::scope(|s| {
@@ -1101,33 +1317,38 @@ fn cross_file_for(p: Platform, msys2: Option<&Path>, no_pc: &Path, llvm: Option<
     // static_asserts, and mkxp-z's configure check misses it because it compiles
     // as gnu++14. Use SSE2 math like clang does, and tell ANGLE to use std::round.
     let sse = "'-msse2', '-mfpmath=sse', '-DMKXPZ_ANGLE_NO_OPTIMIZED_ROUND'";
+    // the oldest Windows the engine may use functions of: 7, or XP for the legacy engine
+    let nt = if p == Platform::WindowsXP { "0x0501" } else { "0x0601" };
     let win = |tool: &dyn Fn(&str) -> String, family: &str, cpu: &str, extra: &str, props: &str| format!(
-        "[binaries]\nc = [{cc}'{gcc}', '-D_WIN32_WINNT=0x0601'{x}]\ncpp = [{cc}'{gxx}', '-D_WIN32_WINNT=0x0601'{x}{xx}]\n\
-         windres = ['{windres}', '-D_WIN32_WINNT=0x0601']\nar = '{ar}'\nstrip = '{strip}'\npkg-config = 'pkg-config'\n\
+        "[binaries]\nc = [{cc}'{gcc}', '-D_WIN32_WINNT={nt}'{x}]\ncpp = [{cc}'{gxx}', '-D_WIN32_WINNT={nt}'{x}{xx}]\n\
+         windres = ['{windres}', '-D_WIN32_WINNT={nt}']\nar = '{ar}'\nstrip = '{strip}'\npkg-config = 'pkg-config'\n\
          cmake = 'cmake'\n\n{props}[host_machine]\nsystem = 'windows'\ncpu_family = '{f}'\ncpu = '{c}'\nendian = 'little'\n",
         cc = ccache, gcc = tool("gcc"), gxx = tool("g++"), windres = tool("windres"), ar = tool("ar"),
-        strip = tool("strip"), f = family, c = cpu, x = extra, props = props,
+        strip = tool("strip"), f = family, c = cpu, x = extra, props = props, nt = nt,
         xx = if family == "x86" { ALIGNED_NEW } else { "" });
     // Windows only promises 4-byte stack alignment on 32-bit, but GCC's SSE code
     // assumes 16: without realignment, the first callback from Windows or new
     // thread crashes on a movaps (the engine just "doesn't start").
     let sse_extra = format!(", {}, '-mstackrealign'", sse);
+    // The XP engine has no ANGLE, so it needs no SSE2 math: it then also runs
+    // on the processors of XP's time without SSE2 (Pentium III, Athlon XP)
+    let xp_extra = ", '-mstackrealign'";
     let isolated = format!("[properties]\npkg_config_libdir = ['{}']\n\n", no_pc.display());
     match (p, msys2) {
         (Platform::Linux64, _) => None,
         // Windows host: 64-bit is a native MINGW64 build
         (Platform::Windows64, Some(_)) => None,
         // Windows host: 32-bit compiler from MSYS2's mingw32 tree, tools from MINGW64
-        (Platform::Windows32, Some(root)) => {
+        (Platform::Windows32 | Platform::WindowsXP, Some(root)) => {
             let bin = root.join("mingw32/bin");
             let tool = |t: &str| bin.join(format!("{}.exe", t)).display().to_string().replace('\\', "/");
             let pc = root.join("mingw32/lib/pkgconfig").display().to_string().replace('\\', "/");
-            Some(win(&tool, "x86", "i686", &sse_extra,
+            Some(win(&tool, "x86", "i686", if p == Platform::WindowsXP { xp_extra } else { &sse_extra },
                      &format!("[properties]\nneeds_exe_wrapper = false\npkg_config_libdir = ['{}']\n\n", pc)))
         }
-        (Platform::Windows32, None) => {
+        (Platform::Windows32 | Platform::WindowsXP, None) => {
             let tool = |t: &str| format!("i686-w64-mingw32-{}", t);
-            Some(win(&tool, "x86", "i686", &sse_extra, &isolated))
+            Some(win(&tool, "x86", "i686", if p == Platform::WindowsXP { xp_extra } else { &sse_extra }, &isolated))
         }
         (Platform::Windows64, None) => {
             let tool = |t: &str| format!("x86_64-w64-mingw32-{}", t);
@@ -1161,9 +1382,11 @@ fn cross_file_for(p: Platform, msys2: Option<&Path>, no_pc: &Path, llvm: Option<
             // Only 32-bit .pc files may be found, or meson would pick 64-bit system libs;
             // everything else comes from mkxp-z's subprojects, like in its own CI.
             let pc = match util::distro() {
-                Distro::Debian => "'/usr/lib/i386-linux-gnu/pkgconfig', '/usr/share/pkgconfig'",
-                Distro::Arch => "'/usr/lib32/pkgconfig', '/usr/share/pkgconfig'",
-                _ => "'/usr/lib/pkgconfig', '/usr/share/pkgconfig'",
+                // the Ubuntu container has no 32-bit libraries of its own
+                _ if in_container => format!("'{}'", no_pc.display()),
+                Distro::Debian => "'/usr/lib/i386-linux-gnu/pkgconfig', '/usr/share/pkgconfig'".into(),
+                Distro::Arch => "'/usr/lib32/pkgconfig', '/usr/share/pkgconfig'".into(),
+                _ => "'/usr/lib/pkgconfig', '/usr/share/pkgconfig'".into(),
             };
             Some(format!(
                 "[binaries]\nc = [{cc}'gcc', '-m32', {sse}]\ncpp = [{cc}'g++', '-m32', {sse}]\nar = 'gcc-ar'\nstrip = 'strip'\n\
@@ -1194,14 +1417,44 @@ fn same_path(a: &str, b: &Path) -> bool {
 /// Copy MinGW/MSYS2 runtime DLLs a Windows engine needs (if any) next to it,
 /// so it runs on a clean Windows. System DLLs aren't in these folders, so
 /// they're never copied.
+/// Windows functions XP doesn't have ("dll function" lines, see tools/xp-missing.py).
+const XP_MISSING: &str = include_str!("../assets/xp-missing.txt");
+/// DLLs that don't exist on Windows XP at all.
+const XP_MISSING_DLLS: [&str; 14] = ["bcrypt.dll", "dxgi.dll", "d3d11.dll", "d3d12.dll", "d3dcompiler_47.dll", "dwmapi.dll",
+                                     "ucrtbase.dll", "ncrypt.dll", "propsys.dll", "xinput1_4.dll", "d2d1.dll",
+                                     "dwrite.dll", "mfplat.dll", "synchronization.dll"];
+
+/// What a Windows program imports that Windows XP doesn't have ("DLL!function"):
+/// such a program doesn't start there at all.
+pub fn xp_missing_imports(exe: &[u8]) -> Vec<String> {
+    let missing: std::collections::HashSet<(String, &str)> = XP_MISSING.lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once(' ').map(|(d, f)| (d.to_lowercase(), f.trim())))
+        .collect();
+    let mut out = Vec::new();
+    for (dll, func) in crate::pe::imported_functions(exe) {
+        let d = dll.to_lowercase();
+        let bad = XP_MISSING_DLLS.contains(&d.as_str())
+            || d.starts_with("api-ms-win-") || d.starts_with("vcruntime140") || d.starts_with("msvcp140")
+            || missing.contains(&(d.clone(), func.as_str()))
+            // XP's C runtime (msvcrt.dll 7.0) has none of the "secure" functions
+            || (d == "msvcrt.dll" && func.ends_with("_s"));
+        if bad {
+            out.push(format!("{}!{}", dll, func));
+        }
+    }
+    out
+}
+
 fn bundle_runtime_dlls(p: Platform, out: &Path, msys2: Option<&Path>, llvm: Option<&Path>, log: &(dyn Fn(String) + Sync)) {
     let triplet = match p {
-        Platform::Windows32 => "i686-w64-mingw32",
+        Platform::Windows32 | Platform::WindowsXP => "i686-w64-mingw32",
         Platform::WindowsArm64 => "aarch64-w64-mingw32",
         _ => "x86_64-w64-mingw32",
     };
     let mut dirs: Vec<PathBuf> = match msys2 {
-        Some(root) => vec![root.join(if p == Platform::Windows32 { "mingw32/bin" } else { "mingw64/bin" })],
+        Some(root) => vec![root.join(if matches!(p, Platform::Windows32 | Platform::WindowsXP) { "mingw32/bin" }
+                                    else { "mingw64/bin" })],
         None => vec![PathBuf::from(format!("/usr/{}/sys-root/mingw/bin", triplet)), PathBuf::from(format!("/usr/{}/lib", triplet)),
                      PathBuf::from(format!("/usr/{}/bin", triplet))],
     };
@@ -1243,7 +1496,7 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     fix_source(&paths.source, log)?;
     if cfg!(windows) {
         ensure_msys2(paths, &build_packages(&[p]), log)?;
-        if p == Platform::Windows32 {
+        if matches!(p, Platform::Windows32 | Platform::WindowsXP) {
             fix_mingw32_helper_dlls(&msys2_root(paths), log);
         }
     }
@@ -1265,12 +1518,29 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
             in_container = true;
         }
     }
+    if linux_x86_in_container(p) {
+        let rt = container_runtime().ok_or("no podman or docker")?;
+        log(format!("Building the {} engine in an Ubuntu 20.04 container, so it runs on older Linux systems too ({})",
+                    p.label(), LINUX_BASELINE));
+        ensure_image(&rt, LINUX_IMAGE, &linux_dockerfile(&paths.source)?,
+                     "an Ubuntu 20.04 container with the compilers", log)?;
+        b.container = Some(Container { runtime: rt, image: LINUX_IMAGE.into(), share: paths.source.clone() });
+        in_container = true;
+    } else if cfg!(target_os = "linux") && matches!(p, Platform::Linux64 | Platform::Linux32) {
+        log(format!("Building the {} engine with this computer's compiler: it will only run on Linux systems \
+                     at least as new as this one. Install podman (or docker) for an engine that runs on older \
+                     ones too ({}).", p.label(), LINUX_BASELINE));
+    }
     let src = &paths.source;
     let out = paths.engines.join(p.target());
     let stage = src.join(format!("install-{}", p.target()));
     let mut bdir = src.join(format!("build-{}", p.target()));
+    if in_container && linux_x86_in_container(p) {
+        // not mixed with a build by this computer's own compiler
+        bdir = src.join(format!("build-{}-focal", p.target()));
+    }
     // reuse an existing native build dir instead of building everything again
-    if p == Platform::Linux64 && !bdir.exists() && src.join("build/build.ninja").is_file() {
+    if p == Platform::Linux64 && !in_container && !bdir.exists() && src.join("build/build.ninja").is_file() {
         bdir = src.join("build");
     }
     std::fs::create_dir_all(&paths.engines).map_err(|e| e.to_string())?;
@@ -1299,8 +1569,16 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
         log("Clearing a build folder left over from an unfinished setup.".into());
         util::remove_path(&bdir).map_err(|e| e.to_string())?;
     }
+    // XP: no ANGLE (Direct3D 11) and no HTTPS (OpenSSL 3), which need newer Windows
+    let options: Vec<String> = if p == Platform::WindowsXP {
+        vec!["-Dangle=disabled".into(), "-Dopenssl=disabled".into()]
+    } else {
+        Vec::new()
+    };
     if configured && !moved && !cross_changed {
-        b.run("meson", &["configure".into(), s(&bdir), "--prefix".into(), s(&stage)], log)?;
+        let mut args: Vec<String> = vec!["configure".into(), s(&bdir), "--prefix".into(), s(&stage)];
+        args.extend(options.iter().cloned());
+        b.run("meson", &args, log)?;
     } else {
         let mut args: Vec<String> = vec!["setup".into()];
         if cross_changed {
@@ -1309,6 +1587,7 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
         }
         args.extend(["--buildtype", "release", "-Dstrip=true", "--prefix"].map(String::from));
         args.push(s(&stage));
+        args.extend(options.iter().cloned());
         if let Some(text) = &cross {
             let cf = src.join(format!("cross-{}.txt", p.target()));
             std::fs::write(&cf, text).map_err(|e| e.to_string())?;
@@ -1322,12 +1601,24 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
             std::fs::write(&record, text).map_err(|e| e.to_string())?;
         }
     }
+    if p == Platform::WindowsXP {
+        // Ruby is built by its own make, and its library isn't a link input
+        // ninja watches: without the old exe, a fix in Ruby reaches the engine
+        let _ = std::fs::remove_file(bdir.join(Platform::Windows32.exe()));
+    }
     b.run("ninja", &["-C".into(), s(&bdir)], log)?;
     // Install into a staging folder next to the build, then copy the result to
     // the engines folder ourselves: meson never has to write to the engines
     // folder, which may be on a shared drive.
     let _ = util::remove_path(&stage);
     b.run("meson", &["install".into(), "-C".into(), s(&bdir), "--no-rebuild".into(), "--tags".into(), "mkxp-z".into()], log)?;
+    if p == Platform::WindowsXP {
+        // its own name next to the 32-bit engine in the game's mkxp-z\windows
+        let built = stage.join(Platform::Windows32.exe());
+        if built.is_file() {
+            std::fs::rename(&built, stage.join(p.exe())).map_err(|e| e.to_string())?;
+        }
+    }
     if !stage.join(p.exe()).is_file() {
         return Err(format!("build finished, but {} is missing in {}", p.exe(), stage.display()));
     }
@@ -1341,7 +1632,22 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
     for f in [crate::fonts::CJK_FONT_FILE, "liberation.ttf"] {
         let _ = std::fs::copy(src.join("assets").join(f), out.join(f));
     }
-    std::fs::write(out.join(ENGINE_STAMP), format!("{}\n", ENGINE_REV)).map_err(|e| e.to_string())?;
+    std::fs::write(out.join(ENGINE_STAMP), format!("{}\n", engine_rev(p))).map_err(|e| e.to_string())?;
+    if p == Platform::WindowsXP {
+        let data = std::fs::read(out.join(p.exe())).map_err(|e| e.to_string())?;
+        let bad = xp_missing_imports(&data);
+        if bad.is_empty() {
+            log("The XP engine uses no Windows functions newer than XP.".into());
+        } else {
+            log(format!("Warning: the XP engine uses Windows functions XP doesn't have, so it won't start there: {}",
+                        bad.join(", ")));
+        }
+    }
+    if !p.is_windows() {
+        if let Some(v) = glibc_needed(&out.join(p.exe())) {
+            log(format!("The {} engine runs on Linux systems with glibc {} or newer.", p.label(), v));
+        }
+    }
     log(format!("=== {} engine ready: {}", p.label(), out.display()));
     Ok(out)
 }
@@ -1349,6 +1655,72 @@ pub fn build(p: Platform, paths: &Paths, log: &(dyn Fn(String) + Sync)) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xp_import_check() {
+        // the launcher runs on XP: no findings, and its imports are read
+        let launcher = include_bytes!("../assets/mkxpz-launcher.exe");
+        let f = crate::pe::imported_functions(launcher);
+        assert!(f.iter().any(|(d, n)| d.eq_ignore_ascii_case("kernel32.dll") && n == "CreateProcessW"));
+        assert!(xp_missing_imports(launcher).is_empty());
+    }
+
+    /// MKXPZ_EXE=<engine .exe> cargo test -- --ignored --nocapture xp_imports_of
+    #[test]
+    #[ignore]
+    fn xp_imports_of() {
+        let data = std::fs::read(std::env::var("MKXPZ_EXE").unwrap()).unwrap();
+        let all = crate::pe::imported_functions(&data);
+        if std::env::var_os("MKXPZ_LIST").is_some() {
+            for (dll, f) in &all {
+                println!("{dll} {f}");
+            }
+        }
+        println!("{} imports, not on XP: {:?}", all.len(), xp_missing_imports(&data));
+    }
+
+    #[test]
+    fn choice_platforms() {
+        for sys in System::ALL {
+            for cpu in Cpu::ALL {
+                let c = Choice { system: sys, cpu };
+                assert_eq!(c.platforms().is_empty(), !sys.has(cpu), "{:?}", c);
+                assert!(!c.fixed().platforms().is_empty());
+            }
+        }
+        assert_eq!(Choice { system: System::Legacy, cpu: Cpu::X86 }.platforms(), [Platform::WindowsXP]);
+        assert_eq!(Choice { system: System::Windows, cpu: Cpu::Arm32 }.fixed().cpu, Cpu::X86);
+        assert!(!Choice::for_host().platforms().is_empty());
+    }
+
+    #[test]
+    fn base64_and_glibc() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar!"), "Zm9vYmFyIQ==");
+        let dir = std::env::temp_dir().join(format!("mkxpz-glibc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("elf");
+        std::fs::write(&f, b"\0GLIBC_2.2.5\0GLIBC_2.31\0GLIBC_2.17\0GLIBC_PRIVATE\0").unwrap();
+        assert_eq!(glibc_needed(&f).as_deref(), Some("2.31"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn linux_dockerfile_text() {
+        let dir = std::env::temp_dir().join(format!("mkxpz-df-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("keyrings")).unwrap();
+        std::fs::write(dir.join("keyrings/ubuntu-toolchain-r.gpg"), b"key").unwrap();
+        let t = linux_dockerfile(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("{}", t);
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3, "FROM, ENV and one RUN line");
+        assert!(lines[2].starts_with("RUN echo 'a2V5' | base64 -d > "));
+        assert!(!t.contains("  "), "no doubled spaces");
+    }
 
     /// MSYS2_SYSROOT=<msys2-sysroot.sh dest with mingw32/> cargo test -- --ignored mingw32_dlls
     /// Applies all source patches to the mkxp-z source in MKXPZ_SRC (from --fetch-source).

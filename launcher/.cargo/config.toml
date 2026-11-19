@@ -3,5 +3,8 @@ target = "i686-pc-windows-msvc"
 
 [target.i686-pc-windows-msvc]
 linker = "rust-lld"
-rustflags = ["-C", "linker-flavor=lld-link", "-C", "link-arg=/ENTRY:entry", "-C", "link-arg=/SUBSYSTEM:WINDOWS",
-             "-C", "link-arg=/NODEFAULTLIB", "-C", "target-feature=+crt-static"]
+# /SUBSYSTEM:WINDOWS,5.01 and no SSE: it starts on Windows XP and on the
+# processors of its time (Pentium III, Athlon XP). Current Rust warns about
+# turning SSE2 off, so build-patcher.sh builds it with Rust 1.77.
+rustflags = ["-C", "linker-flavor=lld-link", "-C", "link-arg=/ENTRY:entry", "-C", "link-arg=/SUBSYSTEM:WINDOWS,5.01",
+             "-C", "link-arg=/NODEFAULTLIB", "-C", "target-feature=+crt-static", "-C", "target-feature=-sse,-sse2"]

@@ -99,6 +99,46 @@ pub fn imported_dlls(d: &[u8]) -> Vec<String> {
     out
 }
 
+/// The functions a program imports: (DLL, function name); by ordinal: "#<n>".
+pub fn imported_functions(d: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(pe) = Pe::parse(d) else { return out };
+    let wide = u16at(d, pe.opt) == Some(0x20b);
+    let Some((rva, _)) = pe.dir(d, 1).filter(|(r, _)| *r != 0) else { return out };
+    let Some(mut o) = pe.off(rva) else { return out };
+    while let (Some(name_rva), Some(lookup), Some(first)) = (u32at(d, o + 12), u32at(d, o), u32at(d, o + 16)) {
+        if name_rva == 0 && first == 0 {
+            break;
+        }
+        let dll = pe.off(name_rva as usize).and_then(|x| cstr(d, x)).unwrap_or_default();
+        // the lookup table, or (old linkers) the address table before binding
+        let table = if lookup != 0 { lookup } else { first };
+        if let Some(mut t) = pe.off(table as usize) {
+            loop {
+                let (entry, by_ordinal) = if wide {
+                    let Some(v) = d.get(t..t + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())) else { break };
+                    (v & 0x7fff_ffff_ffff_ffff, v >> 63 == 1)
+                } else {
+                    let Some(v) = u32at(d, t) else { break };
+                    ((v & 0x7fff_ffff) as u64, v >> 31 == 1)
+                };
+                if entry == 0 && !by_ordinal {
+                    break;
+                }
+                let name = if by_ordinal {
+                    format!("#{}", entry & 0xffff)
+                } else {
+                    pe.off(entry as usize + 2).and_then(|x| cstr(d, x)).unwrap_or_default()
+                };
+                out.push((dll.clone(), name));
+                t += if wide { 8 } else { 4 };
+            }
+        }
+        o += 20;
+    }
+    out
+}
+
 // ------------------------------------------------------------------ icons
 
 /// An icon: group directory entries plus the image data (BMP/PNG) of each.

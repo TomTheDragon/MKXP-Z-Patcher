@@ -21,7 +21,9 @@ Usage:
 Options:
   --platform LIST     engines to add, comma-separated:
                         linux, linux32, windows (32-bit), windows64,
-                        linux-arm64, linux-armhf (32-bit ARM), windows-arm64
+                        linux-arm64, linux-armhf (32-bit ARM), windows-arm64,
+                        windows-xp (legacy 32-bit engine for Windows XP; added
+                        next to a Windows engine, Game.exe starts it on XP)
                         both = linux,windows   all = linux,linux32,windows
                         arm = linux-arm64,linux-armhf,windows-arm64
                       (default: this computer's platform)
@@ -37,7 +39,8 @@ Options:
                       downloading it (with --fetch-source, or when building)
   --no-soundfont      don't bundle a SoundFont for MIDI music in Windows patches
   --keep-exe          Windows: leave Game.exe as it is and add the launcher next
-                      to it as \"Game (mkxp-z).exe\" (default: the launcher becomes
+                      to it as \"Game.mkxp-z.exe\" (64-bit/ARM64: \"Game.mkxp-z.64.exe\")
+                      (default: the launcher becomes
                       Game.exe, the original is kept as Game.original.exe; Steam
                       versions then need launch options, see mkxp-z/README.txt)
   --engines DIR       folder with the built engines (default: see below)

@@ -84,6 +84,24 @@ pub fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
+/// Windows 10 or newer (checked by a kernel32 function that came with it; the
+/// version functions report 8 to programs without a Windows 10 manifest entry).
+#[cfg(windows)]
+pub fn windows_10_or_newer() -> bool {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    let name: Vec<u16> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let k = GetModuleHandleW(name.as_ptr());
+        k != 0 && GetProcAddress(k, b"GetSystemCpuSetInformation\0".as_ptr()).is_some()
+    }
+}
+
+/// A 64-bit Windows (also when this is the 32-bit patcher running on one).
+#[cfg(windows)]
+pub fn windows_64_bit() -> bool {
+    cfg!(target_pointer_width = "64") || std::env::var_os("PROCESSOR_ARCHITEW6432").is_some()
+}
+
 /// Inside a Flatpak sandbox (e.g. VS Code's terminal) the host's compilers aren't visible.
 pub fn in_flatpak() -> bool {
     Path::new("/.flatpak-info").exists()

@@ -34,7 +34,8 @@ pub struct Options {
     pub rgss: Option<usize>,
     pub bundle_soundfont: bool,
     /// Windows: the launcher takes the place of Game.exe (the original becomes
-    /// Game.original.exe); else it's added next to it as "Game (mkxp-z).exe"
+    /// Game.original.exe); else it's added next to it as "Game.mkxp-z.exe"
+    /// (64-bit engines: "Game.mkxp-z.64.exe")
     pub replace_exe: bool,
 }
 
@@ -201,6 +202,11 @@ impl Plan {
         let has = |p: Platform| platforms.contains(&p);
         let any_linux = platforms.iter().any(|p| !p.is_windows());
         let any_win = platforms.iter().any(|p| p.is_windows());
+        if has(Platform::WindowsXP) {
+            notes.push("Windows XP: the legacy engine is added (mkxp-z.xp.exe). Game.exe starts it on Windows XP, \
+                        and on newer Windows too unless a normal Windows engine is there. It draws with OpenGL (the graphics driver needs OpenGL \
+                        2.0) and has no HTTPS or Ruby sockets.".into());
+        }
 
         // scripts
         let c = content(&game_dir, archive.as_deref(), rgss);
@@ -229,7 +235,7 @@ impl Plan {
                     // Steam starts Game.exe (or, with launch options, the launcher); only the
                     // 32-bit Windows engine can run there
                     errors.push("This is a Steam version: it only runs through Steam with the 32-bit Windows \
-                                 engine (on Linux via Proton). Choose \"Windows\" 32-bit; without it Steam keeps \
+                                 engine (on Linux via Proton). Choose \"Windows\" with \"32-bit\"; without it Steam keeps \
                                  starting the original Game.exe and the patch is never used.".into());
                 }
                 if any_linux {
@@ -247,11 +253,16 @@ impl Plan {
                                 must be running. {0}.exe stays as it is, so Steam needs these launch options to start \
                                 mkxp-z - on Windows: {1}  - on Linux (Proton): {2}  (started directly, Steam restarts \
                                 the original {0}.exe).", exec_name, crate::patch::WINDOWS_LAUNCH_OPTIONS,
-                                crate::patch::proton_launch_options(&exec_name)));
+                                crate::patch::proton_launch_options(&exec_name, &format!("{}.exe",
+                                    side_by_side_launcher(&exec_name, Platform::Windows32)))));
                 }
                 if has(Platform::Windows64) {
                     warnings.push("Windows 64-bit: the Steam script passes pointers as 32-bit integers and will likely \
                                    crash with the 64-bit engine. Use the 32-bit Windows engine.".into());
+                }
+                if has(Platform::WindowsXP) {
+                    warnings.push("Windows XP: Steam no longer runs on Windows XP (since 2019), so this Steam \
+                                   version can't be played there.".into());
                 }
                 if has(Platform::WindowsArm64) {
                     warnings.push("Windows ARM64: the game's steam_api.dll is x86 code, which the ARM64 engine can't \
@@ -394,16 +405,17 @@ impl Plan {
 
     /// The Windows launcher takes the place of Game.exe (the original is backed
     /// up and restored on unpatch), so shortcuts and Steam start mkxp-z; or,
-    /// without replace_exe, it's added next to it.
+    /// without replace_exe, it's added next to it as Game.mkxp-z.exe (32-bit
+    /// engines) or Game.mkxp-z.64.exe (64-bit and ARM64).
     pub fn launcher_name(&self, p: Platform) -> String {
         if !p.is_windows() {
-            format!("{}.sh", self.exec_name)
-        } else if crate::patch::have_exe_launcher() && self.replace_exe {
+            return format!("{}.sh", self.exec_name);
+        }
+        let ext = if crate::patch::have_exe_launcher() { "exe" } else { "cmd" };
+        if self.replace_exe && ext == "exe" {
             format!("{}.exe", self.exec_name)
-        } else if crate::patch::have_exe_launcher() {
-            format!("{} (mkxp-z).exe", self.exec_name)
         } else {
-            format!("{} (mkxp-z).cmd", self.exec_name)
+            format!("{}.{}", side_by_side_launcher(&self.exec_name, p), ext)
         }
     }
 
@@ -451,6 +463,16 @@ impl Plan {
                                self.missing_engines.iter().map(|p| p.label()).collect::<Vec<_>>().join(", ")));
         }
         lines.join("\n")
+    }
+}
+
+/// The launcher's name next to the game's own Game.exe (without replace_exe).
+/// "Game.mkxp-z" (64-bit and ARM64 engines: "Game.mkxp-z.64"), after the
+/// game's own exe name.
+pub fn side_by_side_launcher(exec_name: &str, p: Platform) -> String {
+    match p {
+        Platform::Windows64 | Platform::WindowsArm64 => format!("{}.mkxp-z.64", exec_name),
+        _ => format!("{}.mkxp-z", exec_name),
     }
 }
 

@@ -2,7 +2,7 @@
 //! Slow work (analysis, engine builds, patching) runs on worker threads that
 //! report back through a channel polled from the GTK main loop.
 
-use crate::engines::{self, Paths, Platform};
+use crate::engines::{self, Choice, Cpu, Paths, Platform, System};
 use crate::patch;
 use crate::plan::{Options, Plan};
 use gtk::prelude::*;
@@ -25,6 +25,7 @@ struct Key {
     engines: String,
     source: String,
     rtp: String,
+    choice: Choice,
     platforms: Vec<Platform>,
     soundfont: bool,
     replace_exe: bool,
@@ -37,12 +38,10 @@ struct Widgets {
     source: gtk::Entry,
     rtp: gtk::Entry,
     browse: Vec<gtk::Button>,
-    linux64: gtk::CheckButton,
-    linux32: gtk::CheckButton,
-    linux_arm64: gtk::CheckButton,
-    linux_armhf: gtk::CheckButton,
-    windows: gtk::CheckButton,
-    arch: gtk::ComboBoxText,
+    /// one per System::ALL
+    systems: Vec<gtk::RadioButton>,
+    /// one per Cpu::ALL
+    cpus: Vec<gtk::RadioButton>,
     soundfont: gtk::CheckButton,
     replace_exe: gtk::CheckButton,
     summary: gtk::TextBuffer,
@@ -84,12 +83,8 @@ pub fn run(game: Option<PathBuf>, paths: Paths, linux_engine: Option<PathBuf>) -
     w.game.set_text(&game.map(|g| g.display().to_string()).unwrap_or_default());
     w.engines.set_text(&paths.engines.display().to_string());
     w.source.set_text(&paths.source.display().to_string());
-    let host = Platform::host();
-    w.linux64.set_active(host == Some(Platform::Linux64));
-    w.linux32.set_active(host == Some(Platform::Linux32));
-    w.linux_arm64.set_active(host == Some(Platform::LinuxArm64));
-    w.linux_armhf.set_active(host == Some(Platform::LinuxArmhf));
-    w.windows.set_active(cfg!(windows));
+    let host = Choice::for_host();
+    set_choice(&w, host);
     let app = Rc::new(App {
         w,
         s: RefCell::new(State {
@@ -174,37 +169,72 @@ fn build_widgets() -> Widgets {
     let frame = gtk::Frame::new(Some("Patch for"));
     let fbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     fbox.set_border_width(8);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let linux64 = gtk::CheckButton::with_label("Linux 64-bit");
-    let linux32 = gtk::CheckButton::with_label("Linux 32-bit");
-    let linux_arm64 = gtk::CheckButton::with_label("Linux ARM 64-bit");
-    let linux_armhf = gtk::CheckButton::with_label("Linux ARM 32-bit");
-    let windows = gtk::CheckButton::with_label("Windows");
-    let arch = gtk::ComboBoxText::new();
-    arch.append(Some("32"), "32-bit (recommended)");
-    arch.append(Some("64"), "64-bit");
-    arch.append(Some("arm64"), "ARM64");
-    arch.set_active_id(Some("32"));
-    let soundfont = gtk::CheckButton::with_label("bundle a SoundFont for MIDI music");
+    let check = |label: &str, tip: &str| {
+        let c = gtk::CheckButton::with_label(label);
+        if !tip.is_empty() {
+            c.set_tooltip_text(Some(tip));
+        }
+        c
+    };
+    // radio buttons: one system and one CPU type
+    let radios = |items: &[(&str, &str)]| {
+        let mut out: Vec<gtk::RadioButton> = Vec::new();
+        for (label, tip) in items {
+            let r = match out.first() {
+                Some(first) => gtk::RadioButton::with_label_from_widget(first, label),
+                None => gtk::RadioButton::with_label(label),
+            };
+            if !tip.is_empty() {
+                r.set_tooltip_text(Some(tip));
+            }
+            out.push(r);
+        }
+        out
+    };
+    let systems = radios(&[
+        ("Linux", ""),
+        ("Windows", "Windows 7 and newer."),
+        ("Windows legacy (XP)", "Windows XP and newer: only the legacy 32-bit engine (OpenGL only, no HTTPS or \
+                                 Ruby sockets), which also runs on newer Windows."),
+    ]);
+    let cpus = radios(&[
+        ("32-bit", "x86 PCs. For Windows the recommended one: it runs on 32- and 64-bit Windows and loads the game's \
+                    own 32-bit DLLs (e.g. Steam's)."),
+        ("64-bit", "x86-64 PCs."),
+        ("ARM 32-bit", "32-bit ARM (armhf, e.g. older Raspberry Pi systems). Linux only."),
+        ("ARM 64-bit", "64-bit ARM (aarch64): Raspberry Pi 4/5, Windows on ARM."),
+    ]);
+    let soundfont = check("bundle a SoundFont for MIDI music", "");
     soundfont.set_active(true);
-    let replace_exe = gtk::CheckButton::with_label("replace Game.exe (the original is kept as Game.original.exe)");
-    replace_exe.set_tooltip_text(Some("On: the mkxp-z launcher takes the place of Game.exe, so shortcuts and Steam start \
-                                       mkxp-z unchanged. Off: it's added next to Game.exe as \"Game (mkxp-z).exe\", and \
-                                       Steam versions need launch options (see mkxp-z/README.txt)."));
+    let replace_exe = check("replace Game.exe (the original is kept as Game.original.exe)",
+                            "On: the mkxp-z launcher takes the place of Game.exe, so shortcuts and Steam start \
+                             mkxp-z unchanged. Off: it's added next to Game.exe as \"Game.mkxp-z.exe\" (64-bit and ARM 64-bit: \"Game.mkxp-z.64.exe\"), and \
+                             Steam versions need launch options (see mkxp-z/README.txt).");
     replace_exe.set_active(true);
-    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
-    row.pack_start(&linux64, false, false, 0);
-    row.pack_start(&linux32, false, false, 0);
-    row.pack_start(&linux_arm64, false, false, 0);
-    row.pack_start(&linux_armhf, false, false, 0);
-    row.pack_start(&sep, false, false, 0);
-    row.pack_start(&windows, false, false, 0);
-    row.pack_start(&arch, false, false, 0);
-    row.pack_start(&soundfont, false, false, 0);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let heading = |t: &str| {
+        let l = gtk::Label::new(Some(t));
+        l.style_context().add_class("dim-label");
+        l
+    };
+    row.pack_start(&heading("System:"), false, false, 0);
+    for r in &systems {
+        row.pack_start(r, false, false, 0);
+    }
+    row.pack_start(&gtk::Separator::new(gtk::Orientation::Vertical), false, false, 0);
+    row.pack_start(&heading("CPU:"), false, false, 0);
+    for r in &cpus {
+        row.pack_start(r, false, false, 0);
+    }
     fbox.pack_start(&row, false, false, 0);
-    fbox.pack_start(&replace_exe, false, false, 0);
-    let hint = gtk::Label::new(Some("32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and ARM64 can't load them."));
+    let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row2.pack_start(&soundfont, false, false, 0);
+    row2.pack_start(&replace_exe, false, false, 0);
+    fbox.pack_start(&row2, false, false, 0);
+    let hint = gtk::Label::new(Some("32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and \
+                                     ARM can't load them."));
     hint.set_xalign(0.0);
+    hint.set_line_wrap(true);
     hint.style_context().add_class("dim-label");
     fbox.pack_start(&hint, false, false, 0);
     frame.add(&fbox);
@@ -237,35 +267,31 @@ fn build_widgets() -> Widgets {
     vbox.pack_start(&bottom, false, false, 0);
     window.add(&vbox);
 
-    Widgets { window, game, engines, source, rtp, browse: vec![game_b, engines_b, rtp_b, source_b], linux64, linux32,
-              linux_arm64, linux_armhf, windows, arch, soundfont, replace_exe, summary, log, log_view, spinner, status, patch, unpatch,
+    Widgets { window, game, engines, source, rtp, browse: vec![game_b, engines_b, rtp_b, source_b], systems, cpus,
+              soundfont, replace_exe, summary, log, log_view, spinner, status, patch, unpatch,
               start, appimage }
 }
 
+fn choice(w: &Widgets) -> Choice {
+    let pick = |rs: &[gtk::RadioButton]| rs.iter().position(|r| r.is_active()).unwrap_or(0);
+    Choice { system: System::ALL[pick(&w.systems)], cpu: Cpu::ALL[pick(&w.cpus)] }
+}
+
+fn set_choice(w: &Widgets, c: Choice) {
+    if let Some(i) = System::ALL.iter().position(|s| *s == c.system) {
+        w.systems[i].set_active(true);
+    }
+    if let Some(i) = Cpu::ALL.iter().position(|x| *x == c.cpu) {
+        w.cpus[i].set_active(true);
+    }
+}
+
 fn key(w: &Widgets) -> Key {
-    let mut platforms = Vec::new();
-    if w.linux64.is_active() {
-        platforms.push(Platform::Linux64);
-    }
-    if w.linux32.is_active() {
-        platforms.push(Platform::Linux32);
-    }
-    if w.linux_arm64.is_active() {
-        platforms.push(Platform::LinuxArm64);
-    }
-    if w.linux_armhf.is_active() {
-        platforms.push(Platform::LinuxArmhf);
-    }
-    if w.windows.is_active() {
-        platforms.push(match w.arch.active_id().as_deref() {
-            Some("64") => Platform::Windows64,
-            Some("arm64") => Platform::WindowsArm64,
-            _ => Platform::Windows32,
-        });
-    }
+    let choice = choice(w);
+    let platforms = choice.platforms();
     Key { game: w.game.text().trim().to_string(), engines: w.engines.text().trim().to_string(),
           source: w.source.text().trim().to_string(), rtp: w.rtp.text().trim().to_string(),
-          platforms, soundfont: w.soundfont.is_active(), replace_exe: w.replace_exe.is_active() }
+          choice, platforms, soundfont: w.soundfont.is_active(), replace_exe: w.replace_exe.is_active() }
 }
 
 fn options(app: &App, k: &Key) -> Options {
@@ -320,15 +346,29 @@ fn connect(app: &Rc<App>) {
             a.s.borrow_mut().chooser = Some(d); // keep it alive until it answers
         });
     }
-    for c in [&w.linux64, &w.linux32, &w.linux_arm64, &w.linux_armhf, &w.windows, &w.soundfont, &w.replace_exe] {
+    for r in &w.systems {
+        let a = app.clone();
+        r.connect_toggled(move |r| {
+            if r.is_active() {
+                // a CPU type the new system has no engine for: 32-bit instead
+                let c = choice(&a.w);
+                if c.fixed() != c {
+                    set_choice(&a.w, c.fixed());
+                }
+            }
+            update_controls(&a);
+            schedule_analyze(&a, 0);
+        });
+    }
+    let toggles: Vec<gtk::CheckButton> = w.cpus.iter().map(|r| r.clone().upcast())
+        .chain([w.soundfont.clone(), w.replace_exe.clone()]).collect();
+    for c in &toggles {
         let a = app.clone();
         c.connect_toggled(move |_| {
             update_controls(&a);
             schedule_analyze(&a, 0);
         });
     }
-    let a = app.clone();
-    w.arch.connect_changed(move |_| schedule_analyze(&a, 0));
 
     // a game folder (or a file in it, e.g. Game.exe) dropped onto the window
     let targets = [gtk::TargetEntry::new("text/uri-list", gtk::TargetFlags::OTHER_APP, 0)];
@@ -553,7 +593,7 @@ fn host_launcher(app: &App) -> Option<PathBuf> {
     let plan = s.plan.as_ref()?;
     let m = plan.manifest.as_ref()?;
     let names: Vec<String> = if cfg!(windows) && m.platforms.iter().any(|k| k.starts_with("windows")) {
-        // the Windows launcher: Game.exe or "Game (mkxp-z).exe/.cmd", as the patch recorded it
+        // the Windows launcher: Game.exe or Game.mkxp-z(.64).exe/.cmd, as the patch recorded it
         m.files.iter().filter(|f| f.ends_with(".exe") || f.ends_with(".cmd")).cloned().collect()
     } else if cfg!(target_os = "linux") && m.platforms.iter().any(|k| k.starts_with("linux")) {
         vec![format!("{}.sh", plan.exec_name)]
@@ -661,7 +701,7 @@ fn render_summary(app: &App) {
     if k.game.is_empty() {
         put("Choose a game folder to begin.\n", None);
     } else if k.platforms.is_empty() {
-        put("Choose at least one platform to patch for.\n", None);
+        put("There's no engine for this system and CPU type.\n", None);
     } else if let Some(e) = &s.plan_error {
         put(&format!("Error: {}\n", e), Some("err"));
     } else if let Some(p) = &s.plan {
@@ -699,13 +739,17 @@ fn update_controls(app: &App) {
     for b in &w.browse {
         b.set_sensitive(!busy);
     }
-    for c in [&w.linux64, &w.linux32, &w.linux_arm64, &w.linux_armhf, &w.windows] {
-        c.set_sensitive(!busy);
+    let system = choice(w).system;
+    for r in &w.systems {
+        r.set_sensitive(!busy);
+    }
+    for (r, cpu) in w.cpus.iter().zip(Cpu::ALL) {
+        r.set_sensitive(!busy && system.has(cpu));
     }
     w.appimage.set_sensitive(!busy && can_patch && !appimage_platforms(app).is_empty());
-    w.arch.set_sensitive(!busy && w.windows.is_active());
-    w.soundfont.set_sensitive(!busy && w.windows.is_active());
-    w.replace_exe.set_sensitive(!busy && w.windows.is_active());
+    let win = system != System::Linux;
+    w.soundfont.set_sensitive(!busy && win);
+    w.replace_exe.set_sensitive(!busy && win);
     w.patch.set_label(patch_label);
     w.patch.set_sensitive(can_patch && !busy);
     w.unpatch.set_sensitive(can_unpatch && !busy);

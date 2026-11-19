@@ -267,9 +267,10 @@ const LAUNCHER_WINDOWS: &str = "@echo off\r\nrem Starts this game with mkxp-z (a
 pub const WINDOWS_LAUNCH_OPTIONS: &str = "\"<game folder>\\mkxp-z\\windows\\mkxp-z.i686.exe\" %command%";
 
 /// Steam launch options for Linux (Proton) when Game.exe stays: swap the
-/// game's exe in Steam's command for the mkxp-z launcher.
-pub fn proton_launch_options(exec_name: &str) -> String {
-    format!("bash -c 'exec \"${{@/%{0}.exe/{0} (mkxp-z).exe}}\"' -- %command%", exec_name)
+/// game's exe in Steam's command for the mkxp-z launcher (launcher: its file
+/// name, e.g. Game.mkxp-z.exe).
+pub fn proton_launch_options(exec_name: &str, launcher: &str) -> String {
+    format!("bash -c 'exec \"${{@/%{}.exe/{}}}\"' -- %command%", exec_name, launcher)
 }
 
 const STEAM_REPLACED: &str = "start the game through Steam as usual (on Linux with Proton); Steam starts
@@ -587,7 +588,8 @@ pub fn apply(plan: &mut Plan, log: &dyn Fn(String)) -> Result<(), String> {
         let replaces_exe = root_files.iter().any(|n| n.eq_ignore_ascii_case(&format!("{}.exe", plan.exec_name)));
         let steam = if replaces_exe { STEAM_REPLACED.to_string() } else {
             STEAM_NEXT_TO.replace("{WINDOWS}", WINDOWS_LAUNCH_OPTIONS)
-                .replace("{PROTON}", &proton_launch_options(&plan.exec_name))
+                .replace("{PROTON}", &proton_launch_options(&plan.exec_name, &launchers.iter()
+                    .find(|(p, _)| p.is_windows()).map_or_else(|| format!("{}.mkxp-z.exe", plan.exec_name), |(_, n)| n.clone())))
         };
         let readme = README.replace("{title}", &plan.title)
             .replace("{rgss}", crate::game::RGSS_NAMES[plan.rgss])

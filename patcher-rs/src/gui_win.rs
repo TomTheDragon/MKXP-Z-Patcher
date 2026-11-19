@@ -3,7 +3,7 @@
 //! other DLLs. Same behaviour as the GTK window on Linux: slow work runs on
 //! worker threads that report back through a channel polled with a timer.
 
-use crate::engines::{self, Paths, Platform};
+use crate::engines::{self, Choice, Cpu, Paths, Platform, System};
 use crate::patch;
 use crate::plan::{Options, Plan};
 use crate::util::clean_path;
@@ -47,12 +47,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const ID_EDIT: [i32; 4] = [101, 102, 103, 104]; // game, engines, rtp, source
 const ID_BROWSE: [i32; 4] = [201, 202, 203, 204];
-const ID_LINUX64: i32 = 301;
-const ID_LINUX32: i32 = 302;
-const ID_WINDOWS: i32 = 303;
-const ID_ARCH: i32 = 304;
-const ID_SOUNDFONT: i32 = 305;
-const ID_REPLACE_EXE: i32 = 306;
+// radio buttons: the systems (System::ALL), then the CPU types (Cpu::ALL)
+const ID_CHOICE: [i32; 7] = [301, 302, 303, 304, 305, 306, 307];
+const ID_SOUNDFONT: i32 = 308;
+const ID_REPLACE_EXE: i32 = 309;
 const ID_PATCH: i32 = 501;
 const ID_UNPATCH: i32 = 502;
 const ID_START: i32 = 503;
@@ -86,12 +84,8 @@ struct CHARFORMATW {
 
 const EN_CHANGE: u32 = 0x0300;
 const BN_CLICKED: u32 = 0;
-const CBN_SELCHANGE: u32 = 1;
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
-const CB_ADDSTRING: u32 = 0x0143;
-const CB_GETCURSEL: u32 = 0x0147;
-const CB_SETCURSEL: u32 = 0x014E;
 const EM_SETSEL: u32 = 0x00B1;
 const EM_REPLACESEL: u32 = 0x00C2;
 const EM_SETLIMITTEXT: u32 = 0x00C5;
@@ -105,8 +99,9 @@ const ES_AUTOVSCROLL: u32 = 0x0040;
 const BS_PUSHBUTTON: u32 = 0;
 const BS_DEFPUSHBUTTON: u32 = 1;
 const BS_AUTOCHECKBOX: u32 = 3;
+const BS_AUTORADIOBUTTON: u32 = 9;
+const WS_GROUP_: u32 = 0x0002_0000;
 const BS_GROUPBOX: u32 = 7;
-const CBS_DROPDOWNLIST: u32 = 3;
 const SS_LEFT: u32 = 0;
 const SS_CENTERIMAGE: u32 = 0x0200;
 
@@ -134,6 +129,7 @@ struct Key {
     engines: String,
     source: String,
     rtp: String,
+    choice: Choice,
     platforms: Vec<Platform>,
     soundfont: bool,
     replace_exe: bool,
@@ -145,10 +141,10 @@ struct Controls {
     edits: [HWND; 4],
     browse: [HWND; 4],
     group: HWND,
-    linux64: HWND,
-    linux32: HWND,
-    windows: HWND,
-    arch: HWND,
+    /// "System:" and "CPU:"
+    headings: [HWND; 2],
+    /// see ID_CHOICE
+    choice: [HWND; 7],
     soundfont: HWND,
     replace_exe: HWND,
     hint: HWND,
@@ -310,10 +306,10 @@ pub fn run(game: Option<PathBuf>, paths: Paths, linux_engine: Option<PathBuf>) -
     set_text(c.edits[0], &game.map(|g| g.display().to_string()).unwrap_or_default());
     set_text(c.edits[1], &paths.engines.display().to_string());
     set_text(c.edits[3], &paths.source.display().to_string());
-    set_checked(c.windows, true);
+    let host = Choice::for_host();
+    set_choice(&c, host);
     set_checked(c.soundfont, true);
     set_checked(c.replace_exe, true);
-    unsafe { SendMessageW(c.arch, CB_SETCURSEL, 0, 0) };
     let (tx, rx) = channel();
     APP.with(|a| *a.borrow_mut() = Some(App {
         c, plan: None, plan_error: None, analyzed: None, pending: None, generation: 0, busy: None, result: None,
@@ -382,18 +378,21 @@ fn create_controls(parent: HWND, hinst: isize, scale: f32) -> Controls {
         c.browse[i] = make("BUTTON", "Browse…", WS_TABSTOP | BS_PUSHBUTTON, 0, ID_BROWSE[i], font);
     }
     c.group = make("BUTTON", "Patch for", BS_GROUPBOX, 0, 0, font);
-    c.linux64 = make("BUTTON", "Linux 64-bit", WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_LINUX64, font);
-    c.linux32 = make("BUTTON", "Linux 32-bit", WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_LINUX32, font);
-    c.windows = make("BUTTON", "Windows", WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_WINDOWS, font);
-    c.arch = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, ID_ARCH, font);
-    for item in ["32-bit (recommended)", "64-bit", "ARM64"] {
-        unsafe { SendMessageW(c.arch, CB_ADDSTRING, 0, wide(item).as_ptr() as LPARAM) };
+    c.headings = ["System:", "CPU:"].map(|t| make("STATIC", t, SS_LEFT | SS_CENTERIMAGE, 0, 0, font));
+    // Windows legacy: only the 32-bit engine for Windows XP (Game.exe also starts it on newer Windows)
+    let names = ["Linux", "Windows", "Windows legacy (XP)", "32-bit", "64-bit", "ARM 32-bit", "ARM 64-bit"];
+    for i in 0..7 {
+        // WS_GROUP starts each set of radio buttons (systems, CPU types)
+        let group = if i == 0 || i == 3 { WS_GROUP_ | WS_TABSTOP } else { 0 };
+        c.choice[i] = make("BUTTON", names[i], group | BS_AUTORADIOBUTTON, 0, ID_CHOICE[i], font);
     }
-    c.soundfont = make("BUTTON", "bundle a SoundFont for MIDI music", WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_SOUNDFONT, font);
-    // off: "Game (mkxp-z).exe" next to Game.exe (Steam versions then need launch options)
+    c.soundfont = make("BUTTON", "bundle a SoundFont for MIDI music", WS_GROUP_ | WS_TABSTOP | BS_AUTOCHECKBOX, 0,
+                       ID_SOUNDFONT, font);
+    // off: Game.mkxp-z.exe / Game.mkxp-z.64.exe next to Game.exe (Steam versions then need launch options)
     c.replace_exe = make("BUTTON", "replace Game.exe (the original is kept as Game.original.exe)",
                          WS_TABSTOP | BS_AUTOCHECKBOX, 0, ID_REPLACE_EXE, font);
-    c.hint = make("STATIC", "32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and ARM64 can't load them.",
+    c.hint = make("STATIC", "32-bit Windows runs the game's own 32-bit DLLs natively (e.g. Steam's); 64-bit and ARM \
+                            can't load them. Windows legacy: XP and newer (32-bit only).",
                   SS_LEFT, 0, 0, font);
     let text_style = WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL;
     let rich = unsafe { LoadLibraryW(wide("Msftedit.dll").as_ptr()) } != 0;
@@ -434,12 +433,22 @@ fn layout(hwnd: HWND) {
         let gh = rowh * 3 + px(38.0);
         mv(c.group, m, y, width - 2 * m, gh);
         let (gx, gy) = (m + px(12.0), y + px(20.0));
-        mv(c.linux64, gx, gy, px(110.0), rowh);
-        mv(c.linux32, gx + px(120.0), gy, px(110.0), rowh);
-        mv(c.windows, gx + px(250.0), gy, px(90.0), rowh);
-        mv(c.arch, gx + px(345.0), gy, px(170.0), px(200.0));
-        mv(c.soundfont, gx + px(530.0), gy, px(260.0), rowh);
-        mv(c.replace_exe, gx, gy + rowh + px(4.0), width - 2 * m - px(24.0), rowh);
+        let widths = [70.0, 90.0, 160.0, 75.0, 75.0, 100.0, 100.0];
+        let mut x = gx;
+        for i in 0..7 {
+            if i == 0 || i == 3 {
+                let hw = px(if i == 0 { 60.0 } else { 40.0 });
+                if i == 3 {
+                    x += px(20.0);
+                }
+                mv(c.headings[if i == 0 { 0 } else { 1 }], x, gy, hw, rowh);
+                x += hw;
+            }
+            mv(c.choice[i], x, gy, px(widths[i]), rowh);
+            x += px(widths[i]) + px(6.0);
+        }
+        mv(c.soundfont, gx, gy + rowh + px(4.0), px(260.0), rowh);
+        mv(c.replace_exe, gx + px(270.0), gy + rowh + px(4.0), px(440.0), rowh);
         mv(c.hint, gx, gy + 2 * (rowh + px(4.0)), width - 2 * m - px(24.0), rowh);
         y += gh + gap;
         // text areas and buttons
@@ -547,7 +556,14 @@ fn on_command(hwnd: HWND, id: i32, code: u32) {
         return;
     }
     match (id, code) {
-        (ID_LINUX64 | ID_LINUX32 | ID_WINDOWS | ID_SOUNDFONT | ID_REPLACE_EXE, BN_CLICKED) | (ID_ARCH, CBN_SELCHANGE) => {
+        (id, BN_CLICKED) if ID_CHOICE.contains(&id) || id == ID_SOUNDFONT || id == ID_REPLACE_EXE => {
+            with(|a| {
+                // a CPU type the new system has no engine for: 32-bit instead
+                let c = choice(&a.c);
+                if c.fixed() != c {
+                    set_choice(&a.c, c.fixed());
+                }
+            });
             with(update_controls);
             schedule_analyze(hwnd, 0);
         }
@@ -566,25 +582,28 @@ fn on_command(hwnd: HWND, id: i32, code: u32) {
 
 // ------------------------------------------------------------------ logic
 
+fn choice(c: &Controls) -> Choice {
+    let (sys, cpu) = c.choice.split_at(System::ALL.len());
+    let pick = |hs: &[HWND]| hs.iter().position(|h| checked(*h)).unwrap_or(0);
+    Choice { system: System::ALL[pick(sys)], cpu: Cpu::ALL[pick(cpu)] }
+}
+
+fn set_choice(c: &Controls, ch: Choice) {
+    let (sys, cpu) = c.choice.split_at(System::ALL.len());
+    for (h, s) in sys.iter().zip(System::ALL) {
+        set_checked(*h, s == ch.system);
+    }
+    for (h, x) in cpu.iter().zip(Cpu::ALL) {
+        set_checked(*h, x == ch.cpu);
+    }
+}
+
 fn key(c: &Controls) -> Key {
-    let mut platforms = Vec::new();
-    if checked(c.linux64) {
-        platforms.push(Platform::Linux64);
-    }
-    if checked(c.linux32) {
-        platforms.push(Platform::Linux32);
-    }
-    if checked(c.windows) {
-        let sel = unsafe { SendMessageW(c.arch, CB_GETCURSEL, 0, 0) };
-        platforms.push(match sel {
-            1 => Platform::Windows64,
-            2 => Platform::WindowsArm64,
-            _ => Platform::Windows32,
-        });
-    }
+    let choice = choice(c);
+    let platforms = choice.platforms();
     Key { game: get_text(c.edits[0]).trim().into(), engines: get_text(c.edits[1]).trim().into(),
           rtp: get_text(c.edits[2]).trim().into(), source: get_text(c.edits[3]).trim().into(),
-          platforms, soundfont: checked(c.soundfont), replace_exe: checked(c.replace_exe) }
+          choice, platforms, soundfont: checked(c.soundfont), replace_exe: checked(c.replace_exe) }
 }
 
 fn options(a: &App, k: &Key) -> Options {
@@ -714,7 +733,7 @@ fn host_launcher(a: &App) -> Option<PathBuf> {
     if !m.platforms.iter().any(|x| x.starts_with("windows")) {
         return None;
     }
-    // Game.exe or "Game (mkxp-z).exe/.cmd", as the patch recorded it
+    // Game.exe or Game.mkxp-z(.64).exe/.cmd, as the patch recorded it
     m.files.iter().filter(|f| f.ends_with(".exe") || f.ends_with(".cmd"))
         .map(|n| plan.game_dir.join(n)).find(|p| p.is_file())
 }
@@ -808,7 +827,7 @@ fn summary_lines(a: &App) -> Vec<(String, Option<u32>)> {
     if k.game.is_empty() {
         out.push(("Choose a game folder to begin.".into(), None));
     } else if k.platforms.is_empty() {
-        out.push(("Choose at least one platform to patch for.".into(), None));
+        out.push(("There's no engine for this system and CPU type.".into(), None));
     } else if let Some(e) = &a.plan_error {
         out.extend(format!("Error: {}", e).lines().map(|l| (l.to_string(), Some(COLOR_ERR))));
     } else if let Some(p) = &a.plan {
@@ -861,11 +880,15 @@ fn render_summary(a: &mut App) {
 fn update_controls(a: &mut App) {
     let c = &a.c;
     let busy = a.busy.is_some();
-    for h in c.edits.iter().chain(&c.browse).chain([&c.linux64, &c.linux32, &c.windows]) {
+    for h in c.edits.iter().chain(&c.browse) {
         enable(*h, !busy);
     }
-    let win = checked(c.windows);
-    enable(c.arch, !busy && win);
+    let system = choice(c).system;
+    for (i, h) in c.choice.iter().enumerate() {
+        let ok = i < System::ALL.len() || system.has(Cpu::ALL[i - System::ALL.len()]);
+        enable(*h, !busy && ok);
+    }
+    let win = system != System::Linux;
     enable(c.soundfont, !busy && win);
     enable(c.replace_exe, !busy && win);
     let plan = a.plan.as_ref();

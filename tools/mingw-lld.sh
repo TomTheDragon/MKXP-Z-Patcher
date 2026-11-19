@@ -8,7 +8,8 @@
 #       cargo build --target x86_64-pc-windows-gnu
 #   aarch64-pc-windows-gnullvm (MSYS2 clangarm64): the same with
 #     MINGW_SYSROOT=<dest>/clangarm64
-#   (the CPU is taken from the sysroot: clangarm64 = ARM64, else x86_64)
+#   i686-pc-windows-gnu (MSYS2 mingw32): MINGW_SYSROOT=<dest>/mingw32
+#   (the CPU is taken from the sysroot: clangarm64 = ARM64, mingw32 = x86, else x86_64)
 set -euo pipefail
 : "${MINGW_SYSROOT:?set MINGW_SYSROOT to the mingw64 or clangarm64 folder of an MSYS2 sysroot}"
 lld="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/rust-lld"
@@ -23,6 +24,11 @@ case "$(basename "$MINGW_SYSROOT")" in
         mkdir -p "$static"
         ln -sf "$MINGW_SYSROOT/lib/libunwind.a" "$static/libunwind.a"
         exec "$lld" -flavor gnu -m arm64pe "$MINGW_SYSROOT/lib/crt2.o" -L "$static" -L "$MINGW_SYSROOT/lib" "$@" "$builtins"
+        ;;
+    mingw32)
+        # 32-bit x86 (i686-pc-windows-gnu)
+        gcclib="$(ls -d "$MINGW_SYSROOT"/lib/gcc/i686-w64-mingw32/* | sort -V | tail -1)"
+        exec "$lld" -flavor gnu -m i386pe "$MINGW_SYSROOT/lib/crt2.o" -L "$MINGW_SYSROOT/lib" -L "$gcclib" "$@"
         ;;
     *)
         gcclib="$(ls -d "$MINGW_SYSROOT"/lib/gcc/x86_64-w64-mingw32/* | sort -V | tail -1)"

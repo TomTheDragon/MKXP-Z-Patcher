@@ -4,7 +4,8 @@
 //! Starts mkxp-z\windows\mkxp-z.<cpu>.exe next to itself with the same arguments
 //! (the engine that suits this computer's CPU best, see engine_order),
 //! waits for it and returns its exit code. mkxp-z reads mkxp.json next to its
-//! own .exe, and that config switches to the game folder.
+//! own .exe, and that config switches to the game folder. On Windows XP it
+//! starts the legacy engine mkxp-z.xp.exe, the only one that runs there.
 //!
 //! Built without the standard library or a C runtime (no_std, raw-dylib
 //! imports, linked by rust-lld), so it can be built on any OS without a Windows
@@ -123,8 +124,18 @@ const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
 
+/// Windows XP / Server 2003: no Vista functions (InitializeSRWLock came with Vista).
+unsafe fn before_vista() -> bool {
+    let k32: [u16; 9] = [b'k' as u16, b'e' as u16, b'r' as u16, b'n' as u16, b'e' as u16, b'l' as u16, b'3' as u16, b'2' as u16, 0];
+    GetProcAddress(GetModuleHandleW(k32.as_ptr()), b"InitializeSRWLock\0".as_ptr()).is_null()
+}
+
+const XP_ENGINE: &str = "mkxp-z.xp.exe";
+
 /// Engines to try, best first: the native one, then what this CPU runs
 /// emulated (every Windows on ARM runs x86 code, only Windows 11 x64 code).
+/// The legacy XP engine runs everywhere, but the others are better where
+/// they run; it's found by the search for any engine as a last resort.
 fn engine_order(cpu: u16) -> &'static [&'static str] {
     match cpu {
         IMAGE_FILE_MACHINE_ARM64 => &["mkxp-z.aarch64.exe", "mkxp-z.i686.exe", "mkxp-z.x86_64.exe"],
@@ -283,8 +294,19 @@ pub unsafe extern "system" fn entry() -> ! {
     }
     target.push_str("\\mkxp-z\\windows\\");
     let base_len = target.len;
-    let mut found = false;
+    if before_vista() {
+        // only the legacy engine starts on XP (the others need newer Windows)
+        target.push_str(XP_ENGINE);
+        if GetFileAttributesW(target.terminated()) == 0xFFFF_FFFF {
+            fail("This game was patched without the Windows XP engine, and the other mkxp-z engines need \
+                  Windows 7 or newer. Patch it again with \"Windows legacy (XP)\" chosen. Expected:", &target, None);
+        }
+    }
+    let mut found = before_vista();
     for name in engine_order(native_cpu()) {
+        if found {
+            break; // XP: its engine, found above
+        }
         target.len = base_len;
         target.push_str(name);
         if GetFileAttributesW(target.terminated()) != 0xFFFF_FFFF {

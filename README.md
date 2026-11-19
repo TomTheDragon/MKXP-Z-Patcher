@@ -18,7 +18,28 @@ mkxp-z settings, key bindings and shaders stay).
 - **Platforms:** Linux (x86 64/32-bit, ARM 64/32-bit) and Windows
   (32-bit, 64-bit, ARM64). Linux builds every engine (Windows ones are
   cross-compiled); Windows builds the x86 Windows engines in a portable MSYS2
-  it sets up by itself.
+  it sets up by itself. In the window you choose one system (Linux, Windows,
+  Windows legacy) and one CPU type (32-bit, 64-bit, ARM 32-bit, ARM 64-bit).
+  Windows has no ARM 32-bit engine, and Windows legacy is 32-bit only; CPU
+  types a system has no engine for are greyed out. The command line can add
+  several engines at once (`--platform linux,windows`).
+- **Older systems:** the patcher and the engines run on Windows 7 or newer
+  (32-bit Windows: `mkxpz-patcher-windows-i686.exe`) and on Linux systems from
+  2020 on (glibc 2.31: Ubuntu 20.04, Debian 11, SteamOS 3 and newer; Linux x86
+  engines built in a container, see Building). On Windows 7/8 and 32-bit
+  Windows the patcher patches with engines built elsewhere (building them
+  needs 64-bit Windows 10 or newer, or Linux). Graphics: OpenGL 2.0, or
+  Direct3D 11 on Windows.
+- **Windows XP (experimental):** "Windows legacy (XP)" (`--platform
+  windows-xp`) patches with only the legacy 32-bit engine, `mkxp-z.xp.exe`,
+  which the game's Game.exe starts on XP and on newer Windows too. On the
+  command line it can also go next to the normal one (`--platform
+  windows,windows-xp`): Game.exe then starts the normal one on newer Windows. It's
+  built for XP's system functions and without ANGLE, HTTPS and Ruby's socket
+  module, draws with OpenGL (2.0 needed) and needs no SSE2 (Pentium III,
+  Athlon XP). After building, the patcher checks that it uses nothing newer
+  than XP. The patcher itself needs Windows 7, so patch the game on another
+  computer and copy it over.
 - **Game analysis:** RGSS version, encrypted archives, fonts the game asks for
   (with a CJK fallback font when its text needs one), MIDI music (SoundFont),
   RTP, Win32API use, Steam versions.
@@ -93,7 +114,8 @@ The game then starts with:
   launcher there and keeps the original as `Game.original.exe` ("Remove
   patch" puts it back), so shortcuts and Steam start the game with mkxp-z. To leave
   `Game.exe` alone instead, untick "replace Game.exe" (command line:
-  `--keep-exe`): the launcher is then added next to it as `Game (mkxp-z).exe`
+  `--keep-exe`): the launcher is then added next to it as `Game.mkxp-z.exe` (64-bit and
+  ARM64 engines: `Game.mkxp-z.64.exe`)
 
 From the command line:
 
@@ -119,22 +141,28 @@ Linux computer into `dist/`:
 ```sh
 ./build-patcher.sh                 # all
 ./build-patcher.sh linux-x86_64    # or some of: linux-x86_64 linux-i686 linux-aarch64
-                                   #   linux-armhf windows-x86_64 windows-aarch64
+                                   #   linux-armhf windows-x86_64 windows-i686 windows-aarch64
 ```
 
 - Linux x86: GTK 3 development files (Fedora: `gtk3-devel`; 32-bit: `gtk3.i686
-  glibc-devel.i686`).
+  glibc-devel.i686`) and Python 3. The patchers are linked against Ubuntu
+  20.04's glibc (downloaded once by `tools/glibc-sysroot.py`), so they run on
+  older systems than the build computer.
 - Windows: no MinGW needed; the C runtime comes from MSYS2's package
-  repository and Rust's own linker links.
+  repository and Rust's own linker links. The x86 versions are built with
+  Rust 1.77 (the last one for Windows 7; installed with rustup when missing).
 - Linux ARM: static command-line builds (no window), no ARM toolchain needed.
 
 Engines are built by the patcher when needed, or ahead of time with
-`./build-engines.sh` (e.g. `./build-engines.sh linux,windows` or
-`./build-engines.sh arm`). It asks for the build tools it's missing (meson,
-ninja, cmake, bison, ruby, MinGW-w64 for Windows targets). Windows ARM64
-engines use llvm-mingw, which is downloaded; Linux ARM engines use the
-distribution's ARM cross compiler, or a Debian container (podman/docker)
-where there is none.
+`./build-engines.sh` (e.g. `./build-engines.sh linux,windows`,
+`./build-engines.sh windows-xp` or `./build-engines.sh arm`). It asks for the build tools it's missing (meson,
+ninja, cmake, bison, ruby, MinGW-w64 for Windows targets). Linux x86 engines
+are built in an Ubuntu 20.04 container (podman or docker; set up once, about
+300 MB), so they run on Linux systems from 2020 on; without podman/docker they
+are built with the computer's own compiler and need a system as new as it
+(`MKXPZ_NATIVE_BUILD=1` forces that). Windows ARM64 engines use llvm-mingw,
+which is downloaded; Linux ARM engines use the distribution's ARM cross
+compiler, or a Debian container (podman/docker) where there is none.
 
 ## Project layout
 
