@@ -1,0 +1,333 @@
+/* Graphics: the game's screen (in memory, at its own resolution), shown on
+ * the 3DS's top screen (400x240), scaled to fit. */
+#include "engine.h"
+#include <3ds.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+int screen_w = 544, screen_h = 416;
+
+static px_t *screen;          /* the composed frame */
+static px_t *frozen;          /* Graphics.freeze: the frame shown until transition */
+static int frame_rate = 60, frame_count, brightness = 255;
+static VALUE mGraphics;
+
+/* scaling to the top screen: per output pixel, the source position (16.16) */
+static int out_w, out_h, out_x, out_y;
+static int *map_x, *map_y;
+
+static void setup_scaling(void)
+{
+	free(map_x);
+	free(map_y);
+	/* fit inside 400x240, keeping the aspect ratio */
+	if (screen_w * 240 > screen_h * 400) {
+		out_w = 400;
+		out_h = screen_h * 400 / screen_w;
+	} else {
+		out_h = 240;
+		out_w = screen_w * 240 / screen_h;
+	}
+	out_x = (400 - out_w) / 2;
+	out_y = (240 - out_h) / 2;
+	map_x = malloc(sizeof *map_x * out_w);
+	map_y = malloc(sizeof *map_y * out_h);
+	for (int x = 0; x < out_w; x++)
+		map_x[x] = (int) (((long long) x * 2 + 1) * screen_w * 65536 / (out_w * 2)) - 32768;
+	for (int y = 0; y < out_h; y++)
+		map_y[y] = (int) (((long long) y * 2 + 1) * screen_h * 65536 / (out_h * 2)) - 32768;
+}
+
+static void alloc_screen(int w, int h)
+{
+	px_t *s = calloc((size_t) w * h, 4);
+	if (!s)
+		rb_raise(rb_eNoMemError, "no memory for a %dx%d screen", w, h);
+	free(screen);
+	free(frozen);
+	frozen = NULL;
+	screen = s;
+	screen_w = w;
+	screen_h = h;
+	setup_scaling();
+	gpu_set_screen(w, h);
+}
+
+static void compose(px_t *dst)
+{
+	for (size_t i = 0, n = (size_t) screen_w * screen_h; i < n; i++)
+		dst[i] = 0xff000000;
+	Canvas c = { dst, screen_w, screen_h, screen_w, { 0, 0, screen_w, screen_h } };
+	scene_draw(&c);
+}
+
+/* bilinear scaling into the top screen's framebuffer (240x400, rotated) */
+static void present(const px_t *src)
+{
+	u16 fw, fh;
+	u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fw, &fh);
+	memset(fb, 0, (size_t) fw * fh * 3);
+	int br = brightness;
+	for (int ox = 0; ox < out_w; ox++) {
+		int sx = map_x[ox], x0 = sx >> 16, fx = (sx >> 8) & 0xff;
+		if (sx < 0) { x0 = 0; fx = 0; }
+		int x1 = x0 + 1 < screen_w ? x0 + 1 : x0;
+		u8 *col = fb + (size_t) (out_x + ox) * 240 * 3;
+		for (int oy = 0; oy < out_h; oy++) {
+			int sy = map_y[oy], y0 = sy >> 16, fy = (sy >> 8) & 0xff;
+			if (sy < 0) { y0 = 0; fy = 0; }
+			int y1 = y0 + 1 < screen_h ? y0 + 1 : y0;
+			px_t a = src[y0 * screen_w + x0], b = src[y0 * screen_w + x1];
+			px_t c = src[y1 * screen_w + x0], d = src[y1 * screen_w + x1];
+			int w00 = (256 - fx) * (256 - fy), w01 = fx * (256 - fy), w10 = (256 - fx) * fy, w11 = fx * fy;
+			int r = (PX_R(a) * w00 + PX_R(b) * w01 + PX_R(c) * w10 + PX_R(d) * w11) >> 16;
+			int g = (PX_G(a) * w00 + PX_G(b) * w01 + PX_G(c) * w10 + PX_G(d) * w11) >> 16;
+			int bl = (PX_B(a) * w00 + PX_B(b) * w01 + PX_B(c) * w10 + PX_B(d) * w11) >> 16;
+			if (br < 255) {
+				r = r * br / 255;
+				g = g * br / 255;
+				bl = bl * br / 255;
+			}
+			u8 *p = col + (size_t) (239 - (out_y + oy)) * 3;
+			p[0] = bl;
+			p[1] = g;
+			p[2] = r;
+		}
+	}
+	gfxFlushBuffers();
+	gfxSwapBuffers();
+	gspWaitForVBlank();
+}
+
+/* one frame: input, the HOME menu, then the picture */
+static void frame(const px_t *show)
+{
+	if (!aptMainLoop())
+		rb_exit(0);
+	input_poll();
+	engine_check_reset();
+	present(show);
+	frame_count++;
+}
+
+/* timing, shown on the bottom screen every 60 frames (ms per frame) */
+static u64 t_compose, t_present, t_script, t_last;
+static int t_frames;
+
+static double ms(u64 ticks) { return ticks * 1000.0 / SYSCLOCK_ARM11; }
+
+/* the GPU: the scene into texture 0 (or 1: Graphics.freeze), shown on the
+ * top screen; frozen_alpha: see gpu_present */
+static bool gpu_frozen;
+
+static u64 t_draw, t_begin;
+
+static void gpu_draw_scene(int which)
+{
+	gpu_scene_begin(which);
+	Canvas c = { .w = screen_w, .h = screen_h, .clip = { 0, 0, screen_w, screen_h }, .gpu = true };
+	u64 t0 = svcGetSystemTick();
+	scene_draw(&c);
+	t_draw += svcGetSystemTick() - t0;
+}
+
+static void gpu_frame_with(int frozen_alpha)
+{
+	if (!aptMainLoop())
+		rb_exit(0);
+	input_poll();
+	engine_check_reset();
+	u64 tb = svcGetSystemTick();
+	gpu_frame_begin();
+	t_begin += svcGetSystemTick() - tb;
+	if (frozen_alpha < 255)
+		gpu_draw_scene(0);
+	gpu_present(frozen_alpha, brightness);
+	gpu_frame_end();
+	frame_count++;
+}
+
+static void gpu_frame(void)
+{
+	gpu_frame_with(gpu_frozen ? 255 : -1);
+}
+
+static VALUE g_update(VALUE self)
+{
+	u64 t0 = svcGetSystemTick();
+	if (t_last)
+		t_script += t0 - t_last;
+	if (gpu_on) {
+		gpu_frame();
+		t_compose += svcGetSystemTick() - t0;
+	} else if (frozen) {
+		frame(frozen);
+	} else {
+		compose(screen);
+		u64 t1 = svcGetSystemTick();
+		t_compose += t1 - t0;
+		frame(screen);
+		t_present += svcGetSystemTick() - t1;
+	}
+	t_last = svcGetSystemTick();
+	if (++t_frames == 60) {
+		printf("ms: ruby %.1f, draw %.1f, wait %.1f, other %.1f\n", ms(t_script) / 60, ms(t_draw) / 60,
+		       ms(t_begin) / 60, (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60);
+		t_script = t_compose = t_present = t_draw = t_begin = 0;
+		t_frames = 0;
+	}
+	return Qnil;
+}
+
+static VALUE g_wait(VALUE self, VALUE n)
+{
+	for (int i = num2int(n); i > 0; i--)
+		g_update(self);
+	return Qnil;
+}
+
+static VALUE g_freeze(VALUE self)
+{
+	if (gpu_on) {
+		if (!gpu_frozen) {
+			gpu_frame_begin();
+			gpu_draw_scene(1);
+			gpu_frame_end();
+			gpu_frozen = true;
+		}
+		return Qnil;
+	}
+	if (!frozen) {
+		frozen = malloc((size_t) screen_w * screen_h * 4);
+		if (frozen)
+			compose(frozen);
+	}
+	return Qnil;
+}
+
+static VALUE load_bitmap(VALUE name)
+{
+	return rb_class_new_instance(1, &name, cBitmap);
+}
+
+/* Graphics.transition(duration = 10, filename = "", vague = 40) */
+static VALUE g_transition(int argc, VALUE *argv, VALUE self)
+{
+	int dur = argc > 0 ? num2int(argv[0]) : (rgss_version >= 2 ? 10 : 8);
+	if (gpu_on) {
+		/* (transition pictures: a plain cross-fade for now) */
+		if (!gpu_frozen)
+			return Qnil;
+		gpu_frozen = false;
+		for (int i = 1; i <= dur; i++)
+			gpu_frame_with(255 - i * 255 / (dur + 1));
+		return Qnil;
+	}
+	if (!frozen)
+		return Qnil;
+	px_t *old = frozen;
+	frozen = NULL;
+	px_t *mix = malloc((size_t) screen_w * screen_h * 4);
+	/* a transition picture: dark parts change first */
+	Bitmap *mask = NULL;
+	int vague = argc > 2 ? CLAMP(num2int(argv[2]), 1, 255) : 40;
+	VALUE maskv = Qnil;
+	if (argc > 1 && RB_TYPE_P(argv[1], T_STRING) && RSTRING_LEN(argv[1]) > 0) {
+		int state = 0;
+		maskv = rb_protect(load_bitmap, argv[1], &state);
+		if (state) {
+			rb_set_errinfo(Qnil);
+			maskv = Qnil;
+		}
+		mask = bitmap_get_maybe(maskv);
+	}
+	for (int i = 1; i <= dur && mix; i++) {
+		compose(screen);
+		int t = i * 255 / dur;
+		size_t n = (size_t) screen_w * screen_h;
+		for (size_t p = 0; p < n; p++) {
+			int a = t;
+			if (mask) {
+				int x = (int) (p % screen_w) * mask->w / screen_w, y = (int) (p / screen_w) * mask->h / screen_h;
+				int m = PX_R(mask->px[y * mask->w + x]);
+				/* threshold sweeps from 0 to 255 + vague */
+				a = (t * (255 + vague) / 255 - m) * 255 / vague;
+				a = CLAMP(a, 0, 255);
+			}
+			px_t o = old[p], s = screen[p];
+			mix[p] = PX(PX_R(o) + (PX_R(s) - (int) PX_R(o)) * a / 255,
+			            PX_G(o) + (PX_G(s) - (int) PX_G(o)) * a / 255,
+			            PX_B(o) + (PX_B(s) - (int) PX_B(o)) * a / 255, 255);
+		}
+		frame(mix);
+	}
+	free(mix);
+	free(old);
+	if (!NIL_P(maskv))
+		rb_funcall(maskv, rb_intern("dispose"), 0);
+	return Qnil;
+}
+
+static VALUE g_fade(int dur, int to)
+{
+	int from = brightness;
+	for (int i = 1; i <= dur; i++) {
+		brightness = from + (to - from) * i / dur;
+		g_update(Qnil);
+	}
+	brightness = to;
+	return Qnil;
+}
+static VALUE g_fadeout(VALUE self, VALUE d) { return g_fade(num2int(d), 0); }
+static VALUE g_fadein(VALUE self, VALUE d) { return g_fade(num2int(d), 255); }
+
+static VALUE g_snap(VALUE self)
+{
+	VALUE bv = bitmap_new_size(screen_w, screen_h);
+	Bitmap *b = bitmap_get(bv);
+	compose(b->px);
+	return bv;
+}
+
+static VALUE g_resize(VALUE self, VALUE w, VALUE h)
+{
+	int nw = CLAMP(num2int(w), 16, 640), nh = CLAMP(num2int(h), 16, 480);
+	if (nw != screen_w || nh != screen_h)
+		alloc_screen(nw, nh);
+	return Qnil;
+}
+
+static VALUE g_width(VALUE self) { return INT2NUM(screen_w); }
+static VALUE g_height(VALUE self) { return INT2NUM(screen_h); }
+static VALUE g_frame_rate(VALUE self) { return INT2NUM(frame_rate); }
+static VALUE g_set_frame_rate(VALUE self, VALUE v) { frame_rate = CLAMP(num2int(v), 10, 120); return v; }
+static VALUE g_frame_count(VALUE self) { return INT2NUM(frame_count); }
+static VALUE g_set_frame_count(VALUE self, VALUE v) { frame_count = num2int(v); return v; }
+static VALUE g_brightness(VALUE self) { return INT2NUM(brightness); }
+static VALUE g_set_brightness(VALUE self, VALUE v) { brightness = CLAMP(num2int(v), 0, 255); return v; }
+static VALUE g_nothing(int argc, VALUE *argv, VALUE self) { return Qnil; }
+
+void init_graphics(void)
+{
+	alloc_screen(rgss_version >= 2 ? 544 : 640, rgss_version >= 2 ? 416 : 480);
+	mGraphics = rb_define_module("Graphics");
+	rb_define_module_function(mGraphics, "update", g_update, 0);
+	rb_define_module_function(mGraphics, "wait", g_wait, 1);
+	rb_define_module_function(mGraphics, "freeze", g_freeze, 0);
+	rb_define_module_function(mGraphics, "transition", g_transition, -1);
+	rb_define_module_function(mGraphics, "fadeout", g_fadeout, 1);
+	rb_define_module_function(mGraphics, "fadein", g_fadein, 1);
+	rb_define_module_function(mGraphics, "snap_to_bitmap", g_snap, 0);
+	rb_define_module_function(mGraphics, "resize_screen", g_resize, 2);
+	rb_define_module_function(mGraphics, "frame_reset", g_nothing, -1);
+	rb_define_module_function(mGraphics, "play_movie", g_nothing, -1);
+	rb_define_module_function(mGraphics, "width", g_width, 0);
+	rb_define_module_function(mGraphics, "height", g_height, 0);
+	rb_define_module_function(mGraphics, "frame_rate", g_frame_rate, 0);
+	rb_define_module_function(mGraphics, "frame_rate=", g_set_frame_rate, 1);
+	rb_define_module_function(mGraphics, "frame_count", g_frame_count, 0);
+	rb_define_module_function(mGraphics, "frame_count=", g_set_frame_count, 1);
+	rb_define_module_function(mGraphics, "brightness", g_brightness, 0);
+	rb_define_module_function(mGraphics, "brightness=", g_set_brightness, 1);
+}

@@ -1,0 +1,124 @@
+/* Input: the 3DS's buttons as RPG Maker's keys.
+ *   A: C (confirm)   B: B (cancel, menu)   X: A (Shift, dash)   Y: X
+ *   L, R: L, R (page)   D-pad / circle pad: directions
+ *   SELECT: reset the game (like F12) */
+#include "engine.h"
+#include <3ds.h>
+#include <string.h>
+
+enum { K_DOWN = 2, K_LEFT = 4, K_RIGHT = 6, K_UP = 8, K_A = 11, K_B = 12, K_C = 13, K_X = 14, K_Y = 15, K_Z = 16,
+       K_L = 17, K_R = 18, K_SHIFT = 21, K_CTRL = 22, K_ALT = 23, K_F5 = 25, K_F6 = 26, K_F7 = 27, K_F8 = 28,
+       K_F9 = 29, K_MAX = 32 };
+
+static u32 now, before;
+static int held_frames[K_MAX];
+static bool reset_requested;
+
+static u32 keys_for(int k)
+{
+	switch (k) {
+	case K_DOWN: return KEY_DOWN; /* D-pad and circle pad */
+	case K_LEFT: return KEY_LEFT;
+	case K_RIGHT: return KEY_RIGHT;
+	case K_UP: return KEY_UP;
+	case K_C: return KEY_A;
+	case K_B: return KEY_B;
+	case K_A: case K_SHIFT: return KEY_X;
+	case K_X: return KEY_Y;
+	case K_L: return KEY_L | KEY_ZL;
+	case K_R: return KEY_R | KEY_ZR;
+	default: return 0;
+	}
+}
+
+void input_poll(void)
+{
+	hidScanInput();
+	before = now;
+	now = hidKeysHeld();
+	if ((now & KEY_SELECT) && !(before & KEY_SELECT))
+		reset_requested = true;
+	for (int k = 0; k < K_MAX; k++) {
+		u32 m = keys_for(k);
+		held_frames[k] = m && (now & m) ? held_frames[k] + 1 : 0;
+	}
+}
+
+void engine_check_reset(void)
+{
+	if (reset_requested) {
+		reset_requested = false;
+		rb_raise(eRGSSReset, "reset");
+	}
+}
+
+static int key_of(VALUE v)
+{
+	if (SYMBOL_P(v)) {
+		static const struct { const char *name; int k; } names[] = {
+			{ "DOWN", K_DOWN }, { "LEFT", K_LEFT }, { "RIGHT", K_RIGHT }, { "UP", K_UP },
+			{ "A", K_A }, { "B", K_B }, { "C", K_C }, { "X", K_X }, { "Y", K_Y }, { "Z", K_Z },
+			{ "L", K_L }, { "R", K_R }, { "SHIFT", K_SHIFT }, { "CTRL", K_CTRL }, { "ALT", K_ALT },
+			{ "F5", K_F5 }, { "F6", K_F6 }, { "F7", K_F7 }, { "F8", K_F8 }, { "F9", K_F9 },
+		};
+		const char *s = rb_id2name(SYM2ID(v));
+		for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+			if (!strcmp(s, names[i].name))
+				return names[i].k;
+		return 0;
+	}
+	if (FIXNUM_P(v)) {
+		int k = FIX2INT(v);
+		return k > 0 && k < K_MAX ? k : 0;
+	}
+	return 0;
+}
+
+static VALUE i_update(VALUE self) { return Qnil; } /* polled once per frame in Graphics.update */
+static VALUE i_press(VALUE self, VALUE k) { return held_frames[key_of(k)] > 0 ? Qtrue : Qfalse; }
+static VALUE i_trigger(VALUE self, VALUE k) { return held_frames[key_of(k)] == 1 ? Qtrue : Qfalse; }
+static VALUE i_repeat(VALUE self, VALUE k)
+{
+	/* at once, then after 24 frames every 6 */
+	int n = held_frames[key_of(k)];
+	return n == 1 || (n > 24 && (n - 24) % 6 == 0) ? Qtrue : Qfalse;
+}
+static VALUE i_dir4(VALUE self)
+{
+	static const int order[] = { K_DOWN, K_LEFT, K_RIGHT, K_UP };
+	int best = 0, bf = 0;
+	for (int i = 0; i < 4; i++)
+		if (held_frames[order[i]] > 0 && (!bf || held_frames[order[i]] < bf)) {
+			best = order[i];
+			bf = held_frames[order[i]];
+		}
+	return INT2FIX(best);
+}
+static VALUE i_dir8(VALUE self)
+{
+	bool d = held_frames[K_DOWN] > 0, l = held_frames[K_LEFT] > 0, r = held_frames[K_RIGHT] > 0, u = held_frames[K_UP] > 0;
+	int v = d && !u ? 0 : u && !d ? 6 : 3;     /* row: 1 2 3 / 4 5 6 / 7 8 9 */
+	int h = l && !r ? 1 : r && !l ? 3 : 2;
+	int dir = v + h;
+	return INT2FIX(dir == 5 ? 0 : dir);
+}
+
+void init_input(void)
+{
+	VALUE m = rb_define_module("Input");
+	rb_define_module_function(m, "update", i_update, 0);
+	rb_define_module_function(m, "press?", i_press, 1);
+	rb_define_module_function(m, "trigger?", i_trigger, 1);
+	rb_define_module_function(m, "repeat?", i_repeat, 1);
+	rb_define_module_function(m, "dir4", i_dir4, 0);
+	rb_define_module_function(m, "dir8", i_dir8, 0);
+	static const struct { const char *name; int k; } c[] = {
+		{ "DOWN", K_DOWN }, { "LEFT", K_LEFT }, { "RIGHT", K_RIGHT }, { "UP", K_UP },
+		{ "A", K_A }, { "B", K_B }, { "C", K_C }, { "X", K_X }, { "Y", K_Y }, { "Z", K_Z },
+		{ "L", K_L }, { "R", K_R }, { "SHIFT", K_SHIFT }, { "CTRL", K_CTRL }, { "ALT", K_ALT },
+		{ "F5", K_F5 }, { "F6", K_F6 }, { "F7", K_F7 }, { "F8", K_F8 }, { "F9", K_F9 },
+	};
+	/* XP / VX: numbers; VX Ace scripts use symbols (both work) */
+	for (size_t i = 0; i < sizeof c / sizeof *c; i++)
+		rb_define_const(m, c[i].name, rgss_version >= 3 ? ID2SYM(rb_intern(c[i].name)) : INT2FIX(c[i].k));
+}

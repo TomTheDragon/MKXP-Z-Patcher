@@ -2,6 +2,7 @@
 # build folders, downloaded toolchains (made by build-patcher.sh / the patcher)
 /dist/
 target/
+/ports/3ds/build/
 
 # Games used for testing (they belong to their authors; never commit them)
 /examples/

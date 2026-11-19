@@ -1,0 +1,35 @@
+--- a/gc.c
++++ b/gc.c
+@@ -5043,6 +5043,18 @@
+      * to si_addr from sigaction */
+     old_handler = SetUnhandledExceptionFilter(read_barrier_signal);
+ }
++#elif defined(__3DS__)
++/* MKXP-Z 3DS: no SIGSEGV handlers (no sigaction with SA_SIGINFO); compaction's
++ * read barrier then never triggers, so GC.compact isn't usable */
++static void
++uninstall_handlers(void)
++{
++}
++
++static void
++install_handlers(void)
++{
++}
+ #else
+ static struct sigaction old_sigbus_handler;
+ static struct sigaction old_sigsegv_handler;
+--- a/cont.c
++++ b/cont.c
+@@ -59,7 +59,11 @@
+ #define FIBER_POOL_INITIAL_SIZE 8
+ #define FIBER_POOL_ALLOCATION_MAXIMUM_SIZE 32
+ #else
++#ifdef __3DS__
++#define FIBER_POOL_INITIAL_SIZE 4 /* MKXP-Z 3DS: little memory */
++#else
+ #define FIBER_POOL_INITIAL_SIZE 32
++#endif
+ #define FIBER_POOL_ALLOCATION_MAXIMUM_SIZE 1024
+ #endif
+ 
