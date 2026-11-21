@@ -274,7 +274,8 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   no room with only 5 images in the arena: mem_release now lets go down to
   the most recent image when keeping 4 isn't enough.
 
-- Not built or tested yet (the build setup was lost, see below):
+- Built and tested in the emulator (2026-11-21 afternoon; ~45 min of game
+  time on the user's Save03 with 61 saves, no errors):
   - Black title screen after a game over: Graphics.transition now sets the
     brightness back to 255, as RGSS and mkxp-z do (Scene_Gameover fades out
     with Graphics.fadeout).
