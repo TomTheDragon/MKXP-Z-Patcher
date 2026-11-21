@@ -299,6 +299,7 @@ static void bitmap_free(void *p)
 	bitmap_forget_file(b);
 	px_free(b->px, (size_t) b->w * b->h * 4);
 	drop_from_full(b);
+	gpu_text_forget(b);
 	ops_free(b); /* (its strings and fonts are Ruby's) */
 	xfree(b);
 }
@@ -372,6 +373,7 @@ static bool load_png(Bitmap *b, const char *path)
 	img.version = PNG_IMAGE_VERSION;
 	if (!png_image_begin_read_from_file(&img, path))
 		return false;
+	loading_tick(-1);
 	img.format = PNG_FORMAT_RGBA;
 	bitmap_set_size(b, img.width, img.height);
 	bool ok = png_image_finish_read(&img, NULL, b->px, 0, NULL);
@@ -438,6 +440,9 @@ static bool load_mkxi(Bitmap *b, const char *path)
 	size_t want = (size_t) b->w * b->h * 4, done = 0, pos = 16;
 	while (done < want && pos < (size_t) size) {
 		size_t dst = want - done, src = size - pos;
+		if (dst > 256 * 1024)
+			dst = 256 * 1024; /* (in steps: the loading bar) */
+		loading_tick((float) done / want);
 		size_t r = LZ4F_decompress(dctx, (char *) b->px + done, &dst, data + pos, &src, NULL);
 		if (LZ4F_isError(r)) {
 			log_only("%s: %s\n", path, LZ4F_getErrorName(r));
@@ -457,6 +462,83 @@ static bool load_mkxi(Bitmap *b, const char *path)
 		return false;
 	}
 	return true;
+}
+
+/* the pixels of an image that let go of them, from its .mkxi file in blocks
+ * of 32 rows: textures are made from them without the whole image in memory
+ * (a 1536x1024 character sheet is 6 MB in one piece; the console once had
+ * 8 MB free in the arena, but no 6 MB block) */
+bool bitmap_stream_file(Bitmap *b, void (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx)
+{
+	if (!b->file || b->version != b->file_version)
+		return false;
+	size_t l = strlen(b->file);
+	if (l < 5 || strcasecmp(b->file + l - 5, ".mkxi"))
+		return false;
+	FILE *f = fopen(b->file, "rb");
+	if (!f)
+		return false;
+	uint32_t head[4];
+	if (fread(head, 1, 16, f) != 16 || memcmp(head, "MKXI", 4) || head[1] != 1 || (int) head[2] != b->w ||
+	    (int) head[3] != b->h) {
+		fclose(f);
+		return false;
+	}
+	size_t rowbytes = (size_t) b->w * 4, cap = rowbytes * 32, have = 0;
+	unsigned char *buf = malloc(cap), *in = malloc(16384);
+	LZ4F_dctx *dctx = NULL;
+	bool ok = buf && in && !LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION));
+	int y = 0;
+	size_t n = 0, pos = 0;
+	bool eof = false;
+	while (ok) {
+		if (pos == n && !eof) {
+			n = fread(in, 1, 16384, f);
+			pos = 0;
+			eof = n == 0;
+		}
+		size_t dst = cap - have, src = n - pos;
+		size_t r = LZ4F_decompress(dctx, buf + have, &dst, in + pos, &src, NULL);
+		if (LZ4F_isError(r)) {
+			log_only("%s: %s\n", b->file, LZ4F_getErrorName(r));
+			ok = false;
+			break;
+		}
+		have += dst;
+		pos += src;
+		int nrows = (int) (have / rowbytes);
+		if (nrows > b->h - y)
+			nrows = b->h - y;
+		if (nrows > 0) {
+			loading_tick((float) y / b->h);
+			rows(ctx, y, nrows, (const px_t *) buf);
+			y += nrows;
+			memmove(buf, buf + (size_t) nrows * rowbytes, have - (size_t) nrows * rowbytes);
+			have -= (size_t) nrows * rowbytes;
+		}
+		if (r == 0 || y >= b->h)
+			break;
+		if (eof && !dst && !src)
+			ok = false; /* (cut off) */
+	}
+	if (dctx)
+		LZ4F_freeDecompressionContext(dctx);
+	free(buf);
+	free(in);
+	fclose(f);
+	return ok && y == b->h;
+}
+
+/* (texture uploads: only this image's pixels are in use) */
+px_t *bitmap_px_alone(Bitmap *b)
+{
+	if (b->px || !b->dropped)
+		return bitmap_px(b);
+	int was = keep_at_least;
+	keep_at_least = 0;
+	px_t *p = bitmap_px(b);
+	keep_at_least = was;
+	return p;
 }
 
 static bool load_image_inner(Bitmap *b, const char *path);
@@ -496,7 +578,25 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 		/* (nothing else's pixels are in use while Bitmap.new loads a file:
 		 * every other file image may let go of its pixels to make room) */
 		keep_at_least = 0;
-		bool found = find_image(name, path, sizeof path), loaded = found && load_image(b, path);
+		bool found = find_image(name, path, sizeof path), loaded = false;
+		/* a big .mkxi: only its size now; the pixels when needed (textures
+		 * straight from the file: bitmap_stream_file) */
+		size_t pl = found ? strlen(path) : 0;
+		if (pl > 5 && !strcasecmp(path + pl - 5, ".mkxi")) {
+			FILE *hf = fopen(path, "rb");
+			uint32_t head[4];
+			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && head[1] == 1 && head[2] &&
+			    head[3] && head[2] <= 8192 && head[3] <= 8192 && (size_t) head[2] * head[3] * 4 >= 256 * 1024) {
+				b->w = (int) head[2];
+				b->h = (int) head[3];
+				b->dropped = true;
+				loaded = true;
+			}
+			if (hf)
+				fclose(hf);
+		}
+		if (found && !loaded)
+			loaded = load_image(b, path);
 		keep_at_least = 1;
 		if (found && !loaded) {
 			/* a .mkxi that doesn't load: the PNG */
@@ -577,6 +677,7 @@ static VALUE bitmap_dispose(VALUE self)
 	px_free(b->px, (size_t) b->w * b->h * 4);
 	b->px = NULL;
 	drop_from_full(b);
+	gpu_text_forget(b);
 	ops_free(b);
 	mem_tell_ruby();
 	return Qnil;

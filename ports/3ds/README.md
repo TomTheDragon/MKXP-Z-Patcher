@@ -328,6 +328,31 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
 - The speed display is on the bottom screen's first line (its own console
   window; the messages scroll below it).
 
+- Reset (SELECT): mkxpz_dispose_all disposes every sprite, window, plane,
+  tilemap and viewport still registered, Graphics.mkxpz_reset restores the
+  brightness and drops a pending transition, the audio stops (as mkxp-z
+  does); before, a message box in the middle of its text stayed on screen.
+- Smooth pictures (settings): the scene texture is presented with four
+  bilinear samples a quarter of a screen pixel apart, averaged with the
+  blend factors 1, 1/2, 1/3, 1/4 (a 58% shrink with one bilinear sample
+  skips pixels: jagged edges). Mipmaps (C3D_TexGenerateMipmap) were tried
+  first: the level stayed empty in Azahar (the picture went dark).
+- Big .mkxi images: Bitmap.new only reads the size (>= 256 KB); textures
+  are made straight from the file in blocks of 32 rows
+  (bitmap_stream_file), outside of drawing (queued during a frame, read
+  after it); the pixels are only loaded whole when a script needs them.
+  No 6 MB block is needed for a 1536x1024 sheet any more.
+- Loading bar: loading_tick(progress) from image loading, streaming,
+  sound decoding and load_data draws an extra frame (the last picture,
+  its window text, a 3 px bar at the top) after 150 ms without a frame,
+  every 50 ms at most.
+- The speed display is the bottom screen's last line, drawn again after
+  every other console output (libctru's scrolling of a console window
+  wiped the line next to it: flicker).
+- The profiler (mkxpz-profile) was involved in all three "random" console
+  crashes (its job sampling while Ruby builds an exception); it's for
+  diagnosis only and no longer in the test package.
+
 The game's own Ruby code is now most of the time. On a real original 3DS
 (2026-11-20, Dazed) it was 15-18 ms per frame on the maps (the emulator
 shows about half), with drawing 2-4 ms: the game ran at 45-55 frames a

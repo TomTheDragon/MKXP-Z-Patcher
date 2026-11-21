@@ -76,6 +76,10 @@ extern VALUE cBitmap, cFont;
 Bitmap *bitmap_get(VALUE v); /* raises if disposed */
 px_t *bitmap_px(Bitmap *b); /* its pixels (read again if dropped); NULL: no memory */
 void bitmap_uploaded(Bitmap *b); /* gpu.c: its texture is up to date */
+/* gpu.c: an image that has let go of its pixels, read from its .mkxi file
+ * row by row (rows: y0, n rows, their pixels); false: not possible */
+bool bitmap_stream_file(Bitmap *b, void (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
+px_t *bitmap_px_alone(Bitmap *b); /* bitmap_px when no other image's pixels are in use */
 extern unsigned bitmap_released;
 size_t heap_free(void);     /* free normal memory (memory.c) */
 /* memory.c: pixel buffers (64 KB and more in an arena of their own) */
@@ -146,6 +150,13 @@ void gpu_frame_end(void);
  * finished picture (gx, gy: the contents' origin, clip: what shows, in
  * game pixels) */
 void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity);
+void gpu_text_forget(Bitmap *b); /* bitmap.c: disposed or freed */
+/* loading bar: an extra frame (the last picture and a bar at the top) while
+ * something loads for a long time between frames */
+void gpu_loading_frame(int frozen_alpha, int brightness, float frac);
+bool gpu_in_frame(void);
+unsigned long long gpu_last_frame_end(void);
+void loading_tick(float frac); /* graphics.c; frac < 0: progress unknown */
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity);
 bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
                const Color *color, const Tone *tone);
@@ -216,6 +227,7 @@ typedef struct {
 	int show_speed;
 	int overlay;    /* game speed and memory on the bottom screen */
 	int sharp_text; /* window text drawn at the top screen's resolution */
+	int smooth;     /* the picture shrunk with mipmaps (smoother edges) */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;

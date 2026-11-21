@@ -1,6 +1,7 @@
 /* Graphics: the game's screen (in memory, at its own resolution), shown on
  * the 3DS's top screen (400x240), scaled to fit. */
 #include "engine.h"
+extern unsigned gpu_loading_frames; /* gpu.c */
 #include <3ds.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -278,12 +279,12 @@ static VALUE g_update(VALUE self)
 	} else if (t_frames == 60) {
 		unsigned used_n;
 		snprintf(speed_line, sizeof speed_line, "ms: ruby %.1f (gc %.1f, %u runs), draw %.1f, wait %.1f, other %.1f, skipped %d, "
-		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u (+%u after upload), reloaded %u, images %u (%lu KB, fiber stacks %lu KB), stack %u KB, new bitmaps %u", ms(t_script) / 60,
+		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u (+%u after upload), reloaded %u, images %u (%lu KB, fiber stacks %lu KB), stack %u KB, new bitmaps %u, loading bars %u", ms(t_script) / 60,
 		         (double) (gc_now - gc_last) / 60, (unsigned) (gc_runs - gc_runs_last), ms(t_draw) / 60, ms(t_begin) / 60,
 		         (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60, t_skipped,
 		         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (heap_free() / 1024), gpu_evictions,
 		         gpu_used_kb(&used_n), used_n, bitmap_drops, bitmap_released, bitmap_reloads, mem_px_maps, (unsigned long) (mem_px_bytes / 1024), (unsigned long) (mem_stack_bytes / 1024), stack_used_kb(),
-		         bitmaps_created - bitmaps_last);
+		         bitmaps_created - bitmaps_last, gpu_loading_frames);
 		bitmaps_last = bitmaps_created;
 		gc_last = gc_now;
 		gc_runs_last = gc_runs;
@@ -302,6 +303,37 @@ static VALUE g_update(VALUE self)
 		t_frames = 0;
 	}
 	prof_graphics_end();
+	return Qnil;
+}
+
+/* the loading bar: called while something loads; after 150 ms without a
+ * frame, an extra frame with the bar every 50 ms at most */
+static u64 last_bar;
+void loading_tick(float frac)
+{
+	if (!gpu_on || gpu_in_frame())
+		return;
+	u64 now = svcGetSystemTick(), ms_ = SYSCLOCK_ARM11 / 1000;
+	if (now - gpu_last_frame_end() < 150 * ms_ || now - last_bar < 50 * ms_)
+		return;
+	last_bar = now;
+	gpu_loading_frame(gpu_frozen ? 255 : -1, brightness, frac);
+}
+static VALUE g_loading(int argc, VALUE *argv, VALUE self)
+{
+	loading_tick(argc > 0 && !NIL_P(argv[0]) ? (float) num2dbl(argv[0]) : -1);
+	return Qnil;
+}
+
+/* (boot.rb, on a reset: full brightness, no transition waiting) */
+static VALUE g_reset(VALUE self)
+{
+	brightness = 255;
+	gpu_frozen = false;
+	if (frozen) {
+		free(frozen);
+		frozen = NULL;
+	}
 	return Qnil;
 }
 
@@ -448,6 +480,8 @@ void init_graphics(void)
 	mGraphics = rb_define_module("Graphics");
 	rb_define_module_function(mGraphics, "update", g_update, 0);
 	rb_define_module_function(mGraphics, "mkxpz_margin", g_margin, 0);
+	rb_define_module_function(mGraphics, "mkxpz_reset", g_reset, 0);
+	rb_define_module_function(mGraphics, "mkxpz_loading", g_loading, -1);
 	rb_define_module_function(mGraphics, "wait", g_wait, 1);
 	rb_define_module_function(mGraphics, "freeze", g_freeze, 0);
 	rb_define_module_function(mGraphics, "transition", g_transition, -1);

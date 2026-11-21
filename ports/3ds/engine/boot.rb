@@ -88,7 +88,10 @@ end
 
 module Kernel
   def load_data(filename)
+    Graphics.mkxpz_loading
     File.open(filename, 'rb') { |f| Marshal.load(f) }
+  ensure
+    Graphics.mkxpz_loading
   end
 
   def save_data(obj, filename)
@@ -109,6 +112,10 @@ module Kernel
     begin
       yield
     rescue RGSSReset
+      # as mkxp-z does: what's on the screen goes, the sound stops
+      mkxpz_dispose_all
+      Graphics.mkxpz_reset
+      Audio.bgm_stop; Audio.bgs_stop; Audio.me_stop; Audio.se_stop
       GC.start
       retry
     end

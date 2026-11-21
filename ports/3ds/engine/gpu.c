@@ -372,6 +372,54 @@ static bool tex_init(GpuTex *g)
 	return true;
 }
 
+static bool in_frame;
+static unsigned long long last_frame_end;
+bool gpu_in_frame(void) { return in_frame; }
+unsigned long long gpu_last_frame_end(void) { return last_frame_end; }
+
+/* big images read straight into their textures (bitmap_stream_file) wait
+ * until the frame is done: then the loading bar can show (they appear a
+ * frame later) */
+static Bitmap *pending[32];
+static int npending;
+
+/* rows y0 .. y0+n-1 of the bitmap (px: those rows, stride pixels apart)
+ * into the texture pieces: RGBA8 in 8x8 tiles (Morton order inside); the
+ * GPU reads memory row r at v = 1 - r / height, so bitmap row y goes to
+ * row y */
+typedef struct { GpuTex *g; u32 alpha_or; } UploadCtx;
+static void upload_rows(UploadCtx *u, int y0, int n, const px_t *px, int stride)
+{
+	GpuTex *g = u->g;
+	u32 alpha_or = u->alpha_or;
+	for (int k = 0; k < g->nx * g->ny; k++) {
+		int i = k % g->nx, j = k / g->nx, x0 = g->xs[i], pw = g->xs[i + 1] - x0;
+		int ya = y0 > g->ys[j] ? y0 : g->ys[j], yb = y0 + n < g->ys[j + 1] ? y0 + n : g->ys[j + 1];
+		if (ya >= yb)
+			continue;
+		u32 *dst = g->tex[k].data;
+		int tw = g->tex[k].width;
+		for (int y = ya; y < yb; y++) {
+			int ty = y - g->ys[j];
+			const px_t *src = px + (size_t) (y - y0) * stride + x0;
+			u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
+			u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
+			for (int x = 0; x < pw; x++) {
+				u32 mx = (x & 1) | ((x & 2) << 1) | ((x & 4) << 2);
+				dst[rowbase + ((u32) (x >> 3) << 6) + (mx | my)] = __builtin_bswap32(src[x]);
+				alpha_or |= src[x];
+			}
+		}
+	}
+	u->alpha_or = alpha_or;
+}
+
+static void upload_rows_cb(void *ctx, int y0, int n, const px_t *px)
+{
+	UploadCtx *u = ctx;
+	upload_rows(u, y0, n, px, u->g->w);
+}
+
 /* the bitmap's texture, uploaded if the bitmap changed */
 static GpuTex *texture_of(Bitmap *b)
 {
@@ -424,31 +472,33 @@ static GpuTex *texture_of(Bitmap *b)
 		g->h = b->h;
 		b->gpu = g;
 	}
-	if (!bitmap_px(b))
-		return NULL;
 	u64 t_up = svcGetSystemTick();
 	gpu_uploads++;
 	gpu_upload_px += (unsigned) (b->w * b->h);
-	/* RGBA8 in 8x8 tiles (Morton order inside); the GPU reads memory row r
-	 * at v = 1 - r / height, so bitmap row y goes to row y */
-	u32 alpha_or = 0;
-	for (int k = 0; k < g->nx * g->ny; k++) {
-		int i = k % g->nx, j = k / g->nx, x0 = g->xs[i], pw = g->xs[i + 1] - x0;
-		u32 *dst = g->tex[k].data;
-		int tw = g->tex[k].width;
-		for (int y = g->ys[j]; y < g->ys[j + 1]; y++) {
-			int ty = y - g->ys[j];
-			const px_t *src = b->px + (size_t) y * b->w + x0;
-			u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
-			u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
-			for (int x = 0; x < pw; x++) {
-				u32 mx = (x & 1) | ((x & 2) << 1) | ((x & 4) << 2);
-				dst[rowbase + ((u32) (x >> 3) << 6) + (mx | my)] = __builtin_bswap32(src[x]);
-				alpha_or |= src[x];
-			}
-		}
-		C3D_TexFlush(&g->tex[k]);
+	UploadCtx up = { g, 0 };
+	/* an image without its pixels: straight from its file, in rows; else
+	 * from the pixels (read again if needed: only this image's are in use) */
+	if (in_frame && !b->px && b->dropped && npending < 32) {
+		/* (read after the frame: gpu_frame_end) */
+		bool there = false;
+		for (int i = 0; i < npending && !there; i++)
+			there = pending[i] == b;
+		if (!there)
+			pending[npending++] = b;
+		gpu_uploads--;
+		gpu_upload_px -= (unsigned) (b->w * b->h);
+		return NULL;
 	}
+	bool streamed = !b->px && b->dropped && bitmap_stream_file(b, upload_rows_cb, &up);
+	if (!streamed) {
+		if (!bitmap_px_alone(b))
+			return NULL;
+		up.alpha_or = 0;
+		upload_rows(&up, 0, b->h, b->px, b->w);
+	}
+	for (int k = 0; k < g->nx * g->ny; k++)
+		C3D_TexFlush(&g->tex[k]);
+	u32 alpha_or = up.alpha_or;
 	g->transparent = (alpha_or >> 24) == 0;
 	b->gpu_version = b->version + 1;
 	live_touch(g);
@@ -608,6 +658,7 @@ void gpu_frame_begin(void)
 void gpu_frame_begin_sync(bool sync)
 {
 	C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0);
+	in_frame = true;
 	frame_no++;
 	/* the GPU is done with the last frame: free textures of disposed bitmaps */
 	for (int i = 0; i < ntrash; i++) {
@@ -681,6 +732,7 @@ void gpu_scene_begin(int which)
 /* a scene texture onto the top screen, scaled with filtering */
 static void present_tex(int which, float alpha)
 {
+
 	set_blend(0);
 	set_tev(true, NULL, NULL);
 	if (settings.colors) {
@@ -705,7 +757,21 @@ static void present_tex(int which, float alpha)
 	C3D_TexBind(0, &scene_tex[which]);
 	int pw = game_w + 2 * gpu_margin;
 	float u1 = (float) pw / SCENE_W, v1 = (float) game_h / SCENE_H;
-	quad(off_x, off_y, off_x + pw * scale_x, off_y + game_h * scale_y, 0, 0, u1, v1, alpha, 0, 0, 0);
+	float x0 = off_x, y0 = off_y, x1 = off_x + pw * scale_x, y1 = off_y + game_h * scale_y;
+	if (which == 0 && settings.smooth && scale_y < 0.9f) {
+		/* smooth (settings: "Smooth pictures"): four samples a quarter of a
+		 * screen pixel apart, averaged (blend 1, 1/2, 1/3, 1/4); each screen
+		 * pixel then covers its ~1.7 game pixels instead of a bilinear
+		 * sample skipping some (jagged edges on pictures and faces) */
+		static const float d[4][2] = { { -0.25f, -0.25f }, { 0.25f, 0.25f }, { 0.25f, -0.25f }, { -0.25f, 0.25f } };
+		float du = 1.0f / (scale_x * SCENE_W), dv = 1.0f / (scale_y * SCENE_H);
+		for (int k = 0; k < 4; k++) {
+			float ou = d[k][0] * du, ov = d[k][1] * dv;
+			quad(x0, y0, x1, y1, ou, -ov, u1 + ou, v1 - ov, k ? 1.0f / (k + 1) : alpha, 0, 0, 0);
+		}
+		return;
+	}
+	quad(x0, y0, x1, y1, 0, 0, u1, v1, alpha, 0, 0, 0);
 }
 
 /* frozen_alpha: -1 just the picture; 0..254 the frozen picture over it
@@ -736,6 +802,48 @@ void gpu_present(int frozen_alpha, int brightness)
 void gpu_frame_end(void)
 {
 	C3D_FrameEnd(0);
+	in_frame = false;
+	last_frame_end = svcGetSystemTick();
+	/* the big images that waited: their textures now */
+	for (int i = 0; i < npending; i++)
+		texture_of(pending[i]);
+	npending = 0;
+}
+
+void gpu_text_forget(Bitmap *b)
+{
+	for (int i = 0; i < ntext_jobs; i++)
+		if (text_jobs[i].cont == b)
+			text_jobs[i--] = text_jobs[--ntext_jobs];
+	for (int i = 0; i < npending; i++)
+		if (pending[i] == b)
+			pending[i--] = pending[--npending];
+}
+
+/* the loading bar: the last picture again (with its window text) and a bar
+ * at the top edge (frac < 0: a moving piece) */
+unsigned gpu_loading_frames; /* (for the log) */
+void gpu_loading_frame(int frozen_alpha, int brightness, float frac)
+{
+	if (!gpu_on || in_frame)
+		return;
+	gpu_loading_frames++;
+	C3D_FrameBegin(0);
+	in_frame = true;
+	gpu_present(frozen_alpha, brightness);
+	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
+	Color back = { 0, 0, 0, 255 }, bar = { 120, 200, 255, 255 };
+	gpu_fill(&c, (Rect) { 0, 0, 400, 3 }, &back, 160);
+	if (frac >= 0) {
+		int w = (int) (400 * (frac > 1 ? 1 : frac));
+		if (w > 0)
+			gpu_fill(&c, (Rect) { 0, 0, w, 3 }, &bar, 255);
+	} else {
+		int x = (int) ((svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)) / 3 % 500) - 100;
+		gpu_fill(&c, (Rect) { x, 0, 100, 3 }, &bar, 255);
+	}
+	C3D_FrameEnd(0);
+	in_frame = false;
 }
 
 /* --- many quads from one bitmap (tilemaps): set up once, then gpu_tile */

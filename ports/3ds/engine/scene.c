@@ -182,6 +182,26 @@ void element_unregister(Element *e)
 		}
 }
 
+/* the reset (SELECT, like F12): every sprite, window, plane, tilemap and
+ * viewport still there is disposed, as in mkxp-z (the game's objects are
+ * simply dropped; until the garbage collector freed them they stayed on the
+ * screen, e.g. a message box in the middle of its text) */
+static VALUE dispose_all(VALUE self)
+{
+	(void) self;
+	VALUE all = rb_ary_new();
+	for (Element *e = elements; e; e = e->next)
+		if (!RB_SPECIAL_CONST_P(e->self) && !RTEST(rb_ary_includes(all, e->self)))
+			rb_ary_push(all, e->self);
+	ID id_dispose = rb_intern("dispose"), id_disposed = rb_intern("disposed?");
+	for (long i = 0; i < RARRAY_LEN(all); i++) {
+		VALUE o = RARRAY_AREF(all, i);
+		if (rb_respond_to(o, id_disposed) && !RTEST(rb_funcall(o, id_disposed, 0)))
+			rb_funcall(o, id_dispose, 0);
+	}
+	return Qnil;
+}
+
 static int by_z(const void *a, const void *b)
 {
 	const Element *x = *(Element *const *) a, *y = *(Element *const *) b;
@@ -634,6 +654,7 @@ void scene_draw(Canvas *c)
 
 void init_scene(void)
 {
+	rb_define_global_function("mkxpz_dispose_all", dispose_all, 0);
 	cViewport = rb_define_class("Viewport", rb_cObject);
 	rb_define_alloc_func(cViewport, viewport_alloc);
 	rb_define_method(cViewport, "initialize", viewport_init, -1);

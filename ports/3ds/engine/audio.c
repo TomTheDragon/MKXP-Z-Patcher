@@ -355,6 +355,7 @@ static Sound *sound_load(const char *name)
 	long cap = 44100, n = 0;
 	int16_t *tmp = malloc(cap * src.channels * 2);
 	while (tmp) {
+		loading_tick(-1);
 		if (n == cap) {
 			int16_t *g = realloc(tmp, cap * 2 * src.channels * 2);
 			if (!g)

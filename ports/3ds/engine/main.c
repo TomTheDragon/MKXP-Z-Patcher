@@ -357,24 +357,70 @@ static void tee_stderr(void)
 	devoptab_list[STD_ERR] = &err_tab;
 }
 
-/* The bottom screen: its first line is the speed display (status_line),
- * the rest the messages (they scroll below it) */
+/* The bottom screen: its last line is the speed display (status_line),
+ * the rest the messages (they scroll above it) */
 static PrintConsole con_log, con_status;
 
+static void guard_status_line(void);
 static void console_init(void)
 {
 	consoleInit(GFX_BOTTOM, &con_log);
 	con_status = con_log;
-	consoleSetWindow(&con_status, 0, 0, 40, 1);
-	consoleSetWindow(&con_log, 0, 1, 40, 29);
+	/* (the status at the bottom: libctru's scrolling of a console window
+	 * also moved the line just above it, and the speed display flickered) */
+	consoleSetWindow(&con_status, 0, 29, 40, 1);
+	consoleSetWindow(&con_log, 0, 0, 40, 29);
 	consoleSelect(&con_log);
+	guard_status_line();
+}
+
+static char status_text[48];
+static bool in_status;
+
+static const devoptab_t *out_orig;
+
+/* (straight to the console's device, not through stdio: this also runs
+ * from inside stdout's own writes) */
+static void status_draw(void)
+{
+	if (!out_orig || !out_orig->write_r)
+		return;
+	char line[64];
+	int n = snprintf(line, sizeof line, "\x1b[1;1H\x1b[7m%-39.39s\x1b[0m", status_text);
+	in_status = true;
+	consoleSelect(&con_status);
+	out_orig->write_r(_REENT, NULL, line, (size_t) n);
+	consoleSelect(&con_log);
+	in_status = false;
 }
 
 void status_line(const char *text)
 {
-	consoleSelect(&con_status);
-	printf("\x1b[1;1H\x1b[7m%-39.39s\x1b[0m", text ? text : "");
-	consoleSelect(&con_log);
+	snprintf(status_text, sizeof status_text, "%s", text ? text : "");
+	status_draw();
+}
+
+/* every other output to the bottom screen is followed by the status line
+ * again (libctru's scrolling of the message window also wiped the line
+ * next to it, and the speed display flickered) */
+static devoptab_t out_tab;
+
+static ssize_t out_write(struct _reent *r, void *fd, const char *ptr, size_t len)
+{
+	ssize_t n = out_orig->write_r ? out_orig->write_r(r, fd, ptr, len) : (ssize_t) len;
+	if (!in_status && status_text[0])
+		status_draw();
+	return n;
+}
+
+static void guard_status_line(void)
+{
+	out_orig = devoptab_list[STD_OUT];
+	if (!out_orig || !out_orig->write_r)
+		return;
+	out_tab = *out_orig;
+	out_tab.write_r = out_write;
+	devoptab_list[STD_OUT] = &out_tab;
 }
 
 int main(int argc, char **argv)
