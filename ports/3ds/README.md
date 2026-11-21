@@ -369,6 +369,18 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   Game.exe's icon (48x48) in the SMDH (replaced in place: the 3DSX
   extended header says where it is). The engine runs the game next to the
   .3dsx, so each game has its own folder and app.
+- Sparse textures (gpu.c): images from files of 4 MB and more get their
+  512x512 pieces only when drawn (draw_pieces marks them, sparse_fill
+  reads them after the frame); pieces not drawn in the frame make room
+  when the linear memory runs out. Changed's 3072x2048 character sheets
+  (24 MB) need one 1 MB piece per shown cell; Dazed's 1536x1024 sheets
+  dropped from 14.4 to 9.3 MB of textures on a crowded map.
+- Games without a "Main" section (scripts from files through a loader,
+  e.g. Changed with the RGSS Script Editor loader): boot.rb's preparations
+  (and mkxpz-test.rb) run at the first Graphics.update / freeze /
+  transition instead (Graphics.mkxpz_setup_later).
+- Tested with a second game: Changed (VX, 2026-11-21): title, intro, mode
+  choice, saving and loading, walking, messages at full speed in Azahar.
 - Battery icon (battery.c, drawn last in gpu_present): mcu::HWC's
   percentage when it fits ptm:u's 0..5 step (Azahar's MCU answers with
   the step), else the step; asked every 2 s; charging from ptm:u.

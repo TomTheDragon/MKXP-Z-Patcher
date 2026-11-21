@@ -451,13 +451,18 @@ def mkxpz_run_scripts
     $mkxpz_sections[file] = $mkxpz_sections.key?(file) ? nil : s[3]
   end
   fast = true
+  # no "Main" section (the scripts come from files through a loader, e.g.
+  # Changed): the preparations at the first Graphics.update / freeze /
+  # transition instead (graphics.c), when the loader has defined everything
+  unless $RGSS_SCRIPTS.any? { |s| s[1].to_s.force_encoding(Encoding::UTF_8).strip == 'Main' }
+    $mkxpz_late_test = test
+    Graphics.mkxpz_setup_later
+    fast = test = false
+  end
   $RGSS_SCRIPTS.each_with_index do |s, i|
     name = s[1].to_s.force_encoding(Encoding::UTF_8)
     if fast && name.strip == 'Main'
-      mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
-      mkxpz_fast_setup_events unless File.exist?('mkxpz-no-fast') || File.exist?('mkxpz-no-fast-events')
-      mkxpz_wide_setup
-      mkxpz_save_probe_setup
+      mkxpz_prepare
       fast = false
     end
     # for testing: mkxpz-test.rb in the game folder, before Main (which doesn't return)
@@ -467,4 +472,17 @@ def mkxpz_run_scripts
     end
     eval(s[3], TOPLEVEL_BINDING, name.empty? ? "Section#{i}" : name)
   end
+end
+
+def mkxpz_prepare
+  mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
+  mkxpz_fast_setup_events unless File.exist?('mkxpz-no-fast') || File.exist?('mkxpz-no-fast-events')
+  mkxpz_wide_setup
+  mkxpz_save_probe_setup
+end
+
+def mkxpz_late_setup
+  mkxpz_log("scripts from a loader: prepared at the first frame")
+  mkxpz_prepare
+  eval(File.read('mkxpz-test.rb'), TOPLEVEL_BINDING, 'mkxpz-test.rb') if $mkxpz_late_test
 end

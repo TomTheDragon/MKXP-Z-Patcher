@@ -255,8 +255,26 @@ static size_t gc_ms(void)
 	return rb_gc_stat(key);
 }
 
+/* games whose scripts come from files through a loader (no "Main"
+ * section, e.g. Changed): boot.rb's preparations run at the first
+ * Graphics.update / freeze / transition, when all scripts are loaded */
+static bool setup_later;
+static void late_setup(void)
+{
+	if (setup_later) {
+		setup_later = false;
+		rb_funcall(rb_cObject, rb_intern("mkxpz_late_setup"), 0);
+	}
+}
+static VALUE g_setup_later(VALUE self)
+{
+	setup_later = true;
+	return Qnil;
+}
+
 static VALUE g_update(VALUE self)
 {
+	late_setup();
 	overlay_frames++;
 	overlay_text();
 	mem_tell_ruby();
@@ -367,6 +385,7 @@ static VALUE g_wait(VALUE self, VALUE n)
 
 static VALUE g_freeze(VALUE self)
 {
+	late_setup();
 	if (gpu_on) {
 		if (!gpu_frozen) {
 			gpu_frame_begin();
@@ -393,6 +412,7 @@ static VALUE load_bitmap(VALUE name)
 /* Graphics.transition(duration = 10, filename = "", vague = 40) */
 static VALUE g_transition(int argc, VALUE *argv, VALUE self)
 {
+	late_setup();
 	int dur = argc > 0 ? num2int(argv[0]) : (rgss_version >= 2 ? 10 : 8);
 	/* as in RGSS (and mkxp-z): a transition ends a fade-out, so the scene
 	 * after the game over screen isn't black */
@@ -497,6 +517,7 @@ void init_graphics(void)
 	alloc_screen(rgss_version >= 2 ? 544 : 640, rgss_version >= 2 ? 416 : 480);
 	mGraphics = rb_define_module("Graphics");
 	rb_define_module_function(mGraphics, "update", g_update, 0);
+	rb_define_module_function(mGraphics, "mkxpz_setup_later", g_setup_later, 0);
 	rb_define_module_function(mGraphics, "mkxpz_margin", g_margin, 0);
 	rb_define_module_function(mGraphics, "mkxpz_reset", g_reset, 0);
 	rb_define_module_function(mGraphics, "mkxpz_loading", g_loading, -1);
