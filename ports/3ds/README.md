@@ -359,6 +359,16 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (CFGU_GetSystemModel). Azahar shows only the left 400 columns.
 - Speed display: drawn into the bottom framebuffer (rows 0-2, the console
   font at 2x for "Speed"), the message console below it.
+- Drawing order as in RGSS2/3 and mkxp-z: by z, then (sprites) by y, then
+  by creation (Element.sort_y); characters and objects of the same priority
+  overlapped in creation order before.
+- Frame skip: 0 off, 1..5 auto with at most that many skipped pictures in
+  a row (the lateness that is still caught up grows with it).
+- Packaging: `tools/make-package.py [--icon <picture>] <game> <mkxpz.3dsx>
+  [<out>]` writes `<Title>.3dsx` with the game's title (Game.ini) and
+  Game.exe's icon (48x48) in the SMDH (replaced in place: the 3DSX
+  extended header says where it is). The engine runs the game next to the
+  .3dsx, so each game has its own folder and app.
 - Battery icon (battery.c, drawn last in gpu_present): mcu::HWC's
   percentage when it fits ptm:u's 0..5 step (Azahar's MCU answers with
   the step), else the step; asked every 2 s; charging from ptm:u.

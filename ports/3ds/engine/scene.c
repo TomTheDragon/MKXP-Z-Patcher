@@ -207,6 +207,11 @@ static int by_z(const void *a, const void *b)
 	const Element *x = *(Element *const *) a, *y = *(Element *const *) b;
 	if (x->z != y->z)
 		return x->z < y->z ? -1 : 1;
+	/* same z: by y (sprites; everything else counts as 0), as RGSS2/3 and
+	 * mkxp-z do: characters lower on the screen in front */
+	int ya = x->sort_y ? *x->sort_y : 0, yb = y->sort_y ? *y->sort_y : 0;
+	if (ya != yb)
+		return ya < yb ? -1 : 1;
 	return x->id < y->id ? -1 : x->id > y->id;
 }
 
@@ -429,6 +434,7 @@ static VALUE sprite_init(int argc, VALUE *argv, VALUE self)
 	s->bush_opacity = 128;
 	s->zoom_x = s->zoom_y = 1.0;
 	s->el.draw = sprite_draw;
+	s->el.sort_y = &s->y;
 	element_register(&s->el, self, vp);
 	return self;
 }

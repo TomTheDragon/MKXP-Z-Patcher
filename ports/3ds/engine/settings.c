@@ -10,7 +10,7 @@ Settings settings = {
 	.sound_volume = 100,
 	.buttons = 0,      /* A: confirm, B: cancel, Y: run, L: speed-up */
 	.screen = 0,       /* fit */
-	.frame_skip = 1,   /* auto */
+	.frame_skip = 1,   /* auto, at most 1 picture in a row (0 off, up to 5) */
 	.show_speed = 1,
 	.overlay = 1,
 	.sharp_text = 1,
@@ -35,7 +35,7 @@ void settings_load(void)
 		else if (sscanf(line, "sound_volume=%d", &v) == 1) settings.sound_volume = CLAMP(v, 0, 100);
 		else if (sscanf(line, "buttons=%d", &v) == 1) settings.buttons = CLAMP(v, 0, 1);
 		else if (sscanf(line, "screen=%d", &v) == 1) settings.screen = v == 1 ? 1 : 0; /* (the old 1:1 mode: fit) */
-		else if (sscanf(line, "frame_skip=%d", &v) == 1) settings.frame_skip = CLAMP(v, 0, 1);
+		else if (sscanf(line, "frame_skip=%d", &v) == 1) settings.frame_skip = CLAMP(v, 0, 5);
 		else if (sscanf(line, "show_speed=%d", &v) == 1) settings.show_speed = CLAMP(v, 0, 1);
 		else if (sscanf(line, "overlay=%d", &v) == 1) settings.overlay = CLAMP(v, 0, 1);
 		else if (sscanf(line, "sharp_text=%d", &v) == 1) settings.sharp_text = CLAMP(v, 0, 1);
@@ -64,7 +64,7 @@ enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SHARP, I_SMOOTH,
 
 static void show(int sel)
 {
-	static const char *const buttons[] = { "A ok B back Y run L fast", "B ok A back Y run L/R pg" };
+	static const char *const buttons[] = { "A:ok B:back L:speed-up", "B:ok A:back L/R:page" };
 	static const char *const screens[] = { "fit (whole picture)", "stretch (fill)" };
 	char v[I_COUNT][40];
 	snprintf(v[I_MUSIC], 40, "%d%%", settings.music_volume);
@@ -79,8 +79,11 @@ static void show(int sel)
 	snprintf(v[I_SMOOTH], 40, "%s", settings.smooth ? "on (smoother edges)" : "off");
 	snprintf(v[I_BATTERY], 40, "%s", settings.battery ? "on (top left)" : "off");
 	snprintf(v[I_COLORS], 40, "%s", settings.colors ? "vivid (more contrast)" : "normal");
-	snprintf(v[I_SKIP], 40, "%s", settings.frame_skip ? "auto (keeps game speed)" : "off");
-	snprintf(v[I_OVERLAY], 40, "%s", settings.overlay ? "on (bottom line)" : "off");
+	if (settings.frame_skip)
+		snprintf(v[I_SKIP], 40, "auto, max %d in a row", settings.frame_skip);
+	else
+		snprintf(v[I_SKIP], 40, "off");
+	snprintf(v[I_OVERLAY], 40, "%s", settings.overlay ? "on (at the top)" : "off");
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
 	v[I_RESET][0] = v[I_BACK][0] = 0;
 	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Colors", "Frame skip",
@@ -132,7 +135,7 @@ bool settings_menu(void)
 			case I_SMOOTH: settings.smooth ^= 1; break;
 			case I_BATTERY: settings.battery ^= 1; break;
 			case I_COLORS: settings.colors ^= 1; break;
-			case I_SKIP: settings.frame_skip ^= 1; break;
+			case I_SKIP: settings.frame_skip = CLAMP(settings.frame_skip + dir, 0, 5); break;
 			case I_OVERLAY: settings.overlay ^= 1; break;
 			case I_SPEED: settings.show_speed ^= 1; break;
 			}

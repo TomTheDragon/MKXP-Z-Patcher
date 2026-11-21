@@ -172,7 +172,7 @@ void gpu_flush(const void *p, size_t bytes);
 void gpu_tile(float sx, float sy, float sw, float sh, float dx, float dy, float dw, float dh);
 
 /* scene elements: sprites, planes, windows, tilemaps; inside a viewport or
- * on the screen. Sorted by z, then by creation. */
+ * on the screen. Sorted by z, then by a sprite's y, then by creation. */
 typedef struct Element Element;
 struct Element {
 	int z;
@@ -181,6 +181,7 @@ struct Element {
 	VALUE viewport;   /* Viewport or nil */
 	bool is_viewport;
 	int z_offset;     /* tilemap layers above characters */
+	const int *sort_y; /* sprites: their y (same z: the lower one in front, as in RGSS2/3) */
 	bool wide;        /* mkxpz_wide: may use the screen's sides (gpu_margin) */
 	void (*draw)(Element *e, Canvas *c, int ox, int oy);
 	void (*draw_z)(Element *e, Canvas *c, int ox, int oy, int layer);

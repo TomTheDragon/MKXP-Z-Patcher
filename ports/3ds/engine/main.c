@@ -369,7 +369,7 @@ static void console_init(void)
 	/* the speed display at the top (status_draw), an empty row, then the
 	 * messages (libctru's scrolling of a console window also wiped the line
 	 * next to it: the empty row, and the display drawn again after output) */
-	consoleSetWindow(&con_log, 0, STATUS_ROWS + 1, 40, 30 - STATUS_ROWS - 1);
+	consoleSetWindow(&con_log, 0, STATUS_ROWS + 2, 40, 30 - STATUS_ROWS - 2);
 	consoleSelect(&con_log);
 	guard_status_line();
 }
@@ -383,13 +383,21 @@ static const devoptab_t *out_orig;
  * into its framebuffer with the console's font: "Speed 100%" twice as big,
  * the parts after it ("|" between them) at normal size beside it, one per
  * line. (status_text "": the area cleared.) */
-static void status_pixel(u16 *fb, int x, int y, u16 c)
+/* drawn into a buffer of its own (the area column by column, as in the
+ * framebuffer) and copied over only where it differs: drawing straight onto
+ * the screen showed the cleared bar for a moment, many times while the
+ * settings menu printed its lines (flicker) */
+#define STATUS_H (STATUS_ROWS * 8)
+static u16 status_px[320 * STATUS_H];
+static bool status_dirty = true;
+
+static void status_pixel(int x, int y, u16 c)
 {
-	if (x >= 0 && x < 320 && y >= 0 && y < 240)
-		fb[x * 240 + (239 - y)] = c;
+	if (x >= 0 && x < 320 && y >= 0 && y < STATUS_H)
+		status_px[x * STATUS_H + (STATUS_H - 1 - y)] = c;
 }
 
-static void status_text_at(u16 *fb, int x, int y, const char *t, int len, int scale, u16 fg)
+static void status_text_at(int x, int y, const char *t, int len, int scale, u16 fg)
 {
 	const ConsoleFont *f = &con_log.font;
 	for (int i = 0; i < len; i++, x += 8 * scale) {
@@ -402,8 +410,30 @@ static void status_text_at(u16 *fb, int x, int y, const char *t, int len, int sc
 				if (g[r] & (0x80 >> b))
 					for (int sy = 0; sy < scale; sy++)
 						for (int sx = 0; sx < scale; sx++)
-							status_pixel(fb, x + b * scale + sx, y + r * scale + sy, fg);
+							status_pixel(x + b * scale + sx, y + r * scale + sy, fg);
 	}
+}
+
+static void status_render(void)
+{
+	const u16 back = 0x18e3, white = 0xffff, grey = 0xbdf7; /* RGB565 */
+	bool on = status_text[0] != 0;
+	for (int i = 0; i < 320 * STATUS_H; i++)
+		status_px[i] = on ? back : 0;
+	if (on) {
+		const char *bar = strchr(status_text, '|');
+		int n = bar ? (int) (bar - status_text) : (int) strlen(status_text);
+		status_text_at(4, 4, status_text, n, 2, white);
+		int y = 4;
+		while (bar && y < STATUS_H) {
+			const char *p = bar + 1;
+			bar = strchr(p, '|');
+			int m = bar ? (int) (bar - p) : (int) strlen(p);
+			status_text_at(320 - 4 - 8 * m, y, p, m, 1, grey);
+			y += 9;
+		}
+	}
+	status_dirty = false;
 }
 
 static void status_draw(void)
@@ -412,30 +442,26 @@ static void status_draw(void)
 	if (!fb)
 		return;
 	in_status = true;
-	const u16 back = 0x18e3, white = 0xffff, grey = 0xbdf7; /* RGB565 */
-	bool on = status_text[0] != 0;
-	for (int x = 0; x < 320; x++)
-		for (int y = 0; y < STATUS_ROWS * 8; y++)
-			status_pixel(fb, x, y, on ? back : 0);
-	if (on) {
-		const char *bar = strchr(status_text, '|');
-		int n = bar ? (int) (bar - status_text) : (int) strlen(status_text);
-		status_text_at(fb, 4, 4, status_text, n, 2, white);
-		int y = 4;
-		while (bar && y < STATUS_ROWS * 8) {
-			const char *p = bar + 1;
-			bar = strchr(p, '|');
-			int m = bar ? (int) (bar - p) : (int) strlen(p);
-			status_text_at(fb, 320 - 4 - 8 * m, y, p, m, 1, grey);
-			y += 9;
-		}
+	if (status_dirty)
+		status_render();
+	/* (the area: the last STATUS_H pixels of each 240-pixel column) */
+	for (int x = 0; x < 320; x++) {
+		u16 *col = fb + x * 240 + (240 - STATUS_H);
+		const u16 *src = status_px + x * STATUS_H;
+		if (memcmp(col, src, STATUS_H * 2))
+			memcpy(col, src, STATUS_H * 2);
 	}
 	in_status = false;
 }
 
 void status_line(const char *text)
 {
+	if (!strcmp(status_text, text ? text : "")) {
+		status_draw();
+		return;
+	}
 	snprintf(status_text, sizeof status_text, "%s", text ? text : "");
+	status_dirty = true;
 	status_draw();
 }
 

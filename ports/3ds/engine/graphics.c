@@ -217,14 +217,14 @@ static void gpu_frame_with(int frozen_alpha)
 	due = due ? due + period : now;
 	if (now > due + 8 * period)
 		due = now; /* far behind (loading...): start counting again */
-	else if (now > due + 3 * period)
+	else if (now > due + (settings.frame_skip + 2) * period)
 		due = now - period; /* the scripts themselves are too slow:
 		                         * skipping can't catch up, so the game
 		                         * runs a little slower instead */
-	/* skipped (not drawn) when 2 frames late, never 2 in a row: at least 30
-	 * pictures a second (when the scripts alone are that slow, the game
-	 * runs a little slower rather than showing only every 4th picture) */
-	if (settings.frame_skip && frozen_alpha < 0 && now > due + 2 * period && skipped_row < 1) {
+	/* skipped (not drawn) when 2 frames late, at most frame_skip (settings:
+	 * 1..5, 0 off) in a row: 1 keeps at least 30 pictures a second, more
+	 * keep the game's speed in slower scenes with fewer pictures */
+	if (settings.frame_skip && frozen_alpha < 0 && now > due + 2 * period && skipped_row < settings.frame_skip) {
 		skipped_row++;
 		t_skipped++;
 		frame_count++;
