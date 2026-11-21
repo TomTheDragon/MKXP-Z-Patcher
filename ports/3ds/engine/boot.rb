@@ -112,13 +112,29 @@ module Kernel
     begin
       yield
     rescue RGSSReset
-      # as mkxp-z does: what's on the screen goes, the sound stops
-      mkxpz_dispose_all
-      Graphics.mkxpz_reset
-      Audio.bgm_stop; Audio.bgs_stop; Audio.me_stop; Audio.se_stop
-      GC.start
+      mkxpz_reset_cleanup
       retry
     end
+  end
+
+  # as mkxp-z does on a reset: what's on the screen goes, the sound stops
+  def mkxpz_reset_cleanup
+    mkxpz_dispose_all
+    Graphics.mkxpz_reset
+    Audio.bgm_stop; Audio.bgs_stop; Audio.me_stop; Audio.se_stop
+    GC.start
+  end
+
+  # the scripts; a reset outside rgss_main (XP and VX games have none: F12
+  # ran all their scripts again) runs them again, from inside the rescue
+  # like RGSS1/2 did: $! and $@ are set then, which scripts check so they
+  # don't alias their methods twice ("alias ... unless $@")
+  def mkxpz_run_all
+    mkxpz_run_scripts
+  rescue RGSSReset
+    mkxpz_log("reset: running the scripts again")
+    mkxpz_reset_cleanup
+    mkxpz_run_all
   end
 
   def rgss_stop
@@ -321,8 +337,17 @@ end
 # on each side than the game's screen, and the message box (only it and its
 # helper windows) reaches into those sides. Laid out again when the setting
 # changes, once the box is closed.
+# the method is boot.rb's own already (preparations applied again after a
+# reset that ran the scripts again, without the game redefining it): an
+# alias of it would call itself forever
+def mkxpz_ours?(klass, name)
+  loc = klass.instance_method(name).source_location
+  loc && loc[0] == 'boot.rb'
+end
+
 def mkxpz_wide_setup
   return unless defined?(Window_Message) && Window_Message.method_defined?(:update)
+  return if mkxpz_ours?(Window_Message, :update)
   Window_Message.class_eval do
     alias_method :mkxpz_wide_update, :update
     def update
@@ -358,7 +383,8 @@ def mkxpz_wide_setup
     end
   end
   # VX Ace's choices: at the box's right end
-  if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement)
+  if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement) &&
+     !mkxpz_ours?(Window_ChoiceList, :update_placement)
     Window_ChoiceList.class_eval do
       alias_method :mkxpz_wide_update_placement, :update_placement
       def update_placement

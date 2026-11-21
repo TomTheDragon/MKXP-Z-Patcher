@@ -45,12 +45,13 @@ static C3D_RenderTarget *scene_rt[2];
  * (the GPU's rule): a 544x544 picture as 512+32 by 512+32 needs 1.1 MB,
  * as one 1024x1024 texture 4 MB (which often didn't fit).
  *
- * Sparse textures: big images from files (4 MB and more, e.g. Changed's
- * 3072x2048 character sheets: 24 MB, more than all of the linear memory)
- * get their pieces only when a piece is drawn: it is marked (want), and
- * after the frame the marked pieces are read from the file (a sprite shows
- * one 256x256 cell of such a sheet: one 1 MB piece instead of 24 MB).
- * Pieces not drawn lately make room when memory runs out. */
+ * Sparse textures: big images (4 MB and more, e.g. Changed's 3072x2048
+ * character sheets: 24 MB, more than all of the linear memory) get their
+ * pieces only when a piece is drawn: it is marked (want), and after the
+ * frame the marked pieces are filled, from the pixels when the image has
+ * them, else from its file (a sprite shows one 256x256 cell of such a
+ * sheet: one 1 MB piece instead of 24 MB). Pieces not drawn lately make
+ * room when memory runs out. An image drawn into refills its pieces. */
 #define MAXP 8
 #define SPARSE_MIN (4u * 1024 * 1024)
 typedef struct GpuTex GpuTex;
@@ -551,7 +552,9 @@ static void sparse_fill(GpuTex *g, Bitmap *b)
 	u64 t_up = svcGetSystemTick();
 	gpu_uploads++;
 	UploadCtx up = { g, 0, made };
-	if (!bitmap_stream_file(b, upload_rows_cb, &up))
+	if (b->px)
+		upload_rows(&up, 0, b->h, b->px, b->w);
+	else if (!bitmap_stream_file(b, upload_rows_cb, &up))
 		log_only("%s: couldn't read pieces of it\n", b->file ? b->file : "(image)");
 	for (int k = 0; k < g->nx * g->ny; k++)
 		if ((made >> k) & 1) {
@@ -567,13 +570,25 @@ static GpuTex *texture_of(Bitmap *b)
 {
 	GpuTex *g = b->gpu;
 	if (g && g->sparse) {
-		if (!b->px && b->dropped && g->w == b->w && g->h == b->h && b->gpu_version == b->version + 1) {
+		if (g->w == b->w && g->h == b->h && (b->px || b->dropped)) {
 			live_touch(g);
+			if (b->gpu_version != b->version + 1) {
+				/* drawn into (it has its pixels then): the pieces there
+				 * filled again now, the others when they're drawn */
+				if (b->px && g->have) {
+					UploadCtx up = { g, 0, g->have };
+					upload_rows(&up, 0, b->h, b->px, b->w);
+					for (int k = 0; k < g->nx * g->ny; k++)
+						if ((g->have >> k) & 1)
+							C3D_TexFlush(&g->tex[k]);
+					gpu_uploads++;
+				}
+				b->gpu_version = b->version + 1;
+			}
 			if (!in_frame && (g->want & ~g->have))
 				sparse_fill(g, b);
 			return g;
 		}
-		/* (changed, or its pixels are loaded now: a whole texture instead) */
 		live_remove(g);
 		to_trash(g);
 		b->gpu = NULL;
@@ -587,7 +602,7 @@ static GpuTex *texture_of(Bitmap *b)
 	 * the frame (gpu_frame_end; then the loading bar can show), the texture
 	 * made only then too (one made during the frame and filled after it
 	 * came out empty after a while: characters and tiles went missing) */
-	if (!g && !b->px && b->dropped) {
+	if (!g && (b->px || b->dropped)) {
 		GpuTex t = { 0 };
 		t.nx = split_axis(b->w, t.xs);
 		t.ny = split_axis(b->h, t.ys);

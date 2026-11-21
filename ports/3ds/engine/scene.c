@@ -193,11 +193,22 @@ static VALUE dispose_all(VALUE self)
 	for (Element *e = elements; e; e = e->next)
 		if (!RB_SPECIAL_CONST_P(e->self) && !RTEST(rb_ary_includes(all, e->self)))
 			rb_ary_push(all, e->self);
-	ID id_dispose = rb_intern("dispose"), id_disposed = rb_intern("disposed?");
+	/* the engine's own dispose (Window#dispose etc.), not the game's: its
+	 * overrides also dispose other windows, which may be gone already
+	 * (Changed: "disposed window" on a reset), as mkxp-z does */
+	VALUE bases[] = { cWindow, cSprite, cPlane, cTilemap, cViewport };
+	ID id_im = rb_intern("instance_method"), id_bind_call = rb_intern("bind_call");
+	VALUE sym_dispose = ID2SYM(rb_intern("dispose")), sym_disposed = ID2SYM(rb_intern("disposed?"));
 	for (long i = 0; i < RARRAY_LEN(all); i++) {
 		VALUE o = RARRAY_AREF(all, i);
-		if (rb_respond_to(o, id_disposed) && !RTEST(rb_funcall(o, id_disposed, 0)))
-			rb_funcall(o, id_dispose, 0);
+		for (size_t k = 0; k < sizeof bases / sizeof *bases; k++) {
+			if (!bases[k] || !RTEST(rb_obj_is_kind_of(o, bases[k])))
+				continue;
+			VALUE gone = rb_funcall(rb_funcall(bases[k], id_im, 1, sym_disposed), id_bind_call, 1, o);
+			if (!RTEST(gone))
+				rb_funcall(rb_funcall(bases[k], id_im, 1, sym_dispose), id_bind_call, 1, o);
+			break;
+		}
 	}
 	return Qnil;
 }

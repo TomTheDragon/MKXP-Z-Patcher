@@ -154,7 +154,7 @@ static bool eval_source(const char *src, const char *name)
 
 static VALUE run_scripts(VALUE unused)
 {
-	return rb_funcall(rb_cObject, rb_intern("mkxpz_run_scripts"), 0);
+	return rb_funcall(rb_cObject, rb_intern("mkxpz_run_all"), 0);
 }
 
 /* "Class: message" and the first lines of the backtrace */
@@ -634,7 +634,9 @@ int main(int argc, char **argv)
 	finished = true;
 	if (log_file)
 		fclose(log_file);
-	romfsExit();
+	/* (romfs stays mounted: FreeType keeps the built-in fonts open, and
+	 * the C library closes all open files after main returns; with romfs
+	 * gone that crashed on quitting with START after an error) */
 	gfxExit();
 	return 0;
 }

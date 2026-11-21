@@ -757,12 +757,47 @@ void bitmap_blt(Bitmap *dst, int dx, int dy, Bitmap *src, Rect sr, int opacity)
 
 static Rect rect_arg(VALUE v) { return *rect_get(v); }
 
+/* blt from a big image without its pixels: the rows needed straight from
+ * its file (Changed's 3072x2048 character sheets, 24 MB as pixels, don't
+ * fit into memory; VX's windows blt characters from their sheets) */
+typedef struct { Bitmap *dst; int dx, dy, src_w; Rect sr; int opacity; } BltRows;
+static void blt_rows(void *ctx, int y0, int n, const px_t *rows)
+{
+	BltRows *c = ctx;
+	for (int i = 0; i < n; i++) {
+		int y = y0 + i;
+		if (y < c->sr.y || y >= c->sr.y + c->sr.h)
+			continue;
+		const px_t *sp = rows + (size_t) i * c->src_w + c->sr.x;
+		px_t *dp = c->dst->px + (size_t) (c->dy + y - c->sr.y) * c->dst->w + c->dx;
+		for (int x = 0; x < c->sr.w; x++)
+			dp[x] = over(dp[x], sp[x], PX_A(sp[x]) * c->opacity / 255);
+	}
+}
+
+#define BIG_SOURCE (4u * 1024 * 1024)
+static bool blt_from_file(Bitmap *d, int dx, int dy, Bitmap *src, Rect sr, int opacity)
+{
+	if (opacity <= 0 || !clip(d, &dx, &dy, &sr, src->w, src->h))
+		return true;
+	BltRows c = { d, dx, dy, src->w, sr, opacity };
+	if (!bitmap_stream_file(src, blt_rows, &c))
+		return false;
+	d->version++;
+	return true;
+}
+
 static VALUE bitmap_blt_m(int argc, VALUE *argv, VALUE self)
 {
 	if (argc < 4 || argc > 5)
 		rb_raise(rb_eArgError, "wrong number of arguments (%d for 4..5)", argc);
-	Bitmap *d = bitmap_get(self), *s = bitmap_get(argv[2]);
+	Bitmap *d = bitmap_get(self);
 	int op = argc == 5 ? CLAMP(num2int(argv[4]), 0, 255) : 255;
+	Bitmap *big = rb_check_typeddata(argv[2], &bitmap_type);
+	if (!big->disposed && !big->px && big->dropped && (size_t) big->w * big->h * 4 >= BIG_SOURCE &&
+	    blt_from_file(d, num2int(argv[0]), num2int(argv[1]), big, rect_arg(argv[3]), op))
+		return self;
+	Bitmap *s = bitmap_get(argv[2]);
 	bitmap_blt(d, num2int(argv[0]), num2int(argv[1]), s, rect_arg(argv[3]), op);
 	return self;
 }

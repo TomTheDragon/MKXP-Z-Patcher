@@ -375,6 +375,18 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   when the linear memory runs out. Changed's 3072x2048 character sheets
   (24 MB) need one 1 MB piece per shown cell; Dazed's 1536x1024 sheets
   dropped from 14.4 to 9.3 MB of textures on a crowded map.
+- Sparse textures also for big images with their pixels in memory (pieces
+  filled from the pixels; refilled when drawn into). VX windows blt from
+  character sheets, which loaded their pixels; the whole-texture path then
+  failed every frame and evicted everything else (missing graphics, slow).
+  blt from a big image without pixels streams the needed rows from its
+  file (Changed's 3072x2048 sheets don't fit into memory as pixels).
+- Reset in RGSS1/2 games (no rgss_main): mkxpz_run_all runs the scripts
+  again from inside the rescue ($! / $@ set, as scripts' "alias ... unless
+  $@" expect); the reset disposes with the engine's own dispose methods
+  (the game's overrides disposed windows twice).
+- romfs stays mounted at exit (FreeType keeps its fonts open; the C
+  library's final fclose crashed after romfsExit).
 - Games without a "Main" section (scripts from files through a loader,
   e.g. Changed with the RGSS Script Editor loader): boot.rb's preparations
   (and mkxpz-test.rb) run at the first Graphics.update / freeze /
