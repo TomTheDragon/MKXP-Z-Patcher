@@ -92,10 +92,14 @@ static bool attr_true(VALUE font, const char *name)
 	return RTEST(rb_ivar_get(font, rb_intern(name)));
 }
 
+static float text_scale = 1; /* font_draw_text_scaled */
+
 static int font_px_size(VALUE font)
 {
 	VALUE s = rb_ivar_get(font, rb_intern("@size"));
 	int n = NIL_P(s) ? 24 : num2int(s);
+	if (text_scale != 1)
+		n = (int) (n * text_scale + 0.5f);
 	return CLAMP(n, 6, 96);
 }
 
@@ -199,7 +203,9 @@ static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uin
 	g->bold = bold;
 	g->italic = italic;
 	nglyphs++;
-	if (FT_Load_Char(face, cp, FT_LOAD_DEFAULT))
+	/* small sizes (e.g. sharp window text, ~14 px): light auto-hinting
+	 * puts horizontal strokes on whole pixels */
+	if (FT_Load_Char(face, cp, size <= 18 ? FT_LOAD_TARGET_LIGHT | FT_LOAD_FORCE_AUTOHINT : FT_LOAD_DEFAULT))
 		return g; /* (no such letter: empty) */
 	if (bold)
 		FT_GlyphSlot_Embolden(face->glyph);
@@ -427,8 +433,9 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 	int ty = y + (h - m.h) / 2;
 	Rect clip = { x - 1, y - 1, w + 2, h + 2 };
 	Mask only = m;
+	int sh = text_scale < 0.75f ? 1 : 2; /* (the shadow's offset, at the scale) */
 	if (attr_true(font, "@shadow"))
-		stamp(b, &only, sw, tx + 2, ty + 2, (Color) { 0, 0, 0, 255 }, clip);
+		stamp(b, &only, sw, tx + sh, ty + sh, (Color) { 0, 0, 0, 255 }, clip);
 	if (outline && m.o) {
 		Mask o = { m.o, NULL, m.w, m.h };
 		stamp(b, &o, sw, tx, ty, font_color(font, "@out_color", (Color) { 0, 0, 0, 128 }), clip);
@@ -436,6 +443,15 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 	stamp(b, &only, sw, tx, ty, font_color(font, "@color", (Color) { 255, 255, 255, 255 }), clip);
 	free(m.a);
 	free(m.o);
+}
+
+/* the same text with the font size times scale (sharp text at the top
+ * screen's resolution: the rect is already scaled) */
+void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale)
+{
+	text_scale = scale;
+	font_draw_text(b, font, x, y, w, h, str, align);
+	text_scale = 1;
 }
 
 void init_font(void)

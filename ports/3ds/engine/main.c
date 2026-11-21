@@ -357,11 +357,31 @@ static void tee_stderr(void)
 	devoptab_list[STD_ERR] = &err_tab;
 }
 
+/* The bottom screen: its first line is the speed display (status_line),
+ * the rest the messages (they scroll below it) */
+static PrintConsole con_log, con_status;
+
+static void console_init(void)
+{
+	consoleInit(GFX_BOTTOM, &con_log);
+	con_status = con_log;
+	consoleSetWindow(&con_status, 0, 0, 40, 1);
+	consoleSetWindow(&con_log, 0, 1, 40, 29);
+	consoleSelect(&con_log);
+}
+
+void status_line(const char *text)
+{
+	consoleSelect(&con_status);
+	printf("\x1b[1;1H\x1b[7m%-39.39s\x1b[0m", text ? text : "");
+	consoleSelect(&con_log);
+}
+
 int main(int argc, char **argv)
 {
 	stack_paint();
 	gfxInitDefault();
-	consoleInit(GFX_BOTTOM, NULL);
+	console_init();
 	atexit(hold_on_exit);
 	romfsInit();
 	osSetSpeedupEnable(true); /* New 3DS: 804 MHz */

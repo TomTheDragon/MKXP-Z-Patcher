@@ -618,8 +618,57 @@ void gpu_frame_begin_sync(bool sync)
 }
 
 /* draw the scene into texture 0 (the picture) or 1 (the frozen one) */
+/* --- sharp window text: collected while the scene is drawn, drawn at the
+ * top screen's resolution on the finished picture (before a transition's
+ * frozen picture and the brightness) */
+typedef struct { Bitmap *cont; int gx, gy; Rect clip; int opacity; } TextJob;
+static TextJob text_jobs[64];
+static int ntext_jobs, scene_which;
+
+void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity)
+{
+	if (scene_which == 1) {
+		/* the frozen picture (Graphics.freeze): the text at game size into
+		 * it (that layer is let go of after the freeze) */
+		Bitmap *l = bitmap_text_layer(cont, 1, 1);
+		if (l) {
+			Canvas c = { .w = game_w, .h = game_h, .clip = clip, .gpu = true };
+			DrawOpts o = { .x = gx, .y = gy, .zx = 1, .zy = 1, .opacity = opacity };
+			gpu_draw(&c, l, (Rect) { 0, 0, l->w, l->h }, &o);
+		}
+		return;
+	}
+	if (ntext_jobs < (int) (sizeof text_jobs / sizeof *text_jobs) && opacity > 0)
+		text_jobs[ntext_jobs++] = (TextJob) { cont, gx, gy, clip, opacity };
+}
+
+static void draw_text_jobs(void)
+{
+	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
+	for (int i = 0; i < ntext_jobs; i++) {
+		TextJob *j = &text_jobs[i];
+		Bitmap *l = bitmap_text_layer(j->cont, scale_x, scale_y);
+		if (!l)
+			continue;
+		/* the contents' origin on the screen, whole pixels (sharp) */
+		int ox = (int) floorf(off_x + (j->gx + gpu_margin) * scale_x + 0.5f);
+		int oy = (int) floorf(off_y + j->gy * scale_y + 0.5f);
+		/* what shows: the clip, in the layer's pixels */
+		int x0 = (int) floorf((j->clip.x - j->gx) * scale_x), y0 = (int) floorf((j->clip.y - j->gy) * scale_y);
+		int x1 = (int) ceilf((j->clip.x + j->clip.w - j->gx) * scale_x);
+		int y1 = (int) ceilf((j->clip.y + j->clip.h - j->gy) * scale_y);
+		if (x1 <= x0 || y1 <= y0)
+			continue;
+		DrawOpts o = { .x = ox + x0, .y = oy + y0, .zx = 1, .zy = 1, .opacity = j->opacity };
+		gpu_draw(&c, l, (Rect) { x0, y0, x1 - x0, y1 - y0 }, &o);
+	}
+}
+
 void gpu_scene_begin(int which)
 {
+	scene_which = which;
+	if (which == 0)
+		ntext_jobs = 0;
 	C3D_RenderTargetClear(scene_rt[which], C3D_CLEAR_ALL, 0x000000ff, 0);
 	C3D_FrameDrawOn(scene_rt[which]);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
@@ -671,8 +720,10 @@ void gpu_present(int frozen_alpha, int brightness)
 	tev_last.valid = false;
 	cur_clip = (Rect) { -1, -1, -1, -1 };
 	cur_blend = -1;
-	if (frozen_alpha < 255)
+	if (frozen_alpha < 255) {
 		present_tex(0, 1.0f);
+		draw_text_jobs();
+	}
 	if (frozen_alpha >= 0)
 		present_tex(1, frozen_alpha / 255.0f);
 	if (brightness < 255) {
@@ -680,15 +731,6 @@ void gpu_present(int frozen_alpha, int brightness)
 		Color black = { 0, 0, 0, 255 };
 		gpu_fill(&c, c.clip, &black, 255 - brightness);
 	}
-}
-
-/* a bitmap over the finished picture (the speed display), in top screen
- * pixels, 1:1 */
-void gpu_draw_top(Bitmap *b, int x, int y)
-{
-	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
-	DrawOpts o = { .x = x, .y = y, .zx = 1, .zy = 1, .opacity = 255 };
-	gpu_draw(&c, b, (Rect) { 0, 0, b->w, b->h }, &o);
 }
 
 void gpu_frame_end(void)

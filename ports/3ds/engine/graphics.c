@@ -152,15 +152,21 @@ static u64 due;
 static int skipped_row, t_skipped;
 
 /* --- the speed display (settings: "Speed display"): game speed (game
- * frames a second against 60) and free memory, in the top left corner of
- * the top screen; drawn twice a second into a small bitmap */
-static VALUE overlay_bmp = Qnil;
+ * frames a second against 60) and free memory, on the bottom screen's
+ * first line, twice a second */
 static unsigned overlay_frames; /* Graphics.update calls since the last text */
 static u64 overlay_since;
+static bool overlay_shown;
 
 static void overlay_text(void)
 {
 	u64 now = svcGetSystemTick();
+	if (!settings.overlay) {
+		if (overlay_shown)
+			status_line("");
+		overlay_shown = false;
+		return;
+	}
 	if (!overlay_since) {
 		overlay_since = now;
 		return;
@@ -173,34 +179,13 @@ static void overlay_text(void)
 		pct = 100;
 	overlay_frames = 0;
 	overlay_since = now;
-	if (NIL_P(overlay_bmp)) {
-		overlay_bmp = bitmap_new_size(176, 15);
-		rb_gc_register_address(&overlay_bmp);
-		VALUE font = rb_funcall(overlay_bmp, rb_intern("font"), 0);
-		rb_funcall(font, rb_intern("size="), 1, INT2FIX(12));
-		rb_funcall(font, rb_intern("outline="), 1, Qfalse);
-	}
 	extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 	char text[80];
-	snprintf(text, sizeof text, "%3d%%  RAM %.1f/%lu  GFX %.1f/%lu MB", pct,
+	snprintf(text, sizeof text, "Speed %3d%%  RAM %.1f/%lu  GFX %.1f/%lu MB", pct,
 	         (heap_free() + mem_arena_free()) / 1048576.0, (unsigned long) (__ctru_heap_size >> 20),
 	         linearSpaceFree() / 1048576.0, (unsigned long) (__ctru_linear_heap_size >> 20));
-	VALUE cColorV = rb_const_get(rb_cObject, rb_intern("Color"));
-	VALUE bg[4] = { INT2FIX(0), INT2FIX(0), INT2FIX(0), INT2FIX(160) };
-	VALUE args[5] = { INT2FIX(0), INT2FIX(0), INT2FIX(176), INT2FIX(15), rb_class_new_instance(4, bg, cColorV) };
-	rb_funcall(overlay_bmp, rb_intern("clear"), 0);
-	rb_funcallv(overlay_bmp, rb_intern("fill_rect"), 5, args);
-	VALUE dt[5] = { INT2FIX(3), INT2FIX(0), INT2FIX(172), INT2FIX(15), rb_str_new_cstr(text) };
-	rb_funcallv(overlay_bmp, rb_intern("draw_text"), 5, dt);
-}
-
-static void overlay_draw(void)
-{
-	if (!settings.overlay || NIL_P(overlay_bmp))
-		return;
-	Bitmap *b = bitmap_get_maybe(overlay_bmp);
-	if (b)
-		gpu_draw_top(b, 2, 2);
+	status_line(text);
+	overlay_shown = true;
 }
 
 static void gpu_frame_with(int frozen_alpha)
@@ -234,7 +219,6 @@ static void gpu_frame_with(int frozen_alpha)
 	if (frozen_alpha < 255)
 		gpu_draw_scene(0);
 	gpu_present(frozen_alpha, brightness);
-	overlay_draw();
 	gpu_frame_end();
 	frame_count++;
 }
@@ -256,8 +240,7 @@ static size_t gc_ms(void)
 static VALUE g_update(VALUE self)
 {
 	overlay_frames++;
-	if (settings.overlay && gpu_on)
-		overlay_text();
+	overlay_text();
 	mem_tell_ruby();
 	prof_graphics_begin();
 	u64 t0 = svcGetSystemTick();
@@ -339,6 +322,7 @@ static VALUE g_freeze(VALUE self)
 			gpu_frame_begin();
 			gpu_draw_scene(1);
 			gpu_frame_end();
+			bitmap_text_layers_drop_full();
 			gpu_frozen = true;
 		}
 		return Qnil;

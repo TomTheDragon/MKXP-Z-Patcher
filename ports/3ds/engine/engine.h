@@ -54,7 +54,23 @@ typedef struct Bitmap_ {
 	unsigned file_version;
 	bool dropped;
 	struct Bitmap_ *lru_prev, *lru_next;
+	/* window contents with sharp text (settings: "Window text"): draw_text
+	 * only records the text; it's drawn at the top screen's resolution on
+	 * the finished picture (gpu.c), from a layer with only the text */
+	bool text_native;
+	struct TextOp *ops;
+	int nops, ops_cap;
+	unsigned ops_gen;        /* changes when texts are removed */
+	struct Bitmap_ *layer;   /* the text at screen size (C only, no Ruby object) */
+	unsigned layer_gen;
+	int layer_done;          /* ops already in the layer */
+	float layer_sx, layer_sy;
 } Bitmap;
+typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;
+/* the text layer at scale sx, sy (NULL: none); full: also when not native */
+Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy);
+void bitmap_text_layers_drop_full(void); /* the scale-1 layers made for a freeze */
+void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale);
 
 extern VALUE cBitmap, cFont;
 Bitmap *bitmap_get(VALUE v); /* raises if disposed */
@@ -126,7 +142,10 @@ void gpu_frame_begin_sync(bool sync);
 void gpu_scene_begin(int which); /* 0: the picture, 1: the frozen picture */
 void gpu_present(int frozen_alpha, int brightness);
 void gpu_frame_end(void);
-void gpu_draw_top(Bitmap *b, int x, int y); /* after gpu_present: in top screen pixels */
+/* window.c: a window's contents have recorded texts: drawn sharp on the
+ * finished picture (gx, gy: the contents' origin, clip: what shows, in
+ * game pixels) */
+void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity);
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity);
 bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
                const Color *color, const Tone *tone);
@@ -195,7 +214,8 @@ typedef struct {
 	int wide_text;  /* fit: message boxes over the screen's whole width */
 	int frame_skip; /* 0 off, 1 auto */
 	int show_speed;
-	int overlay;    /* game speed and memory in the top screen's corner */
+	int overlay;    /* game speed and memory on the bottom screen */
+	int sharp_text; /* window text drawn at the top screen's resolution */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;
@@ -218,6 +238,7 @@ void prof_graphics_end(void);
 void prof_report(int frames);
 void prof_caller(char *out, size_t n);
 extern unsigned bitmaps_created;
+void status_line(const char *text); /* main.c: the bottom screen's first line */
 void say(const char *fmt, ...);
 void log_only(const char *fmt, ...); /* mkxpz-3ds.log only */ /* the bottom screen and mkxpz-3ds.log */
 extern int rgss_version; /* 1 XP, 2 VX, 3 VX Ace */

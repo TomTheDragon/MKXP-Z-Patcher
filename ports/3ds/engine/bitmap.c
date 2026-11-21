@@ -15,7 +15,144 @@ VALUE cBitmap;
 
 static void bitmap_mark(void *p)
 {
-	rb_gc_mark(((Bitmap *) p)->font);
+	Bitmap *b = p;
+	rb_gc_mark(b->font);
+	for (int i = 0; i < b->nops; i++) {
+		rb_gc_mark(b->ops[i].str);
+		rb_gc_mark(b->ops[i].font);
+	}
+}
+
+/* --- sharp window text (see engine.h) */
+static void layer_free(Bitmap **lp)
+{
+	Bitmap *l = *lp;
+	if (!l)
+		return;
+	gpu_forget(l);
+	px_free(l->px, (size_t) l->w * l->h * 4);
+	free(l);
+	*lp = NULL;
+}
+
+static void ops_clear(Bitmap *b)
+{
+	if (!b->nops)
+		return;
+	b->nops = 0;
+	b->ops_gen++;
+}
+
+static void ops_free(Bitmap *b)
+{
+	free(b->ops);
+	b->ops = NULL;
+	b->nops = b->ops_cap = 0;
+	layer_free(&b->layer);
+}
+
+/* texts in the rect are covered (fill_rect, clear_rect) */
+static void ops_remove(Bitmap *b, Rect r)
+{
+	int n = 0;
+	for (int i = 0; i < b->nops; i++) {
+		Rect o = b->ops[i].r;
+		bool hit = o.x < r.x + r.w && r.x < o.x + o.w && o.y < r.y + r.h && r.y < o.y + o.h;
+		if (!hit)
+			b->ops[n++] = b->ops[i];
+	}
+	if (n != b->nops) {
+		b->nops = n;
+		b->ops_gen++;
+	}
+}
+
+/* (too many texts without a clear: into the pixels after all) */
+#define MAX_OPS 2000
+
+static bool ops_add(Bitmap *b, Rect r, VALUE str, int align)
+{
+	if (b->nops == b->ops_cap) {
+		if (b->ops_cap >= MAX_OPS)
+			return false;
+		int nc = b->ops_cap ? b->ops_cap * 2 : 32;
+		TextOp *n = realloc(b->ops, sizeof *n * nc);
+		if (!n)
+			return false;
+		b->ops = n;
+		b->ops_cap = nc;
+	}
+	b->ops[b->nops++] = (TextOp) { r, align, rb_str_new_frozen(str), rb_obj_dup(b->font) };
+	return true;
+}
+
+static Bitmap *full_layers[16]; /* scale-1 layers made for a freeze */
+static int nfull;
+
+/* the text layer: only the recorded texts, at sx, sy (transparent elsewhere);
+ * new texts are added to it, removals redraw it */
+Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy)
+{
+	if (!b->nops)
+		return NULL;
+	int w = (int) (b->w * sx + 0.999f), h = (int) (b->h * sy + 0.999f);
+	if (w <= 0 || h <= 0)
+		return NULL;
+	Bitmap *l = b->layer;
+	bool redraw = !l || l->w != w || l->h != h || b->layer_gen != b->ops_gen || b->layer_sx != sx ||
+	              b->layer_sy != sy || b->layer_done > b->nops;
+	if (l && (l->w != w || l->h != h))
+		layer_free(&b->layer), l = NULL;
+	if (!l) {
+		l = calloc(1, sizeof *l);
+		if (!l)
+			return NULL;
+		l->font = Qnil;
+		l->px = px_alloc_at((size_t) w * h * 4, true, true);
+		if (!l->px) {
+			free(l);
+			return NULL;
+		}
+		l->w = w;
+		l->h = h;
+		b->layer = l;
+	}
+	int from = b->layer_done;
+	if (redraw) {
+		memset(l->px, 0, (size_t) w * h * 4);
+		from = 0;
+	}
+	if (from == b->nops && !redraw)
+		return l;
+	for (int i = from; i < b->nops; i++) {
+		TextOp *o = &b->ops[i];
+		int x0 = (int) (o->r.x * sx + 0.5f), y0 = (int) (o->r.y * sy + 0.5f);
+		int x1 = (int) ((o->r.x + o->r.w) * sx + 0.5f), y1 = (int) ((o->r.y + o->r.h) * sy + 0.5f);
+		font_draw_text_scaled(l, o->font, x0, y0, x1 - x0, y1 - y0, o->str, o->align, sy);
+	}
+	l->version++;
+	b->layer_gen = b->ops_gen;
+	b->layer_done = b->nops;
+	b->layer_sx = sx;
+	b->layer_sy = sy;
+	if (sx == 1 && sy == 1 && nfull < 16) /* (only for a freeze: let go after it) */
+		full_layers[nfull++] = b;
+	return l;
+}
+
+void bitmap_text_layers_drop_full(void)
+{
+	for (int i = 0; i < nfull; i++)
+		if (full_layers[i]->layer && full_layers[i]->layer_sx == 1 && full_layers[i]->layer_sy == 1)
+			layer_free(&full_layers[i]->layer);
+	nfull = 0;
+}
+
+static void drop_from_full(Bitmap *b)
+{
+	for (int i = 0; i < nfull; i++)
+		if (full_layers[i] == b)
+			full_layers[i--] = full_layers[--nfull];
 }
 /* --- dropping pixels of images loaded from files (the game's cache keeps
  * every image it loaded; the original 3DS has only ~25 MB of normal memory
@@ -161,6 +298,8 @@ static void bitmap_free(void *p)
 	gpu_forget(b);
 	bitmap_forget_file(b);
 	px_free(b->px, (size_t) b->w * b->h * 4);
+	drop_from_full(b);
+	ops_free(b); /* (its strings and fonts are Ruby's) */
 	xfree(b);
 }
 static size_t bitmap_size(const void *p)
@@ -416,6 +555,10 @@ static VALUE bitmap_init_copy(VALUE self, VALUE orig)
 	bitmap_set_size(b, o->w, o->h);
 	memcpy(b->px, o->px, (size_t) o->w * o->h * 4);
 	b->font = rb_obj_dup(o->font);
+	/* (a copy gets the texts drawn into its pixels) */
+	for (int i = 0; i < o->nops; i++)
+		font_draw_text(b, o->ops[i].font, o->ops[i].r.x, o->ops[i].r.y, o->ops[i].r.w, o->ops[i].r.h, o->ops[i].str,
+		               o->ops[i].align);
 	return self;
 }
 
@@ -433,6 +576,8 @@ static VALUE bitmap_dispose(VALUE self)
 	bitmap_forget_file(b);
 	px_free(b->px, (size_t) b->w * b->h * 4);
 	b->px = NULL;
+	drop_from_full(b);
+	ops_free(b);
 	mem_tell_ruby();
 	return Qnil;
 }
@@ -542,6 +687,8 @@ static VALUE bitmap_stretch_blt(int argc, VALUE *argv, VALUE self)
 
 static void fill(Bitmap *b, Rect r, px_t p)
 {
+	if (b->nops)
+		ops_remove(b, r);
 	if (r.x < 0) { r.w += r.x; r.x = 0; }
 	if (r.y < 0) { r.h += r.y; r.y = 0; }
 	if (r.x + r.w > b->w) r.w = b->w - r.x;
@@ -608,6 +755,7 @@ static VALUE bitmap_clear(VALUE self)
 {
 	Bitmap *b = bitmap_get(self);
 	memset(b->px, 0, (size_t) b->w * b->h * 4);
+	ops_clear(b);
 	b->version++;
 	return self;
 }
@@ -707,6 +855,8 @@ static VALUE bitmap_draw_text(int argc, VALUE *argv, VALUE self)
 	if (!RB_TYPE_P(str, T_STRING))
 		str = rb_obj_as_string(str);
 	int align = argc > rest + 1 ? num2int(argv[rest + 1]) : 0;
+	if (b->text_native && settings.sharp_text && RSTRING_LEN(str) > 0 && ops_add(b, r, str, align))
+		return self; /* (drawn sharp on the finished picture; gpu.c) */
 	font_draw_text(b, b->font, r.x, r.y, r.w, r.h, str, align);
 	b->version++;
 	return self;

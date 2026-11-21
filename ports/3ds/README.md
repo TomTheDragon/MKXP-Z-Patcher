@@ -312,9 +312,21 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   street 5.0 -> 4.0 ms (new game), 12.7 -> 7.5 ms (user's save) in the
   emulator. `mkxpz-no-fast-events` turns only this off.
 - Speed display (settings: "Speed display"): game speed (game frames a
-  second against 60), free/total RAM and graphics memory, drawn after the
-  picture at the top screen's own resolution (gpu_draw_top).
+  second against 60), free/total RAM and graphics memory.
 - The 1:1 screen mode is gone (fit and stretch).
+
+- Sharp window text (settings: "Window text"): draw_text on a window's
+  contents only records the text (string, a copy of the font, rect,
+  alignment); window_draw hands the contents to gpu_text_layer, and after
+  the scene is on the top screen the text is drawn at the screen's
+  resolution from a text-only layer (font size x scale, positions x scale,
+  light auto-hinting up to 18 px). New text is added to the layer, clear /
+  clear_rect / fill_rect remove the texts they cover (redraw). The frozen
+  picture of a transition gets the text at game size (a layer let go of
+  after the freeze). Not covered: scripts reading window pixels, copying
+  window contents elsewhere, something drawn above a window's text.
+- The speed display is on the bottom screen's first line (its own console
+  window; the messages scroll below it).
 
 The game's own Ruby code is now most of the time. On a real original 3DS
 (2026-11-20, Dazed) it was 15-18 ms per frame on the maps (the emulator

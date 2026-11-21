@@ -186,6 +186,8 @@ static void window_draw(Element *e, Canvas *c, int vx, int vy)
 		if (cont) {
 			DrawOpts o = { .x = inner.x - w->ox, .y = inner.y - w->oy, .zx = 1, .zy = 1, .opacity = w->contents_opacity };
 			canvas_draw(&sub, cont, (Rect) { 0, 0, cont->w, cont->h }, &o);
+			if (cont->nops && sub.gpu)
+				gpu_text_layer(cont, inner.x - w->ox, inner.y - w->oy, sub.clip, w->contents_opacity);
 		}
 	}
 	if (!skin)
@@ -232,7 +234,17 @@ static VALUE window_is_close(VALUE self) { return window_get(self)->openness == 
 #define W_VAL(f) \
 	static VALUE window_get_##f(VALUE self) { return window_get(self)->f; } \
 	static VALUE window_set_##f(VALUE self, VALUE v) { window_get(self)->f = v; return v; }
-W_VAL(windowskin) W_VAL(contents)
+W_VAL(windowskin)
+static VALUE window_get_contents(VALUE self) { return window_get(self)->contents; }
+/* (contents get sharp text: settings "Window text") */
+static VALUE window_set_contents(VALUE self, VALUE v)
+{
+	window_get(self)->contents = v;
+	Bitmap *b = settings.sharp_text && gpu_on ? bitmap_get_maybe(v) : NULL;
+	if (b)
+		b->text_native = true;
+	return v;
+}
 static VALUE window_cursor_rect(VALUE self) { return window_get(self)->cursor_rect; }
 static VALUE window_set_cursor_rect(VALUE self, VALUE r) { *rect_get(window_get(self)->cursor_rect) = *rect_get(r); return r; }
 static VALUE window_tone(VALUE self) { return window_get(self)->tone; }
