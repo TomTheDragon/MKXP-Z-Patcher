@@ -176,8 +176,8 @@ static void overlay_text(void)
 	if (secs < 0.5)
 		return;
 	int pct = (int) (overlay_frames / secs / frame_rate * 100 + 0.5);
-	if (pct > 100)
-		pct = 100;
+	if (pct > 100 && !input_speedup())
+		pct = 100; /* (above only with the speed-up) */
 	overlay_frames = 0;
 	overlay_since = now;
 	extern u32 __ctru_heap_size, __ctru_linear_heap_size;
@@ -197,6 +197,23 @@ static void gpu_frame_with(int frozen_alpha)
 	engine_check_reset();
 	const u64 period = SYSCLOCK_ARM11 / 60;
 	u64 now = svcGetSystemTick();
+	/* speed-up (L held): no waiting for the screen, every 4th picture
+	 * drawn; the pacing starts again afterwards */
+	static int fast_n;
+	if (input_speedup()) {
+		due = 0;
+		if (++fast_n % 4 && frozen_alpha < 0) {
+			frame_count++;
+			return;
+		}
+		gpu_frame_begin_sync(false);
+		if (frozen_alpha < 255)
+			gpu_draw_scene(0);
+		gpu_present(frozen_alpha, brightness);
+		gpu_frame_end();
+		frame_count++;
+		return;
+	}
 	due = due ? due + period : now;
 	if (now > due + 8 * period)
 		due = now; /* far behind (loading...): start counting again */

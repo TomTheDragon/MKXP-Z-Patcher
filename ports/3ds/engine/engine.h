@@ -198,6 +198,7 @@ void init_tilemap(void);
 extern int screen_w, screen_h;
 void init_graphics(void);
 void init_input(void);
+bool input_speedup(void); /* input.c: the speed-up button is held */
 void init_audio(void);
 bool audio_start(void); /* false: no sound (no DSP firmware) */
 void audio_stop(void);

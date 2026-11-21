@@ -8,7 +8,7 @@
 Settings settings = {
 	.music_volume = 100,
 	.sound_volume = 100,
-	.buttons = 0,      /* B: confirm, A: cancel, Y: dash */
+	.buttons = 0,      /* A: confirm, B: cancel, Y: run, L: speed-up */
 	.screen = 0,       /* fit */
 	.frame_skip = 1,   /* auto */
 	.show_speed = 1,
@@ -60,7 +60,7 @@ enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_TEXT, I_SHARP, I_SMOOTH, I_COLOR
 
 static void show(int sel)
 {
-	static const char *const buttons[] = { "B confirm, A cancel, Y dash", "A confirm, B cancel, X dash" };
+	static const char *const buttons[] = { "A ok B back Y run L fast", "B ok A back Y run L/R pg" };
 	static const char *const screens[] = { "fit (whole picture)", "stretch (fill)" };
 	char v[I_COUNT][40];
 	snprintf(v[I_MUSIC], 40, "%d%%", settings.music_volume);

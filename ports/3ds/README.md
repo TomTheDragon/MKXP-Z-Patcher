@@ -51,7 +51,7 @@ maps, `graphics.c`, `input.c`, `gpu.c`), `boot.rb` (Font, Kernel#load_data/
 rgss_main, Audio and Win32API stand-ins) and mkxp-z's RPG data classes
 (`ruby/module_rpg*.rb`, autotile tables in `autotiles.h`). `build.sh` also
 builds `build/mkxpz.3dsx`; the game goes into `sdmc:/mkxpz` (or next to the
-.3dsx). SELECT resets the game; A/B/X/Y/L/R/D-pad are RPG Maker's keys.
+.3dsx). SELECT resets the game; A/B/X/Y/R/D-pad are RPG Maker's keys, L the speed-up.
 
 Drawing (`gpu.c`, citro3d): bitmaps become textures (uploaded when they
 change, RGBA8 in the GPU's tiled layout); everything is a quad; opacity,
@@ -344,8 +344,11 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   No 6 MB block is needed for a 1536x1024 sheet any more.
 - Loading bar: loading_tick(progress) from image loading, streaming,
   sound decoding and load_data draws an extra frame (the last picture,
-  its window text, a 3 px bar at the top) after 150 ms without a frame,
-  every 50 ms at most.
+  its window text, a 4 px bar on the right edge filling from the bottom)
+  after 150 ms without a frame, every 50 ms at most.
+- Buttons (default): A confirm, B cancel, Y run, X / R page up / down,
+  ZL / ZR the X / Y keys, L held = speed-up (no waiting for the screen,
+  every 4th picture drawn); settings "Buttons" has the old layout.
 - The speed display is the bottom screen's last line, drawn again after
   every other console output (libctru's scrolling of a console window
   wiped the line next to it: flicker).

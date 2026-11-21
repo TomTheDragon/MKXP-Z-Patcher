@@ -1,7 +1,10 @@
 /* Input: the 3DS's buttons as RPG Maker's keys.
- *   B: C (confirm, action)   A: B (cancel, menu)   Y: A (Shift, dash)   X: X
- *   (settings: or A confirm, B cancel, X dash, Y: X)
- *   L, R: L, R (page)   D-pad / circle pad: directions
+ *   default: A: C (confirm, action)   B: B (cancel, menu)   Y: A (Shift, run)
+ *            X: L (page up)   R: R (page down)   L: speed-up (held)
+ *            ZL / ZR (New 3DS): X / Y keys
+ *   settings "Buttons", the old layout: B confirm, A cancel, Y run, X: X,
+ *            L, R: L, R (no speed-up)
+ *   D-pad / circle pad: directions
  *   START: the engine's settings   SELECT: reset the game (like F12) */
 #include "engine.h"
 #include <3ds.h>
@@ -22,12 +25,13 @@ static u32 keys_for(int k)
 	case K_LEFT: return KEY_LEFT;
 	case K_RIGHT: return KEY_RIGHT;
 	case K_UP: return KEY_UP;
-	case K_C: return settings.buttons ? KEY_A : KEY_B;
-	case K_B: return settings.buttons ? KEY_B : KEY_A;
-	case K_A: case K_SHIFT: return settings.buttons ? KEY_X : KEY_Y;
-	case K_X: return settings.buttons ? KEY_Y : KEY_X;
-	case K_L: return KEY_L | KEY_ZL;
-	case K_R: return KEY_R | KEY_ZR;
+	case K_C: return settings.buttons ? KEY_B : KEY_A;
+	case K_B: return settings.buttons ? KEY_A : KEY_B;
+	case K_A: case K_SHIFT: return KEY_Y;
+	case K_X: return settings.buttons ? KEY_X : KEY_ZL;
+	case K_Y: return settings.buttons ? 0 : KEY_ZR;
+	case K_L: return settings.buttons ? KEY_L | KEY_ZL : KEY_X;
+	case K_R: return settings.buttons ? KEY_R | KEY_ZR : KEY_R;
 	default: return 0;
 	}
 }
@@ -52,6 +56,12 @@ void input_poll(void)
 		u32 m = keys_for(k);
 		held_frames[k] = m && (now & m) ? held_frames[k] + 1 : 0;
 	}
+}
+
+/* L held (default layout): the game runs as fast as it can */
+bool input_speedup(void)
+{
+	return !settings.buttons && (now & KEY_L);
 }
 
 void engine_check_reset(void)

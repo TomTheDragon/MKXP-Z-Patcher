@@ -831,16 +831,17 @@ void gpu_loading_frame(int frozen_alpha, int brightness, float frac)
 	C3D_FrameBegin(0);
 	in_frame = true;
 	gpu_present(frozen_alpha, brightness);
+	/* on the right edge, filling from the bottom up */
 	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
 	Color back = { 0, 0, 0, 255 }, bar = { 120, 200, 255, 255 };
-	gpu_fill(&c, (Rect) { 0, 0, 400, 3 }, &back, 160);
+	gpu_fill(&c, (Rect) { 396, 0, 4, 240 }, &back, 160);
 	if (frac >= 0) {
-		int w = (int) (400 * (frac > 1 ? 1 : frac));
-		if (w > 0)
-			gpu_fill(&c, (Rect) { 0, 0, w, 3 }, &bar, 255);
+		int h = (int) (240 * (frac > 1 ? 1 : frac));
+		if (h > 0)
+			gpu_fill(&c, (Rect) { 396, 240 - h, 4, h }, &bar, 255);
 	} else {
-		int x = (int) ((svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)) / 3 % 500) - 100;
-		gpu_fill(&c, (Rect) { x, 0, 100, 3 }, &bar, 255);
+		int y = 240 - (int) ((svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)) / 4 % 300);
+		gpu_fill(&c, (Rect) { 396, y, 4, 60 }, &bar, 255);
 	}
 	C3D_FrameEnd(0);
 	in_frame = false;
