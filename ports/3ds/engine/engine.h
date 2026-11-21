@@ -59,10 +59,13 @@ typedef struct Bitmap_ {
 extern VALUE cBitmap, cFont;
 Bitmap *bitmap_get(VALUE v); /* raises if disposed */
 px_t *bitmap_px(Bitmap *b); /* its pixels (read again if dropped); NULL: no memory */
+void bitmap_uploaded(Bitmap *b); /* gpu.c: its texture is up to date */
+extern unsigned bitmap_released;
 size_t heap_free(void);     /* free normal memory (memory.c) */
 /* memory.c: pixel buffers (64 KB and more in an arena of their own) */
 #define PX_MAP_MIN (64 * 1024)
 void *px_alloc(size_t bytes, bool zero);
+void *px_alloc_at(size_t bytes, bool zero, bool keep); /* keep: from the arena's top */
 void px_free(void *p, size_t bytes);
 bool px_in_arena(const void *p);
 void mem_init(void);
@@ -71,6 +74,7 @@ size_t mem_arena_free(void);
 bool mem_release(size_t need, bool in_arena); /* bitmap.c */
 extern unsigned mem_px_maps;
 extern size_t mem_px_bytes;
+extern size_t mem_stack_bytes;
 Bitmap *bitmap_get_maybe(VALUE v); /* NULL for nil or disposed */
 VALUE bitmap_new_size(int w, int h);
 void bitmap_blt(Bitmap *dst, int dx, int dy, Bitmap *src, Rect sr, int opacity);

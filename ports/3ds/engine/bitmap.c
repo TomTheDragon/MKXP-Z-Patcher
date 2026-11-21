@@ -69,6 +69,23 @@ static bool drop_one_keeping(bool in_arena, int keep)
 	return false;
 }
 
+/* gpu.c: the texture was just made. An image of 256 KB or more loaded from a file and
+ * unchanged lets go of its pixels right away: the graphics chip has them
+ * (a 1536x1024 character sheet is 6 MB; the arena once had 8.8 MB free in
+ * pieces and no 6 MB block for the next one). They're read again from the
+ * file when needed (texture evicted, or a script reads pixels). */
+unsigned bitmap_released;
+void bitmap_uploaded(Bitmap *b)
+{
+	if (!b->file || !b->px || b->version != b->file_version || (size_t) b->w * b->h * 4 < 256 * 1024)
+		return;
+	lru_remove(b);
+	px_free(b->px, (size_t) b->w * b->h * 4);
+	b->px = NULL;
+	b->dropped = true;
+	bitmap_released++;
+}
+
 static bool drop_one(bool in_arena)
 {
 	return drop_one_keeping(in_arena, 4);
@@ -78,9 +95,10 @@ static bool drop_one(bool in_arena)
  * recently used images are kept first; if that's not enough (a 1536x1024
  * character sheet is 6 MB in one piece), down to the last one used: no
  * more than that is in use while a new buffer is made. */
+static int keep_at_least = 1; /* 0 while Bitmap.new loads a file */
 bool mem_release(size_t need, bool in_arena)
 {
-	return drop_one_keeping(in_arena, 4) || drop_one_keeping(in_arena, 1);
+	return drop_one_keeping(in_arena, 4) || drop_one_keeping(in_arena, keep_at_least);
 }
 
 /* keeps the normal heap's reserve free (for Ruby); need: a pixel buffer
@@ -105,6 +123,8 @@ px_t *bitmap_px(Bitmap *b)
 {
 	if (!b->px && b->dropped && !b->disposed) {
 		int w = b->w, h = b->h;
+		/* (read again while drawing: the last image used may be in use) */
+		keep_at_least = 1;
 		make_room((size_t) w * h * 4);
 		Bitmap t = { 0 };
 		/* (no Ruby error from here: it may be in the middle of drawing) */
@@ -183,15 +203,17 @@ Bitmap *bitmap_get(VALUE v)
 	return b;
 }
 
+static bool loading_file; /* (bitmap_set_size: for a file image) */
+
 static void bitmap_set_size(Bitmap *b, int w, int h)
 {
 	if (w <= 0 || h <= 0)
 		rb_raise(rb_eArgError, "failed to create bitmap (%dx%d)", w, h);
 	make_room((size_t) w * h * 4);
-	b->px = px_alloc((size_t) w * h * 4, true);
+	b->px = px_alloc_at((size_t) w * h * 4, true, !loading_file);
 	if (!b->px) {
 		rb_gc();
-		b->px = px_alloc((size_t) w * h * 4, true);
+		b->px = px_alloc_at((size_t) w * h * 4, true, !loading_file);
 		if (!b->px) {
 			log_only("no memory for a %dx%d bitmap: %lu KB free, %u images in the arena (%lu KB, %lu KB free)\n", w, h,
 			         (unsigned long) (heap_free() / 1024), mem_px_maps, (unsigned long) (mem_px_bytes / 1024),
@@ -298,7 +320,17 @@ static bool load_mkxi(Bitmap *b, const char *path)
 	return true;
 }
 
+static bool load_image_inner(Bitmap *b, const char *path);
 static bool load_image(Bitmap *b, const char *path)
+{
+	bool was = loading_file;
+	loading_file = true;
+	bool ok = load_image_inner(b, path);
+	loading_file = was;
+	return ok;
+}
+
+static bool load_image_inner(Bitmap *b, const char *path)
 {
 	size_t l = strlen(path);
 	if (l > 5 && !strcasecmp(path + l - 5, ".mkxi"))
@@ -322,7 +354,11 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 	if (argc == 1) {
 		const char *name = StringValueCStr(argv[0]);
 		char path[512];
+		/* (nothing else's pixels are in use while Bitmap.new loads a file:
+		 * every other file image may let go of its pixels to make room) */
+		keep_at_least = 0;
 		bool found = find_image(name, path, sizeof path), loaded = found && load_image(b, path);
+		keep_at_least = 1;
 		if (found && !loaded) {
 			/* a .mkxi that doesn't load: the PNG */
 			size_t l = strlen(path);
@@ -358,6 +394,14 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 		}
 	} else if (argc == 2) {
 		bitmap_set_size(b, num2int(argv[0]), num2int(argv[1]));
+		/* (the log: big ones the game draws into, with the script lines) */
+		static unsigned big_noted;
+		if ((size_t) b->w * b->h * 4 >= 256 * 1024 && big_noted < 30) {
+			char where[600];
+			prof_caller(where, sizeof where);
+			big_noted++;
+			log_only("big Bitmap.new(%d, %d) from %s\n", b->w, b->h, where);
+		}
 	} else {
 		rb_raise(rb_eArgError, "wrong number of arguments (%d for 1 or 2)", argc);
 	}
@@ -393,9 +437,20 @@ static VALUE bitmap_dispose(VALUE self)
 	return Qnil;
 }
 static VALUE bitmap_disposed(VALUE self) { return ((Bitmap *) rb_check_typeddata(self, &bitmap_type))->disposed ? Qtrue : Qfalse; }
-static VALUE bitmap_width(VALUE self) { return INT2NUM(bitmap_get(self)->w); }
-static VALUE bitmap_height(VALUE self) { return INT2NUM(bitmap_get(self)->h); }
-static VALUE bitmap_rect(VALUE self) { Bitmap *b = bitmap_get(self); return rect_new(0, 0, b->w, b->h); }
+/* the size: also without pixels (an image that let go of them isn't read
+ * again for this; Sprite_Character asks every character sheet) */
+static Bitmap *bitmap_get_size(VALUE self)
+{
+	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
+	if (b->disposed)
+		rb_raise(eRGSSError, "disposed bitmap");
+	if (!b->px && !b->dropped)
+		rb_raise(eRGSSError, "uninitialized bitmap");
+	return b;
+}
+static VALUE bitmap_width(VALUE self) { return INT2NUM(bitmap_get_size(self)->w); }
+static VALUE bitmap_height(VALUE self) { return INT2NUM(bitmap_get_size(self)->h); }
+static VALUE bitmap_rect(VALUE self) { Bitmap *b = bitmap_get_size(self); return rect_new(0, 0, b->w, b->h); }
 
 /* --- pixel helpers */
 /* "over" compositing with straight alpha; a: source alpha 0..255 */

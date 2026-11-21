@@ -239,11 +239,11 @@ static VALUE g_update(VALUE self)
 	} else if (t_frames == 60) {
 		unsigned used_n;
 		snprintf(speed_line, sizeof speed_line, "ms: ruby %.1f (gc %.1f, %u runs), draw %.1f, wait %.1f, other %.1f, skipped %d, "
-		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u, reloaded %u, images %u (%lu KB), stack %u KB, new bitmaps %u", ms(t_script) / 60,
+		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u (+%u after upload), reloaded %u, images %u (%lu KB, fiber stacks %lu KB), stack %u KB, new bitmaps %u", ms(t_script) / 60,
 		         (double) (gc_now - gc_last) / 60, (unsigned) (gc_runs - gc_runs_last), ms(t_draw) / 60, ms(t_begin) / 60,
 		         (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60, t_skipped,
 		         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (heap_free() / 1024), gpu_evictions,
-		         gpu_used_kb(&used_n), used_n, bitmap_drops, bitmap_reloads, mem_px_maps, (unsigned long) (mem_px_bytes / 1024), stack_used_kb(),
+		         gpu_used_kb(&used_n), used_n, bitmap_drops, bitmap_released, bitmap_reloads, mem_px_maps, (unsigned long) (mem_px_bytes / 1024), (unsigned long) (mem_stack_bytes / 1024), stack_used_kb(),
 		         bitmaps_created - bitmaps_last);
 		bitmaps_last = bitmaps_created;
 		gc_last = gc_now;

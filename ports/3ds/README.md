@@ -287,6 +287,18 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
     be freed; drawing it wrote into freed memory. collect() in scene.c now
     skips objects Ruby considers dead (rb_objspace_garbage_object_p).
 
+- "failed to create bitmap (1536x1024)" (6 MB in one piece; the arena had
+  8.8 MB free in 6 blocks). Now: unchanged file images of 256 KB or more let
+  go of their pixels as soon as their texture is made (bitmap_uploaded;
+  read again when needed); fiber stacks and bitmaps the game draws into come
+  from the arena's top end, file images from the lowest hole that fits, so
+  letting go of file images frees one connected area; while Bitmap.new
+  loads a file every other file image may let go (nothing else is in use
+  then; re-reads during drawing keep the most recent one); Bitmap#width,
+  height and rect don't read dropped pixels again. Arena use on Dazed's
+  maps: ~4 MB instead of ~10 MB. Three 1536x1024 sheets on screen in one
+  frame need more textures than graphics memory holds (one or two fit).
+
 The game's own Ruby code is now most of the time. On a real original 3DS
 (2026-11-20, Dazed) it was 15-18 ms per frame on the maps (the emulator
 shows about half), with drawing 2-4 ms: the game ran at 45-55 frames a

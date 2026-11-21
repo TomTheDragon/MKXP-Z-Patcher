@@ -27,6 +27,7 @@
 static char *arena;
 static size_t arena_size;
 unsigned mem_px_maps;  /* pixel buffers in the arena (for the log) */
+size_t mem_stack_bytes; /* of which fiber stacks */
 /* pixel memory allocated (+) and freed (-) since Ruby was last told: its
  * garbage collector runs sooner when much memory was allocated, and pixel
  * buffers aren't Ruby's own allocations. Told only at safe points
@@ -91,15 +92,38 @@ static bool in_arena(const void *p)
 static void *arena_take(size_t bytes)
 {
 	u32 n = ROUND(bytes);
+	/* the lowest hole that fits: images from files pack at the bottom (the
+	 * ones that stay come from the top: arena_take_high) */
 	int best = -1;
 	for (int i = 0; i < nholes; i++)
-		if (holes[i].n >= n && (best < 0 || holes[i].n < holes[best].n))
+		if (holes[i].n >= n && (best < 0 || holes[i].a < holes[best].a))
 			best = i;
 	if (best < 0)
 		return NULL;
 	u32 a = holes[best].a;
 	holes[best].a += n;
 	holes[best].n -= n;
+	if (!holes[best].n)
+		holes[best] = holes[--nholes];
+	mem_px_maps++;
+	mem_px_bytes += n;
+	return (void *) a;
+}
+
+/* from the top end of the highest hole that fits: for fiber stacks, which
+ * live long and can't be let go of, so they don't split the space images
+ * need (those come from the best-fitting hole, mostly lower down) */
+static void *arena_take_high(size_t bytes)
+{
+	u32 n = ROUND(bytes);
+	int best = -1;
+	for (int i = 0; i < nholes; i++)
+		if (holes[i].n >= n && (best < 0 || holes[i].a > holes[best].a))
+			best = i;
+	if (best < 0)
+		return NULL;
+	holes[best].n -= n;
+	u32 a = holes[best].a + holes[best].n;
 	if (!holes[best].n)
 		holes[best] = holes[--nholes];
 	mem_px_maps++;
@@ -130,13 +154,26 @@ static void arena_give(void *p, size_t bytes)
 
 /* pixels (bytes = w * h * 4); zero: cleared; NULL: no memory even after
  * letting go of images not used lately */
+static void *arena_take_high(size_t bytes);
+
 void *px_alloc(size_t bytes, bool zero)
+{
+	return px_alloc_at(bytes, zero, false);
+}
+
+/* keep: memory that can't be let go of (bitmaps the game draws into): from
+ * the arena's top end, like the fiber stacks; images read from files (which
+ * can always be read again) from the best-fitting hole, mostly at the
+ * bottom. Letting go of file images then frees one connected area (the
+ * console once had 8.8 MB free in pieces and no 6 MB block) */
+void *px_alloc_at(size_t bytes, bool zero, bool keep)
 {
 	void *p = NULL;
 	if (bytes >= PX_MAP_MIN && arena) {
-		p = arena_take(bytes);
+		void *(*take)(size_t) = keep ? arena_take_high : arena_take;
+		p = take(bytes);
 		for (int tries = 0; !p && tries < 256 && mem_release(bytes, true); tries++)
-			p = arena_take(bytes);
+			p = take(bytes);
 		if (p) {
 			if (zero)
 				memset(p, 0, bytes);
@@ -172,9 +209,11 @@ void *mkxpz_stack_alloc(size_t bytes)
 {
 	if (!arena)
 		return NULL;
-	void *p = arena_take(bytes);
+	void *p = arena_take_high(bytes);
 	for (int tries = 0; !p && tries < 256 && mem_release(bytes, true); tries++)
-		p = arena_take(bytes);
+		p = arena_take_high(bytes);
+	if (p)
+		mem_stack_bytes += ROUND(bytes);
 	return p;
 }
 
@@ -182,6 +221,7 @@ bool mkxpz_stack_free(void *p, size_t bytes)
 {
 	if (!p || !in_arena(p))
 		return false;
+	mem_stack_bytes -= ROUND(bytes);
 	arena_give(p, bytes);
 	return true;
 }

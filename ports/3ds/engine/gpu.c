@@ -456,6 +456,7 @@ static GpuTex *texture_of(Bitmap *b)
 	b->gpu_version = b->version + 1;
 	live_touch(g);
 	gpu_upload_ticks += svcGetSystemTick() - t_up;
+	bitmap_uploaded(b);
 	return g;
 }
 
