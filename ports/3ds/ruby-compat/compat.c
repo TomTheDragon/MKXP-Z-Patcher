@@ -4,10 +4,15 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 pid_t waitpid(pid_t pid, int *status, int options) { (void) pid; (void) status; (void) options; errno = ECHILD; return -1; }
-/* memory "mappings": only anonymous ones (Ruby's fiber stacks), from the heap;
- * no page protection (so no guard pages) */
+/* memory "mappings": only anonymous ones (Ruby's fiber stacks), from the heap
+ * or, when the engine provides it (mkxpz_stack_alloc), from its memory
+ * arena, where a freed block isn't cut up by small allocations; no page
+ * protection (so no guard pages) */
 #include <malloc.h>
+#include <stdbool.h>
 #include <string.h>
+void *mkxpz_stack_alloc(size_t l) __attribute__((weak));
+bool mkxpz_stack_free(void *a, size_t l) __attribute__((weak));
 void *mmap(void *a, size_t l, int p, int f, int fd, off_t o)
 {
 	(void) a; (void) p; (void) o;
@@ -15,7 +20,9 @@ void *mmap(void *a, size_t l, int p, int f, int fd, off_t o)
 		errno = ENODEV;
 		return MAP_FAILED;
 	}
-	void *m = memalign(4096, l);
+	void *m = mkxpz_stack_alloc ? mkxpz_stack_alloc(l) : NULL;
+	if (!m)
+		m = memalign(4096, l);
 	if (!m) {
 		errno = ENOMEM;
 		return MAP_FAILED;
@@ -23,7 +30,12 @@ void *mmap(void *a, size_t l, int p, int f, int fd, off_t o)
 	memset(m, 0, l);
 	return m;
 }
-int munmap(void *a, size_t l) { (void) l; free(a); return 0; }
+int munmap(void *a, size_t l)
+{
+	if (!mkxpz_stack_free || !mkxpz_stack_free(a, l))
+		free(a);
+	return 0;
+}
 int mprotect(void *a, size_t l, int p) { (void) a; (void) l; (void) p; return 0; }
 
 /* users, processes, pipes: the 3DS has none of these */

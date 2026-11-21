@@ -40,7 +40,7 @@ VALUE tone_new(double r, double g, double b, double gray);
 void init_types(void);
 
 /* --- Bitmap and Font (bitmap.c, font.c) */
-typedef struct {
+typedef struct Bitmap_ {
 	int w, h;
 	px_t *px;
 	VALUE font;
@@ -48,10 +48,29 @@ typedef struct {
 	unsigned version; /* changes with every drawing (for caches) */
 	void *gpu;        /* its texture (gpu.c) */
 	unsigned gpu_version;
+	/* loaded from a file: while unchanged (version == file_version), its
+	 * pixels can be dropped when memory runs low and read again */
+	char *file;
+	unsigned file_version;
+	bool dropped;
+	struct Bitmap_ *lru_prev, *lru_next;
 } Bitmap;
 
 extern VALUE cBitmap, cFont;
 Bitmap *bitmap_get(VALUE v); /* raises if disposed */
+px_t *bitmap_px(Bitmap *b); /* its pixels (read again if dropped); NULL: no memory */
+size_t heap_free(void);     /* free normal memory (memory.c) */
+/* memory.c: pixel buffers (64 KB and more in an arena of their own) */
+#define PX_MAP_MIN (64 * 1024)
+void *px_alloc(size_t bytes, bool zero);
+void px_free(void *p, size_t bytes);
+bool px_in_arena(const void *p);
+void mem_init(void);
+void mem_tell_ruby(void); /* (at safe points: may run Ruby's garbage collector) */
+size_t mem_arena_free(void);
+bool mem_release(size_t need, bool in_arena); /* bitmap.c */
+extern unsigned mem_px_maps;
+extern size_t mem_px_bytes;
 Bitmap *bitmap_get_maybe(VALUE v); /* NULL for nil or disposed */
 VALUE bitmap_new_size(int w, int h);
 void bitmap_blt(Bitmap *dst, int dx, int dy, Bitmap *src, Rect sr, int opacity);
@@ -92,14 +111,20 @@ void canvas_fill(Canvas *c, Rect r, px_t p);
 extern bool gpu_on;
 void gpu_init(void);
 void gpu_set_screen(int w, int h);
+/* fit with wide_text: the picture is this much wider on each side than
+ * the game's screen (the sides show only elements marked mkxpz_wide) */
+extern int gpu_margin;
 void gpu_draw(Canvas *c, Bitmap *src, Rect sr, const DrawOpts *o);
 void gpu_fill(Canvas *c, Rect r, const Color *col, int alpha);
 void gpu_forget(Bitmap *b);
 void gpu_frame_begin(void);
+void gpu_frame_begin_sync(bool sync);
 void gpu_scene_begin(int which); /* 0: the picture, 1: the frozen picture */
 void gpu_present(int frozen_alpha, int brightness);
 void gpu_frame_end(void);
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity);
+bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
+               const Color *color, const Tone *tone);
 /* vertex buffers (tilemaps): 9 floats per vertex (x y z, u v, r g b a) */
 void gpu_untextured_begin(Canvas *c);
 void gpu_draw_buffer(const float *verts, int first, int count, float tx, float ty);
@@ -118,6 +143,7 @@ struct Element {
 	VALUE viewport;   /* Viewport or nil */
 	bool is_viewport;
 	int z_offset;     /* tilemap layers above characters */
+	bool wide;        /* mkxpz_wide: may use the screen's sides (gpu_margin) */
 	void (*draw)(Element *e, Canvas *c, int ox, int oy);
 	void (*draw_z)(Element *e, Canvas *c, int ox, int oy, int layer);
 	Element *next;    /* registry */
@@ -128,6 +154,7 @@ void scene_draw(Canvas *c);
 
 extern VALUE cViewport, cSprite, cPlane, cWindow, cTilemap;
 void init_scene(void);
+void init_fast(void); /* native Sprite_Character#update (scene.c) */
 void init_window(void);
 void init_tilemap(void);
 
@@ -151,7 +178,41 @@ double num2dbl(VALUE v);
 	rb_define_method(klass, name "=", setter, 1)
 
 extern VALUE eRGSSError, eRGSSReset;
-void say(const char *fmt, ...); /* the bottom screen and mkxpz-3ds.log */
+/* files.c: the game's files, found through cached folder listings */
+bool file_find(const char *path, const char *const *exts, char *out, size_t n);
+
+/* settings.c: START in the game */
+typedef struct {
+	int music_volume, sound_volume; /* 0..100 */
+	int buttons;    /* 0: B confirm, A cancel, Y dash; 1: A confirm, B cancel, X dash */
+	int screen;     /* 0 fit, 1 stretch, 2 1:1 (crop) */
+	int wide_text;  /* fit: message boxes over the screen's whole width */
+	int frame_skip; /* 0 off, 1 auto */
+	int show_speed;
+	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
+} Settings;
+extern Settings settings;
+void settings_load(void);
+bool settings_menu(void); /* true: reset the game */
+void audio_volumes_changed(void);
+/* rbinternal.c: Ruby internals */
+typedef struct { VALUE klass; uint32_t index; } IvCache;
+VALUE mkxpz_ivar(VALUE obj, ID id, IvCache *c);
+VALUE mkxpz_gvar(ID id);
+VALUE mkxpz_frame_class_name(VALUE frame, bool *singleton);
+#define IV(obj, id) ({ static IvCache iv_c_; mkxpz_ivar((obj), (id), &iv_c_); })
+int graphics_frame(void);
+unsigned stack_used_kb(void); /* main.c: most of the main stack ever used */ /* graphics.c: Graphics.frame_count */
+/* profile.c (file mkxpz-profile) */
+extern bool prof_on;
+void prof_init(void);
+void prof_graphics_begin(void);
+void prof_graphics_end(void);
+void prof_report(int frames);
+void prof_caller(char *out, size_t n);
+extern unsigned bitmaps_created;
+void say(const char *fmt, ...);
+void log_only(const char *fmt, ...); /* mkxpz-3ds.log only */ /* the bottom screen and mkxpz-3ds.log */
 extern int rgss_version; /* 1 XP, 2 VX, 3 VX Ace */
 
 #endif

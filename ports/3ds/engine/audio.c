@@ -197,6 +197,9 @@ static volatile bool quit;
 static LightEvent wake;
 
 static float vol_factor(int v) { v = CLAMP(v, 0, 100); return v / 100.0f; }
+/* with the settings' music (BGM, BGS, ME) or sound (SE) volume */
+static float music_factor(int v) { return vol_factor(v) * settings.music_volume / 100.0f; }
+static float sound_factor(int v) { return vol_factor(v) * settings.sound_volume / 100.0f; }
 
 static void set_mix(int ch, float v)
 {
@@ -208,19 +211,8 @@ static void set_mix(int ch, float v)
 /* find the file: with or without extension */
 static bool find_audio(const char *name, char *out, size_t n)
 {
-	static const char *const ext[] = { "", ".ogg", ".OGG", ".wav", ".WAV", ".oga" };
-	for (size_t i = 0; i < sizeof ext / sizeof *ext; i++) {
-		snprintf(out, n, "%s%s", name, ext[i]);
-		const char *dot = strrchr(out, '.');
-		if (i == 0 && (!dot || strchr(dot, '/')))
-			continue; /* no extension: try them */
-		FILE *f = fopen(out, "rb");
-		if (f) {
-			fclose(f);
-			return true;
-		}
-	}
-	return false;
+	static const char *const ext[] = { ".ogg", ".wav", ".oga", "", NULL };
+	return file_find(name, ext, out, n);
 }
 
 static void stream_stop(Stream *s)
@@ -256,7 +248,7 @@ static void stream_start(Stream *s)
 	ndspChnSetInterp(s->ch, NDSP_INTERP_LINEAR);
 	ndspChnSetFormat(s->ch, s->src.channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
 	ndspChnSetRate(s->ch, s->src.rate * CLAMP(s->pitch, 50, 150) / 100.0f);
-	set_mix(s->ch, vol_factor(s->volume));
+	set_mix(s->ch, music_factor(s->volume));
 	for (int i = 0; i < NBUF; i++)
 		s->wb[i].status = NDSP_WBUF_DONE; /* to be filled */
 	s->playing = true;
@@ -325,7 +317,7 @@ static void audio_thread(void *arg)
 				if (s->fade <= 0)
 					stream_stop(s);
 				else
-					set_mix(s->ch, vol_factor(s->volume) * s->fade);
+					set_mix(s->ch, music_factor(s->volume) * s->fade);
 			}
 			stream_feed(s);
 			LightLock_Unlock(&s->lock);
@@ -424,7 +416,7 @@ static void request_play(int i, int argc, VALUE *argv)
 	if (s->playing && !strcmp(s->name, name) && s->pitch == pitch && pos == 0 && s->fade_step == 0) {
 		/* the same music: it goes on, maybe at another volume */
 		s->volume = vol;
-		set_mix(s->ch, vol_factor(vol));
+		set_mix(s->ch, music_factor(vol));
 	} else {
 		snprintf(s->req_name, sizeof s->req_name, "%s", name);
 		s->req_volume = vol;
@@ -519,7 +511,7 @@ static VALUE a_se_play(int argc, VALUE *argv, VALUE self)
 	ndspChnSetInterp(ch, NDSP_INTERP_LINEAR);
 	ndspChnSetFormat(ch, snd->channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
 	ndspChnSetRate(ch, snd->rate * CLAMP(pitch, 50, 150) / 100.0f);
-	set_mix(ch, vol_factor(vol));
+	set_mix(ch, sound_factor(vol));
 	memset(&se_wb[c], 0, sizeof se_wb[c]);
 	se_wb[c].data_pcm16 = snd->pcm;
 	se_wb[c].nsamples = snd->frames;
@@ -536,6 +528,20 @@ static VALUE a_se_stop(VALUE self)
 }
 
 static VALUE a_nothing(int argc, VALUE *argv, VALUE self) { return Qnil; }
+
+/* the settings' volumes changed: the music at once (sound effects: the next ones) */
+void audio_volumes_changed(void)
+{
+	if (!audio_ok)
+		return;
+	for (int i = 0; i < 3; i++) {
+		Stream *s = &streams[i];
+		LightLock_Lock(&s->lock);
+		if (s->playing)
+			set_mix(s->ch, music_factor(s->volume) * s->fade);
+		LightLock_Unlock(&s->lock);
+	}
+}
 
 bool audio_start(void)
 {

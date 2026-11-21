@@ -1,7 +1,8 @@
 /* Input: the 3DS's buttons as RPG Maker's keys.
- *   A: C (confirm)   B: B (cancel, menu)   X: A (Shift, dash)   Y: X
+ *   B: C (confirm, action)   A: B (cancel, menu)   Y: A (Shift, dash)   X: X
+ *   (settings: or A confirm, B cancel, X dash, Y: X)
  *   L, R: L, R (page)   D-pad / circle pad: directions
- *   SELECT: reset the game (like F12) */
+ *   START: the engine's settings   SELECT: reset the game (like F12) */
 #include "engine.h"
 #include <3ds.h>
 #include <string.h>
@@ -21,10 +22,10 @@ static u32 keys_for(int k)
 	case K_LEFT: return KEY_LEFT;
 	case K_RIGHT: return KEY_RIGHT;
 	case K_UP: return KEY_UP;
-	case K_C: return KEY_A;
-	case K_B: return KEY_B;
-	case K_A: case K_SHIFT: return KEY_X;
-	case K_X: return KEY_Y;
+	case K_C: return settings.buttons ? KEY_A : KEY_B;
+	case K_B: return settings.buttons ? KEY_B : KEY_A;
+	case K_A: case K_SHIFT: return settings.buttons ? KEY_X : KEY_Y;
+	case K_X: return settings.buttons ? KEY_Y : KEY_X;
 	case K_L: return KEY_L | KEY_ZL;
 	case K_R: return KEY_R | KEY_ZR;
 	default: return 0;
@@ -38,6 +39,15 @@ void input_poll(void)
 	now = hidKeysHeld();
 	if ((now & KEY_SELECT) && !(before & KEY_SELECT))
 		reset_requested = true;
+	if ((now & KEY_START) && !(before & KEY_START)) {
+		if (settings_menu())
+			reset_requested = true;
+		now = hidKeysHeld();
+		before = now; /* (buttons still held after the menu: no presses) */
+		for (int k = 0; k < K_MAX; k++)
+			held_frames[k] = keys_for(k) && (now & keys_for(k)) ? 2 : 0;
+		return;
+	}
 	for (int k = 0; k < K_MAX; k++) {
 		u32 m = keys_for(k);
 		held_frames[k] = m && (now & m) ? held_frames[k] + 1 : 0;

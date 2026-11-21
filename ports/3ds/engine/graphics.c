@@ -4,6 +4,7 @@
 #include <3ds.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <malloc.h>
 #include <string.h>
 
 int screen_w = 544, screen_h = 416;
@@ -11,6 +12,7 @@ int screen_w = 544, screen_h = 416;
 static px_t *screen;          /* the composed frame */
 static px_t *frozen;          /* Graphics.freeze: the frame shown until transition */
 static int frame_rate = 60, frame_count, brightness = 255;
+int graphics_frame(void) { return frame_count; }
 static VALUE mGraphics;
 
 /* scaling to the top screen: per output pixel, the source position (16.16) */
@@ -117,11 +119,23 @@ static int t_frames;
 
 static double ms(u64 ticks) { return ticks * 1000.0 / SYSCLOCK_ARM11; }
 
+/* free normal memory: what malloc hasn't taken from the heap yet, plus its
+ * own free blocks */
+
+
+/* the last speed line (for tests: Graphics.mkxpz_speed) */
+static char speed_line[400];
+static VALUE g_speed(VALUE self) { return rb_str_new_cstr(speed_line); }
+
 /* the GPU: the scene into texture 0 (or 1: Graphics.freeze), shown on the
  * top screen; frozen_alpha: see gpu_present */
 static bool gpu_frozen;
 
 static u64 t_draw, t_begin;
+extern unsigned gpu_uploads, gpu_upload_px, gpu_draws, gpu_evictions;
+unsigned gpu_used_kb(unsigned *count);
+extern unsigned bitmap_drops, bitmap_reloads;
+extern u64 gpu_upload_ticks;
 
 static void gpu_draw_scene(int which)
 {
@@ -132,14 +146,38 @@ static void gpu_draw_scene(int which)
 	t_draw += svcGetSystemTick() - t0;
 }
 
+/* frame skip (settings: auto): when the game falls behind, frames aren't
+ * drawn (and not waited for), up to 3 in a row, so it keeps its speed */
+static u64 due;
+static int skipped_row, t_skipped;
+
 static void gpu_frame_with(int frozen_alpha)
 {
 	if (!aptMainLoop())
 		rb_exit(0);
 	input_poll();
 	engine_check_reset();
+	const u64 period = SYSCLOCK_ARM11 / 60;
+	u64 now = svcGetSystemTick();
+	due = due ? due + period : now;
+	if (now > due + 8 * period)
+		due = now; /* far behind (loading...): start counting again */
+	else if (now > due + 3 * period)
+		due = now - period; /* the scripts themselves are too slow:
+		                         * skipping can't catch up, so the game
+		                         * runs a little slower instead */
+	/* skipped (not drawn) when 2 frames late, never 2 in a row: at least 30
+	 * pictures a second (when the scripts alone are that slow, the game
+	 * runs a little slower rather than showing only every 4th picture) */
+	if (settings.frame_skip && frozen_alpha < 0 && now > due + 2 * period && skipped_row < 1) {
+		skipped_row++;
+		t_skipped++;
+		frame_count++;
+		return;
+	}
+	skipped_row = 0;
 	u64 tb = svcGetSystemTick();
-	gpu_frame_begin();
+	gpu_frame_begin_sync(now <= due + period / 4);
 	t_begin += svcGetSystemTick() - tb;
 	if (frozen_alpha < 255)
 		gpu_draw_scene(0);
@@ -153,8 +191,19 @@ static void gpu_frame(void)
 	gpu_frame_with(gpu_frozen ? 255 : -1);
 }
 
+/* Ruby's garbage collector: total ms and runs */
+static size_t gc_ms(void)
+{
+	static VALUE key;
+	if (!key)
+		key = ID2SYM(rb_intern("time"));
+	return rb_gc_stat(key);
+}
+
 static VALUE g_update(VALUE self)
 {
+	mem_tell_ruby();
+	prof_graphics_begin();
 	u64 t0 = svcGetSystemTick();
 	if (t_last)
 		t_script += t0 - t_last;
@@ -171,14 +220,54 @@ static VALUE g_update(VALUE self)
 		t_present += svcGetSystemTick() - t1;
 	}
 	t_last = svcGetSystemTick();
-	if (++t_frames == 60) {
+	static int prof_frames;
+	if (prof_on && ++prof_frames == 600) {
+		prof_report(prof_frames);
+		prof_frames = 0;
+	}
+	static size_t gc_last, gc_runs_last;
+	static unsigned bitmaps_last;
+	size_t gc_now = gc_ms(), gc_runs = rb_gc_count();
+	if (++t_frames == 60 && !settings.show_speed) {
+		gc_last = gc_now;
+		gc_runs_last = gc_runs;
+		bitmaps_last = bitmaps_created;
+		t_script = t_compose = t_present = t_draw = t_begin = 0;
+		t_frames = t_skipped = 0;
+		gpu_uploads = gpu_upload_px = gpu_draws = 0;
+		gpu_upload_ticks = 0;
+	} else if (t_frames == 60) {
+		unsigned used_n;
+		snprintf(speed_line, sizeof speed_line, "ms: ruby %.1f (gc %.1f, %u runs), draw %.1f, wait %.1f, other %.1f, skipped %d, "
+		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u, reloaded %u, images %u (%lu KB), stack %u KB, new bitmaps %u", ms(t_script) / 60,
+		         (double) (gc_now - gc_last) / 60, (unsigned) (gc_runs - gc_runs_last), ms(t_draw) / 60, ms(t_begin) / 60,
+		         (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60, t_skipped,
+		         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (heap_free() / 1024), gpu_evictions,
+		         gpu_used_kb(&used_n), used_n, bitmap_drops, bitmap_reloads, mem_px_maps, (unsigned long) (mem_px_bytes / 1024), stack_used_kb(),
+		         bitmaps_created - bitmaps_last);
+		bitmaps_last = bitmaps_created;
+		gc_last = gc_now;
+		gc_runs_last = gc_runs;
+		static int lines;
+		if (lines++ % 10 == 0)
+			log_only("frame %d: %s\n", frame_count, speed_line);
 		printf("ms: ruby %.1f, draw %.1f, wait %.1f, other %.1f\n", ms(t_script) / 60, ms(t_draw) / 60,
 		       ms(t_begin) / 60, (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60);
+		printf("  uploads %u (%u kpx, %.1f ms), quads %u, skipped %d\n  free: %lu KB textures/sound, %lu KB other, freed tex %u\n",
+		       gpu_uploads, gpu_upload_px / 1000, ms(gpu_upload_ticks) / 60, gpu_draws / 60, t_skipped,
+		       (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (heap_free() / 1024), gpu_evictions);
+		t_skipped = 0;
+		gpu_uploads = gpu_upload_px = gpu_draws = 0;
+		gpu_upload_ticks = 0;
 		t_script = t_compose = t_present = t_draw = t_begin = 0;
 		t_frames = 0;
 	}
+	prof_graphics_end();
 	return Qnil;
 }
+
+/* (boot.rb: how far message boxes reach beyond the game's screen) */
+static VALUE g_margin(VALUE self) { return INT2FIX(gpu_on ? gpu_margin : 0); }
 
 static VALUE g_wait(VALUE self, VALUE n)
 {
@@ -215,6 +304,9 @@ static VALUE load_bitmap(VALUE name)
 static VALUE g_transition(int argc, VALUE *argv, VALUE self)
 {
 	int dur = argc > 0 ? num2int(argv[0]) : (rgss_version >= 2 ? 10 : 8);
+	/* as in RGSS (and mkxp-z): a transition ends a fade-out, so the scene
+	 * after the game over screen isn't black */
+	brightness = 255;
 	if (gpu_on) {
 		/* (transition pictures: a plain cross-fade for now) */
 		if (!gpu_frozen)
@@ -241,6 +333,8 @@ static VALUE g_transition(int argc, VALUE *argv, VALUE self)
 			maskv = Qnil;
 		}
 		mask = bitmap_get_maybe(maskv);
+		if (mask && !bitmap_px(mask))
+			mask = NULL;
 	}
 	for (int i = 1; i <= dur && mix; i++) {
 		compose(screen);
@@ -313,6 +407,7 @@ void init_graphics(void)
 	alloc_screen(rgss_version >= 2 ? 544 : 640, rgss_version >= 2 ? 416 : 480);
 	mGraphics = rb_define_module("Graphics");
 	rb_define_module_function(mGraphics, "update", g_update, 0);
+	rb_define_module_function(mGraphics, "mkxpz_margin", g_margin, 0);
 	rb_define_module_function(mGraphics, "wait", g_wait, 1);
 	rb_define_module_function(mGraphics, "freeze", g_freeze, 0);
 	rb_define_module_function(mGraphics, "transition", g_transition, -1);
@@ -330,4 +425,5 @@ void init_graphics(void)
 	rb_define_module_function(mGraphics, "frame_count=", g_set_frame_count, 1);
 	rb_define_module_function(mGraphics, "brightness", g_brightness, 0);
 	rb_define_module_function(mGraphics, "brightness=", g_set_brightness, 1);
+	rb_define_module_function(mGraphics, "mkxpz_speed", g_speed, 0);
 }

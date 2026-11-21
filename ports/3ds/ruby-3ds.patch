@@ -33,3 +33,17 @@
  #define FIBER_POOL_ALLOCATION_MAXIMUM_SIZE 1024
  #endif
  
+--- a/thread_pthread.c	2026-11-21 00:59:35.490323509 +0100
++++ b/thread_pthread.c	2026-11-21 00:59:35.493912565 +0100
+@@ -961,6 +961,11 @@
+ 	    space = (size_t)addr - ((size_t)((char *)addr - size) / pagesize + 1) * pagesize;
+ 	}
+ 	native_main_thread.stack_maxsize = space;
++#elif defined(__3DS__)
++	/* MKXP-Z 3DS: the main stack is __stacksize__ bytes (libctru), so deep
++	 * recursion raises SystemStackError instead of running off its end */
++	extern unsigned int __stacksize__;
++	native_main_thread.stack_maxsize = __stacksize__ - 16 * 1024;
+ #endif
+     }
+ 

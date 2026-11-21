@@ -44,6 +44,11 @@ static VALUE rect_set(int argc, VALUE *argv, VALUE self)
 	}
 	return self;
 }
+/* clone / dup: the C data too (Ruby only copies instance variables) */
+static VALUE rect_init_copy(VALUE self, VALUE orig) { *rect_get(self) = *rect_get(orig); return self; }
+static VALUE color_init_copy(VALUE self, VALUE orig);
+static VALUE tone_init_copy(VALUE self, VALUE orig);
+
 static VALUE rect_empty(VALUE self) { Rect *r = rect_get(self); r->x = r->y = r->w = r->h = 0; return self; }
 #define RECT_ATTR(f, name) \
 	static VALUE rect_get_##f(VALUE s) { return INT2NUM(rect_get(s)->f); } \
@@ -84,6 +89,8 @@ VALUE color_new(double r, double g, double b, double a)
 	c->r = clampc(r); c->g = clampc(g); c->b = clampc(b); c->a = clampc(a);
 	return v;
 }
+static VALUE color_init_copy(VALUE self, VALUE orig) { *color_get(self) = *color_get(orig); return self; }
+
 static VALUE color_set(int argc, VALUE *argv, VALUE self)
 {
 	Color *c = color_get(self);
@@ -136,6 +143,8 @@ VALUE tone_new(double r, double g, double b, double gray)
 	t->r = clampt(r); t->g = clampt(g); t->b = clampt(b); t->gray = clampc(gray);
 	return v;
 }
+static VALUE tone_init_copy(VALUE self, VALUE orig) { *tone_get(self) = *tone_get(orig); return self; }
+
 static VALUE tone_set(int argc, VALUE *argv, VALUE self)
 {
 	Tone *t = tone_get(self);
@@ -221,6 +230,13 @@ static VALUE table_init(int argc, VALUE *argv, VALUE self)
 	return self;
 }
 static VALUE table_resize(int argc, VALUE *argv, VALUE self) { return table_init(argc, argv, self); }
+static VALUE table_init_copy(VALUE self, VALUE orig)
+{
+	Table *t = table_get(self), *o = table_get(orig);
+	table_resize_to(t, o->dim, o->xs, o->ys, o->zs);
+	memcpy(t->data, o->data, (size_t) o->xs * o->ys * o->zs * 2);
+	return self;
+}
 static VALUE table_xs(VALUE s) { return INT2NUM(table_get(s)->xs); }
 static VALUE table_ys(VALUE s) { return INT2NUM(table_get(s)->ys); }
 static VALUE table_zs(VALUE s) { return INT2NUM(table_get(s)->zs); }
@@ -273,6 +289,7 @@ void init_types(void)
 {
 	cRect = rb_define_class("Rect", rb_cObject);
 	rb_define_alloc_func(cRect, rect_alloc);
+	rb_define_method(cRect, "initialize_copy", rect_init_copy, 1);
 	rb_define_method(cRect, "initialize", rect_set, -1);
 	rb_define_method(cRect, "set", rect_set, -1);
 	rb_define_method(cRect, "empty", rect_empty, 0);
@@ -287,6 +304,7 @@ void init_types(void)
 
 	cColor = rb_define_class("Color", rb_cObject);
 	rb_define_alloc_func(cColor, color_alloc);
+	rb_define_method(cColor, "initialize_copy", color_init_copy, 1);
 	rb_define_method(cColor, "initialize", color_set, -1);
 	rb_define_method(cColor, "set", color_set, -1);
 	DEF_ATTR(cColor, "red", color_get_r, color_set_r);
@@ -300,6 +318,7 @@ void init_types(void)
 
 	cTone = rb_define_class("Tone", rb_cObject);
 	rb_define_alloc_func(cTone, tone_alloc);
+	rb_define_method(cTone, "initialize_copy", tone_init_copy, 1);
 	rb_define_method(cTone, "initialize", tone_set, -1);
 	rb_define_method(cTone, "set", tone_set, -1);
 	DEF_ATTR(cTone, "red", tone_get_r, tone_set_r);
@@ -313,6 +332,7 @@ void init_types(void)
 
 	cTable = rb_define_class("Table", rb_cObject);
 	rb_define_alloc_func(cTable, table_alloc);
+	rb_define_method(cTable, "initialize_copy", table_init_copy, 1);
 	rb_define_method(cTable, "initialize", table_init, -1);
 	rb_define_method(cTable, "resize", table_resize, -1);
 	rb_define_method(cTable, "xsize", table_xs, 0);

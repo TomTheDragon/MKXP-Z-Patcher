@@ -56,6 +56,8 @@ void canvas_draw(Canvas *c, Bitmap *src, Rect sr, const DrawOpts *o)
 		gpu_draw(c, src, sr, o);
 		return;
 	}
+	if (!bitmap_px(src))
+		return;
 	/* source rect inside the bitmap */
 	if (sr.x < 0) { sr.w += sr.x; sr.x = 0; }
 	if (sr.y < 0) { sr.h += sr.y; sr.y = 0; }
@@ -188,17 +190,30 @@ static int by_z(const void *a, const void *b)
 	return x->id < y->id ? -1 : x->id > y->id;
 }
 
+/* Ruby (gc.c): true for an object the garbage collector found dead but
+ * hasn't freed yet (lazy sweeping; our C objects are even freed later, in
+ * a postponed job). Such a sprite stays in the element list until then,
+ * while its bitmap may already be freed: drawing it wrote the texture
+ * bookkeeping into freed memory (crashes on the console after a while). */
+int rb_objspace_garbage_object_p(VALUE obj);
+
+static bool element_alive(const Element *e)
+{
+	return RB_SPECIAL_CONST_P(e->self) || !rb_objspace_garbage_object_p(e->self);
+}
+
 static Element **collect(VALUE viewport, int *n)
 {
 	int count = 0;
 	for (Element *e = elements; e; e = e->next)
-		if (e->viewport == viewport)
+		if (e->viewport == viewport && element_alive(e))
 			count++;
 	Element **list = malloc(sizeof *list * (count ? count : 1));
 	int i = 0;
 	for (Element *e = elements; e; e = e->next)
-		if (e->viewport == viewport)
+		if (e->viewport == viewport && element_alive(e) && i < count)
 			list[i++] = e;
+	count = i;
 	qsort(list, count, sizeof *list, by_z);
 	*n = count;
 	return list;
@@ -439,6 +454,7 @@ static VALUE sprite_dispose(VALUE self)
 }
 static VALUE sprite_disposed(VALUE self) { return ((Sprite *) rb_check_typeddata(self, &sprite_type))->disposed ? Qtrue : Qfalse; }
 static VALUE sprite_bitmap(VALUE self) { return sprite_get(self)->bitmap; }
+static VALUE sprite_set_wide(VALUE self, VALUE v) { sprite_get(self)->el.wide = RTEST(v); return v; }
 static VALUE sprite_set_bitmap(VALUE self, VALUE b)
 {
 	Sprite *s = sprite_get(self);
@@ -557,6 +573,9 @@ static void plane_draw(Element *e, Canvas *c, int ox, int oy)
 		return;
 	/* tiles covering the clip area; the plane's origin moves with ox/oy */
 	int bx = ox - s->ox, by = oy - s->oy; /* where one tile's top left is */
+	if (c->gpu && gpu_plane(c, b, bx, by, s->zoom_x, s->zoom_y, s->opacity, s->blend_type,
+	                        color_get(s->color), tone_get(s->tone)))
+		return;
 	int sx = c->clip.x + ((bx - c->clip.x) % tw + tw) % tw - tw;
 	int sy = c->clip.y + ((by - c->clip.y) % th + th) % th - th;
 	DrawOpts o = { .zx = s->zoom_x, .zy = s->zoom_y, .opacity = s->opacity, .blend = s->blend_type,
@@ -604,8 +623,12 @@ void scene_draw(Canvas *c)
 {
 	int n;
 	Element **list = collect(Qnil, &n);
+	/* elements marked mkxpz_wide (message boxes) may use the sides */
+	Canvas wc = *c;
+	if (c->gpu && gpu_margin > 0)
+		wc.clip = (Rect) { -gpu_margin, 0, c->w + 2 * gpu_margin, c->h };
 	for (int i = 0; i < n; i++)
-		list[i]->draw(list[i], c, 0, 0);
+		list[i]->draw(list[i], list[i]->wide ? &wc : c, 0, 0);
 	free(list);
 }
 
@@ -633,6 +656,7 @@ void init_scene(void)
 	rb_define_method(cSprite, "disposed?", sprite_disposed, 0);
 	rb_define_method(cSprite, "flash", sprite_flash, 2);
 	rb_define_method(cSprite, "update", sprite_update, 0);
+	rb_define_method(cSprite, "mkxpz_wide=", sprite_set_wide, 1);
 	rb_define_method(cSprite, "width", sprite_width, 0);
 	rb_define_method(cSprite, "height", sprite_height, 0);
 	DEF_ATTR(cSprite, "bitmap", sprite_bitmap, sprite_set_bitmap);
@@ -676,4 +700,221 @@ void init_scene(void)
 	DEF_ATTR(cPlane, "zoom_x", plane_zoom_x, plane_set_zoom_x);
 	DEF_ATTR(cPlane, "zoom_y", plane_zoom_y, plane_set_zoom_y);
 	DEF_ATTR(cPlane, "visible", plane_visible, plane_set_visible);
+}
+
+/* --- Faster standard VX Ace scripts: Sprite_Character#update in C.
+ * Each character sprite on a map runs this every frame, and in Ruby on the
+ * original 3DS it costs about 90 us per sprite (10 ms on a map with 100
+ * events). boot.rb installs this only when the standard methods it stands
+ * for are unchanged (checked by their source text), and asks again for every
+ * class it meets (mkxpz_fast_ok?): a game that changes any of them, in a
+ * subclass too, gets the original Ruby (mkxpz_slow_update). Uncommon things
+ * (animations, balloons, a new graphic, odd values) call the original Ruby
+ * methods. */
+static ID id_slow_update, id_fast_ok, id_update_animation, id_update_bitmap, id_update_src_rect,
+	id_update_position, id_update_other, id_update_balloon, id_setup_new_effect, id_clear,
+	iv_character, iv_animation, iv_tile_id, iv_character_name, iv_character_index, iv_cw, iv_ch,
+	iv_balloon_duration, iv_real_x, iv_real_y, iv_priority_type, iv_pattern, iv_direction, iv_opacity,
+	iv_blend_type, iv_bush_depth, iv_transparent, iv_animation_id, iv_balloon_id, iv_jump_peak,
+	iv_jump_count, iv_display_x, iv_display_y, iv_map, iv_width, iv_height, iv_scroll_type,
+	cv_ani_checker, cv_ani_spr_checker;
+static VALUE cSpriteBase;
+static ID id_game_map;
+
+static struct { VALUE klass; int kind; bool ok; } fast_cache[48];
+static int fast_n;
+
+static bool fast_ok(VALUE klass, int kind)
+{
+	static const char *const kinds[] = { "sprite", "character", "map" };
+	if (FL_TEST(klass, FL_SINGLETON))
+		return false;
+	for (int i = 0; i < fast_n; i++)
+		if (fast_cache[i].klass == klass && fast_cache[i].kind == kind)
+			return fast_cache[i].ok;
+	bool ok = RTEST(rb_funcall(Qnil, id_fast_ok, 2, klass, ID2SYM(rb_intern(kinds[kind]))));
+	if (fast_n < (int) (sizeof fast_cache / sizeof *fast_cache)) {
+		rb_gc_register_mark_object(klass);
+		fast_cache[fast_n].klass = klass;
+		fast_cache[fast_n].kind = kind;
+		fast_cache[fast_n++].ok = ok;
+	}
+	return ok;
+}
+
+/* a Ruby number: Integer (fixnum) or Float, with Ruby's arithmetic */
+typedef struct { bool f; long long i; double d; } Num;
+static bool num_of(VALUE v, Num *n)
+{
+	if (FIXNUM_P(v)) { *n = (Num) { false, FIX2LONG(v), 0 }; return true; }
+	if (RB_FLOAT_TYPE_P(v)) { *n = (Num) { true, 0, RFLOAT_VALUE(v) }; return true; }
+	return false;
+}
+static double num_d(Num a) { return a.f ? a.d : (double) a.i; }
+static Num num_sub(Num a, Num b) { return a.f || b.f ? (Num) { true, 0, num_d(a) - num_d(b) } : (Num) { false, a.i - b.i, 0 }; }
+static Num num_addi(Num a, long long b) { return a.f ? (Num) { true, 0, a.d + (double) b } : (Num) { false, a.i + b, 0 }; }
+static Num num_muli(Num a, long long b) { return a.f ? (Num) { true, 0, a.d * (double) b } : (Num) { false, a.i * b, 0 }; }
+static bool num_lt(Num a, Num b) { return a.f || b.f ? num_d(a) < num_d(b) : a.i < b.i; }
+/* what the Sprite setters make of it (Float: truncated) */
+static int num_int(Num a, int lo, int hi)
+{
+	double v = a.f ? a.d : (double) a.i;
+	if (v != v)
+		return 0;
+	return v < lo ? lo : v > hi ? hi : (int) v;
+}
+static long long floor_div(long long a, long long b) { long long q = a / b; return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q; }
+static long long floor_mod(long long a, long long b) { return a - floor_div(a, b) * b; }
+
+/* Game_Map#adjust_x / adjust_y */
+
+static Num adjust(Num v, Num disp, bool loop, long long size, long long tiles)
+{
+	if (loop && num_lt(v, num_sub(disp, (Num) { false, floor_div(size - tiles, 2), 0 })))
+		return num_addi(num_sub(v, disp), size);
+	return num_sub(v, disp);
+}
+
+/* update_position; false: values it doesn't handle */
+static bool fast_position(Sprite *s, VALUE chr, VALUE gm)
+{
+	VALUE map = IV(gm, iv_map);
+	if (!RB_TYPE_P(map, T_OBJECT))
+		return false;
+	VALUE mw = IV(map, iv_width), mh = IV(map, iv_height), st = IV(map, iv_scroll_type);
+	VALUE tid = IV(chr, iv_tile_id), name = IV(chr, iv_character_name);
+	VALUE peak = IV(chr, iv_jump_peak), count = IV(chr, iv_jump_count);
+	VALUE prio = IV(chr, iv_priority_type);
+	Num rx, ry, dx, dy;
+	if (!FIXNUM_P(mw) || !FIXNUM_P(mh) || !FIXNUM_P(st) || !FIXNUM_P(tid) || !RB_TYPE_P(name, T_STRING) ||
+	    !FIXNUM_P(peak) || !FIXNUM_P(count) || !FIXNUM_P(prio) || !num_of(IV(chr, iv_real_x), &rx) ||
+	    !num_of(IV(chr, iv_real_y), &ry) || !num_of(IV(gm, iv_display_x), &dx) ||
+	    !num_of(IV(gm, iv_display_y), &dy))
+		return false;
+	long scroll = FIX2LONG(st);
+	Num ax = adjust(rx, dx, scroll == 2 || scroll == 3, FIX2LONG(mw), screen_w / 32);
+	Num ay = adjust(ry, dy, scroll == 1 || scroll == 3, FIX2LONG(mh), screen_h / 32);
+	/* shift_y: object_character? ? 0 : 4 */
+	bool object = FIX2LONG(tid) > 0 || (RSTRING_LEN(name) > 0 && RSTRING_PTR(name)[0] == '!');
+	long long p = FIX2LONG(peak), c = FIX2LONG(count), d = c - p < 0 ? p - c : c - p;
+	long long jump = floor_div(p * p - d * d, 2);
+	Num sx = num_addi(num_muli(ax, 32), 16);
+	Num sy = num_addi(num_addi(num_addi(num_muli(ay, 32), 32), -(object ? 0 : 4)), -jump);
+	s->x = num_int(sx, -999999, 999999);
+	s->y = num_int(sy, -999999, 999999);
+	s->el.z = (int) (FIX2LONG(prio) * 100);
+	return true;
+}
+
+/* @@ani_checker.clear and @@_ani_spr_checker.clear (the class variables
+ * are looked up once a frame) */
+static VALUE checkers[2];
+static int checkers_frame = -1;
+static void clear_checker(int which)
+{
+	if (checkers_frame != graphics_frame()) {
+		checkers[0] = rb_cvar_get(cSpriteBase, cv_ani_checker);
+		checkers[1] = rb_cvar_get(cSpriteBase, cv_ani_spr_checker);
+		checkers_frame = graphics_frame();
+	}
+	VALUE a = checkers[which];
+	if (RB_TYPE_P(a, T_ARRAY)) {
+		if (RARRAY_LEN(a))
+			rb_ary_clear(a);
+	} else {
+		rb_funcall(a, id_clear, 0);
+	}
+}
+
+static VALUE fast_update(VALUE self)
+{
+	VALUE chr = IV(self, iv_character);
+	VALUE gm = mkxpz_gvar(id_game_map);
+	if (!fast_ok(CLASS_OF(self), 0) || !fast_ok(CLASS_OF(chr), 1) || !fast_ok(CLASS_OF(gm), 2))
+		return rb_funcall(self, id_slow_update, 0);
+	/* Sprite_Base#update: Sprite#update, update_animation, the checkers */
+	sprite_update(self);
+	if (!NIL_P(IV(self, iv_animation)))
+		rb_funcall(self, id_update_animation, 0);
+	clear_checker(0);
+	clear_checker(1);
+	/* update_bitmap: only does something when graphic_changed? */
+	VALUE my_tile = IV(self, iv_tile_id);
+	if (!rb_equal(my_tile, IV(chr, iv_tile_id)) ||
+	    !rb_equal(IV(self, iv_character_name), IV(chr, iv_character_name)) ||
+	    !rb_equal(IV(self, iv_character_index), IV(chr, iv_character_index)))
+		rb_funcall(self, id_update_bitmap, 0);
+	/* update_src_rect */
+	if (rb_equal(IV(self, iv_tile_id), INT2FIX(0))) { /* (again: update_bitmap may change it) */
+		VALUE idx = IV(chr, iv_character_index), pat = IV(chr, iv_pattern);
+		VALUE dir = IV(chr, iv_direction), cw = IV(self, iv_cw), ch = IV(self, iv_ch);
+		if (FIXNUM_P(idx) && FIXNUM_P(pat) && FIXNUM_P(dir) && FIXNUM_P(cw) && FIXNUM_P(ch)) {
+			long long index = FIX2LONG(idx), pattern = FIX2LONG(pat) < 3 ? FIX2LONG(pat) : 1;
+			Rect *r = rect_get(sprite_get(self)->src_rect);
+			r->x = (int) ((floor_mod(index, 4) * 3 + pattern) * FIX2LONG(cw));
+			r->y = (int) ((floor_div(index, 4) * 4 + floor_div(FIX2LONG(dir) - 2, 2)) * FIX2LONG(ch));
+			r->w = (int) FIX2LONG(cw);
+			r->h = (int) FIX2LONG(ch);
+		} else {
+			rb_funcall(self, id_update_src_rect, 0);
+		}
+	}
+	/* update_position */
+	if (!fast_position(sprite_get(self), chr, gm))
+		rb_funcall(self, id_update_position, 0);
+	/* update_other */
+	VALUE op = IV(chr, iv_opacity), bl = IV(chr, iv_blend_type), bu = IV(chr, iv_bush_depth);
+	if (FIXNUM_P(op) && FIXNUM_P(bl) && FIXNUM_P(bu)) {
+		Sprite *s = sprite_get(self);
+		s->opacity = CLAMP((int) FIX2LONG(op), 0, 255);
+		s->blend_type = CLAMP((int) FIX2LONG(bl), 0, 2);
+		s->bush_depth = CLAMP((int) FIX2LONG(bu), 0, 999999);
+		s->visible = !RTEST(IV(chr, iv_transparent));
+	} else {
+		rb_funcall(self, id_update_other, 0);
+	}
+	/* update_balloon: only while one shows */
+	VALUE bd = IV(self, iv_balloon_duration);
+	if (!FIXNUM_P(bd) || FIX2LONG(bd) > 0)
+		rb_funcall(self, id_update_balloon, 0);
+	/* setup_new_effect: only with an animation or balloon to start */
+	VALUE aid = IV(chr, iv_animation_id), bid = IV(chr, iv_balloon_id);
+	if (!FIXNUM_P(aid) || FIX2LONG(aid) > 0 || !FIXNUM_P(bid) || FIX2LONG(bid) > 0)
+		rb_funcall(self, id_setup_new_effect, 0);
+	return Qnil;
+}
+
+/* (boot.rb, once it checked the scripts) */
+static VALUE fast_install(VALUE self, VALUE klass)
+{
+	(void) self;
+	cSpriteBase = rb_class_superclass(klass);
+	rb_gc_register_mark_object(cSpriteBase);
+	rb_define_method(klass, "update", fast_update, 0);
+	return Qtrue;
+}
+
+void init_fast(void)
+{
+#define I(v, s) v = rb_intern(s)
+	I(id_game_map, "$game_map");
+	rb_gc_register_address(&checkers[0]);
+	rb_gc_register_address(&checkers[1]);
+	I(id_slow_update, "mkxpz_slow_update"); I(id_fast_ok, "mkxpz_fast_ok?");
+	I(id_update_animation, "update_animation"); I(id_update_bitmap, "update_bitmap");
+	I(id_update_src_rect, "update_src_rect"); I(id_update_position, "update_position");
+	I(id_update_other, "update_other"); I(id_update_balloon, "update_balloon");
+	I(id_setup_new_effect, "setup_new_effect"); I(id_clear, "clear");
+	I(iv_character, "@character"); I(iv_animation, "@animation"); I(iv_tile_id, "@tile_id");
+	I(iv_character_name, "@character_name"); I(iv_character_index, "@character_index");
+	I(iv_cw, "@cw"); I(iv_ch, "@ch"); I(iv_balloon_duration, "@balloon_duration");
+	I(iv_real_x, "@real_x"); I(iv_real_y, "@real_y"); I(iv_priority_type, "@priority_type");
+	I(iv_pattern, "@pattern"); I(iv_direction, "@direction"); I(iv_opacity, "@opacity");
+	I(iv_blend_type, "@blend_type"); I(iv_bush_depth, "@bush_depth"); I(iv_transparent, "@transparent");
+	I(iv_animation_id, "@animation_id"); I(iv_balloon_id, "@balloon_id"); I(iv_jump_peak, "@jump_peak");
+	I(iv_jump_count, "@jump_count"); I(iv_display_x, "@display_x"); I(iv_display_y, "@display_y");
+	I(iv_map, "@map"); I(iv_width, "@width"); I(iv_height, "@height"); I(iv_scroll_type, "@scroll_type");
+	I(cv_ani_checker, "@@ani_checker"); I(cv_ani_spr_checker, "@@ani_spr_checker");
+#undef I
+	rb_define_global_function("mkxpz_fast_install", fast_install, 1);
 }

@@ -20,7 +20,7 @@ static DVLB_s *vsh;
 static shaderProgram_s prog;
 static int u_proj;
 static C3D_Mtx proj_scene, proj_top;
-static float scale, off_x, off_y; /* game -> top screen */
+static float scale_x, scale_y, off_x, off_y; /* game -> top screen */
 static Rect cur_clip = { -1, -1, -1, -1 };
 static int cur_blend = -1;
 static int game_w = 544, game_h = 416;
@@ -33,16 +33,118 @@ static int game_w = 544, game_h = 416;
 static C3D_Tex scene_tex[2];
 static C3D_RenderTarget *scene_rt[2];
 
-typedef struct {
-	C3D_Tex tex;
+/* A bitmap's texture is made of up to 4x4 pieces with power-of-two sides
+ * (the GPU's rule): a 544x544 picture as 512+32 by 512+32 needs 1.1 MB,
+ * as one 1024x1024 texture 4 MB (which often didn't fit). */
+#define MAXP 4
+typedef struct GpuTex GpuTex;
+struct GpuTex {
+	C3D_Tex tex[MAXP * MAXP]; /* row by row */
+	int nx, ny;               /* pieces across, down */
+	int xs[MAXP + 1], ys[MAXP + 1]; /* their edges in the bitmap */
+	size_t bytes;
 	int w, h; /* bitmap size it was made for */
-} GpuTex;
+	bool transparent; /* nothing visible: not drawn at all */
+	bool repeat;      /* wrap mode set to repeat (Plane) */
+	Bitmap *owner;
+	unsigned last_used; /* frame */
+	GpuTex *prev, *next; /* the live textures, most recently used first */
+};
 
 /* textures of disposed bitmaps: freed once the GPU is done with them */
-static GpuTex *trash[256];
-static int ntrash;
+static void tex_delete(GpuTex *g)
+{
+	for (int k = 0; k < g->nx * g->ny; k++)
+		C3D_TexDelete(&g->tex[k]);
+}
+
+static GpuTex **trash;
+static int ntrash, trash_cap;
+
+static void to_trash(GpuTex *g)
+{
+	if (ntrash == trash_cap) {
+		int nc = trash_cap ? trash_cap * 2 : 64;
+		GpuTex **nt = realloc(trash, sizeof *nt * nc);
+		if (!nt) {
+			tex_delete(g); /* (no memory: free it now) */
+			free(g);
+			return;
+		}
+		trash = nt;
+		trash_cap = nc;
+	}
+	trash[ntrash++] = g;
+}
+
+/* the live textures: when memory runs low, the least recently used ones go
+ * (their bitmaps upload them again when drawn) */
+static GpuTex *live_first, *live_last;
+static unsigned frame_no = 1;
+#define LINEAR_RESERVE (1024 * 1024) /* for sound, vertex buffers */
+
+static void live_remove(GpuTex *g)
+{
+	if (g->prev) g->prev->next = g->next; else if (live_first == g) live_first = g->next;
+	if (g->next) g->next->prev = g->prev; else if (live_last == g) live_last = g->prev;
+	g->prev = g->next = NULL;
+}
+
+static void live_touch(GpuTex *g)
+{
+	g->last_used = frame_no;
+	if (live_first == g)
+		return;
+	live_remove(g);
+	g->next = live_first;
+	if (live_first)
+		live_first->prev = g;
+	live_first = g;
+	if (!live_last)
+		live_last = g;
+}
+
+/* free the least recently used texture not used in this frame */
+static bool evict_one(void)
+{
+	GpuTex *g = live_last;
+	if (!g || g->last_used == frame_no)
+		return false;
+	live_remove(g);
+	if (g->owner)
+		g->owner->gpu = NULL;
+	tex_delete(g); /* (the GPU finished the frames that used it) */
+	free(g);
+	return true;
+}
+
+unsigned gpu_evictions;
+static unsigned frame_used_kb(void);
+
+static unsigned frame_used_kb(void)
+{
+	unsigned kb = 0;
+	for (GpuTex *g = live_first; g && g->last_used == frame_no; g = g->next)
+		kb += g->bytes / 1024;
+	return kb;
+}
+
+/* KB of textures used in the last frame, and how many */
+unsigned gpu_used_kb(unsigned *count)
+{
+	unsigned kb = 0, n = 0;
+	for (GpuTex *g = live_first; g && g->last_used + 1 >= frame_no; g = g->next) {
+		kb += g->bytes / 1024;
+		n++;
+	}
+	*count = n;
+	return kb;
+}
 
 bool gpu_on;
+/* statistics (shown with the frame times) */
+unsigned gpu_uploads, gpu_upload_px, gpu_draws;
+u64 gpu_upload_ticks;
 
 void gpu_init(void)
 {
@@ -73,6 +175,8 @@ void gpu_init(void)
 	gpu_on = true;
 }
 
+int gpu_margin;
+
 /* the game's screen size: how it fits onto the top screen */
 void gpu_set_screen(int w, int h)
 {
@@ -80,9 +184,28 @@ void gpu_set_screen(int w, int h)
 		return;
 	game_w = w;
 	game_h = h;
-	scale = w * 240 > h * 400 ? 400.0f / w : 240.0f / h;
-	off_x = (400 - w * scale) / 2;
-	off_y = (240 - h * scale) / 2;
+	/* fit with wide text boxes: the picture as wide as the screen (5:3);
+	 * the game draws in the middle, its message boxes over all of it */
+	gpu_margin = 0;
+	if (settings.screen == 0 && settings.wide_text && h * 400 > w * 240)
+		gpu_margin = (h * 400 / 240 - w) / 2;
+	if (w + 2 * gpu_margin > SCENE_W)
+		gpu_margin = (SCENE_W - w) / 2;
+	Mtx_Ortho(&proj_scene, (float) -gpu_margin, SCENE_W - gpu_margin, 0.0f, SCENE_H, 0.0f, 1.0f, true);
+	w += 2 * gpu_margin;
+	if (settings.screen == 1) {
+		/* stretched to fill the screen */
+		scale_x = 400.0f / w;
+		scale_y = 240.0f / h;
+	} else if (settings.screen == 2) {
+		/* 1:1, the middle of the picture */
+		scale_x = scale_y = 1;
+	} else {
+		/* the whole picture, aspect ratio kept */
+		scale_x = scale_y = w * 240 > h * 400 ? 400.0f / w : 240.0f / h;
+	}
+	off_x = (400 - w * scale_x) / 2;
+	off_y = (240 - h * scale_y) / 2;
 }
 
 static bool presenting;
@@ -92,8 +215,8 @@ static void set_clip(Rect r)
 	if (presenting || !memcmp(&r, &cur_clip, sizeof r))
 		return;
 	cur_clip = r;
-	int x0 = CLAMP(r.x, 0, SCENE_W), y0 = CLAMP(r.y, 0, SCENE_H);
-	int x1 = CLAMP(r.x + r.w, 0, SCENE_W), y1 = CLAMP(r.y + r.h, 0, SCENE_H);
+	int x0 = CLAMP(r.x + gpu_margin, 0, SCENE_W), y0 = CLAMP(r.y, 0, SCENE_H);
+	int x1 = CLAMP(r.x + r.w + gpu_margin, 0, SCENE_W), y1 = CLAMP(r.y + r.h, 0, SCENE_H);
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
 }
 
@@ -121,8 +244,22 @@ static inline u32 abgr(int r, int g, int b, int a)
 }
 
 /* the combiner stages: texture (or vertex color), gray, tone, color */
+/* the combiner setup last made (skipped when the same again) */
+static struct { bool valid, textured; Color color; Tone tone; } tev_last;
+
 static void set_tev(bool textured, const Color *color, const Tone *tone)
 {
+	Color cz = { 0, 0, 0, 0 };
+	Tone tz = { 0, 0, 0, 0 };
+	Color ck = color && color->a > 0 ? *color : cz;
+	Tone tk = tone ? *tone : tz;
+	if (tev_last.valid && tev_last.textured == textured && !memcmp(&tev_last.color, &ck, sizeof ck)
+	    && !memcmp(&tev_last.tone, &tk, sizeof tk))
+		return;
+	tev_last.valid = true;
+	tev_last.textured = textured;
+	tev_last.color = ck;
+	tev_last.tone = tk;
 	int i = 0;
 	C3D_TexEnv *e;
 	bool gray = textured && tone && tone->gray > 0;
@@ -207,56 +344,129 @@ static int pow2(int n)
 	return p;
 }
 
+/* an axis in pieces: a power of two (at most 1024) as long as one texture
+ * for the rest would be more than a quarter padding; 0: too long */
+static int split_axis(int n, int *edges)
+{
+	int k = 0, at = 0;
+	edges[0] = 0;
+	while (at < n && k < MAXP) {
+		int r = n - at, p = pow2(r), len = r;
+		if (k < MAXP - 1 && p > 8 && p - r > r / 4)
+			len = p / 2;
+		if (len > 1024)
+			len = 1024;
+		at += len;
+		edges[++k] = at;
+	}
+	return at == n ? k : 0;
+}
+
+static bool tex_init(GpuTex *g)
+{
+	for (int j = 0; j < g->ny; j++)
+		for (int i = 0; i < g->nx; i++)
+			if (!C3D_TexInit(&g->tex[j * g->nx + i], pow2(g->xs[i + 1] - g->xs[i]), pow2(g->ys[j + 1] - g->ys[j]),
+			                 GPU_RGBA8)) {
+				for (int k = 0; k < j * g->nx + i; k++)
+					C3D_TexDelete(&g->tex[k]);
+				return false;
+			}
+	return true;
+}
+
 /* the bitmap's texture, uploaded if the bitmap changed */
 static GpuTex *texture_of(Bitmap *b)
 {
-	if (b->w > 1024 || b->h > 1024)
-		return NULL;
 	GpuTex *g = b->gpu;
-	if (g && g->w == b->w && g->h == b->h && b->gpu_version == b->version + 1)
+	if (g && g->w == b->w && g->h == b->h && b->gpu_version == b->version + 1) {
+		live_touch(g);
 		return g;
+	}
 	if (!g || g->w != b->w || g->h != b->h) {
 		if (g) {
-			if (ntrash < (int) (sizeof trash / sizeof *trash))
-				trash[ntrash++] = g;
-		}
-		g = calloc(1, sizeof *g);
-		if (!g || !C3D_TexInit(&g->tex, pow2(b->w), pow2(b->h), GPU_RGBA8)) {
-			free(g);
+			live_remove(g);
+			to_trash(g);
 			b->gpu = NULL;
+		}
+		GpuTex t = { 0 };
+		t.nx = split_axis(b->w, t.xs);
+		t.ny = split_axis(b->h, t.ys);
+		if (!t.nx || !t.ny)
+			return NULL; /* (over 4096 pixels) */
+		size_t need = 0;
+		for (int j = 0; j < t.ny; j++)
+			for (int i = 0; i < t.nx; i++)
+				need += (size_t) pow2(t.xs[i + 1] - t.xs[i]) * pow2(t.ys[j + 1] - t.ys[j]) * 4;
+		while (linearSpaceFree() < need + LINEAR_RESERVE && evict_one())
+			gpu_evictions++;
+		g = malloc(sizeof *g);
+		if (g)
+			*g = t;
+		bool ok = g && tex_init(g);
+		while (g && !ok && evict_one()) {
+			gpu_evictions++;
+			ok = tex_init(g);
+		}
+		if (!ok) {
+			static unsigned fails;
+			if (fails++ < 30)
+				log_only("texture %dx%d (%u KB) failed: free %lu KB, used this frame %u KB\n", b->w, b->h,
+				         (unsigned) (need / 1024), (unsigned long) (linearSpaceFree() / 1024), frame_used_kb());
+			free(g);
 			return NULL;
 		}
-		memset(g->tex.data, 0, g->tex.size);
-		C3D_TexSetFilter(&g->tex, GPU_LINEAR, GPU_LINEAR);
-		C3D_TexSetWrap(&g->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		g->owner = b;
+		g->bytes = need;
+		for (int k = 0; k < g->nx * g->ny; k++) {
+			memset(g->tex[k].data, 0, g->tex[k].size);
+			C3D_TexSetFilter(&g->tex[k], GPU_LINEAR, GPU_LINEAR);
+			C3D_TexSetWrap(&g->tex[k], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		}
 		g->w = b->w;
 		g->h = b->h;
 		b->gpu = g;
 	}
+	if (!bitmap_px(b))
+		return NULL;
+	u64 t_up = svcGetSystemTick();
+	gpu_uploads++;
+	gpu_upload_px += (unsigned) (b->w * b->h);
 	/* RGBA8 in 8x8 tiles (Morton order inside); the GPU reads memory row r
 	 * at v = 1 - r / height, so bitmap row y goes to row y */
-	u32 *dst = g->tex.data;
-	int tw = g->tex.width;
-	for (int y = 0; y < b->h; y++) {
-		int ty = y;
-		const px_t *src = b->px + (size_t) y * b->w;
-		u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
-		u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
-		for (int x = 0; x < b->w; x++) {
-			u32 mx = (x & 1) | ((x & 2) << 1) | ((x & 4) << 2);
-			dst[rowbase + ((u32) (x >> 3) << 6) + (mx | my)] = __builtin_bswap32(src[x]);
+	u32 alpha_or = 0;
+	for (int k = 0; k < g->nx * g->ny; k++) {
+		int i = k % g->nx, j = k / g->nx, x0 = g->xs[i], pw = g->xs[i + 1] - x0;
+		u32 *dst = g->tex[k].data;
+		int tw = g->tex[k].width;
+		for (int y = g->ys[j]; y < g->ys[j + 1]; y++) {
+			int ty = y - g->ys[j];
+			const px_t *src = b->px + (size_t) y * b->w + x0;
+			u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
+			u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
+			for (int x = 0; x < pw; x++) {
+				u32 mx = (x & 1) | ((x & 2) << 1) | ((x & 4) << 2);
+				dst[rowbase + ((u32) (x >> 3) << 6) + (mx | my)] = __builtin_bswap32(src[x]);
+				alpha_or |= src[x];
+			}
 		}
+		C3D_TexFlush(&g->tex[k]);
 	}
-	C3D_TexFlush(&g->tex);
+	g->transparent = (alpha_or >> 24) == 0;
 	b->gpu_version = b->version + 1;
+	live_touch(g);
+	gpu_upload_ticks += svcGetSystemTick() - t_up;
 	return g;
 }
 
 void gpu_forget(Bitmap *b)
 {
 	if (b->gpu) {
-		if (gpu_on && ntrash < (int) (sizeof trash / sizeof *trash))
-			trash[ntrash++] = b->gpu;
+		GpuTex *g = b->gpu;
+		live_remove(g);
+		g->owner = NULL;
+		if (gpu_on)
+			to_trash(g);
 		b->gpu = NULL;
 	}
 }
@@ -283,6 +493,7 @@ static void quad(float x0, float y0, float x1, float y1, float u0, float v0, flo
 			py[i] = cy + dx * s + dy * c;
 		}
 	}
+	gpu_draws++;
 	C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
 	for (int i = 0; i < 4; i++)
 		vertex(px[i], py[i], pu[i], pv[i], a);
@@ -303,6 +514,42 @@ static const Tone *merge_tone(const Tone *a, const Tone *b, Tone *out)
 	return out;
 }
 
+/* the part sr of the bitmap, its top left corner (unmirrored) at (ox, oy),
+ * with each piece's share as its own quad */
+static void draw_pieces(GpuTex *g, Rect sr, float ox, float oy, const DrawOpts *o, float a)
+{
+	float zx = (float) o->zx, zy = (float) o->zy;
+	for (int j = 0; j < g->ny; j++) {
+		int r0 = sr.y > g->ys[j] ? sr.y : g->ys[j], r1 = sr.y + sr.h < g->ys[j + 1] ? sr.y + sr.h : g->ys[j + 1];
+		if (r0 >= r1)
+			continue;
+		for (int i = 0; i < g->nx; i++) {
+			int c0 = sr.x > g->xs[i] ? sr.x : g->xs[i], c1 = sr.x + sr.w < g->xs[i + 1] ? sr.x + sr.w : g->xs[i + 1];
+			if (c0 >= c1)
+				continue;
+			C3D_Tex *t = &g->tex[j * g->nx + i];
+			C3D_TexBind(0, t);
+			float tw = t->width, th = t->height;
+			float y0 = oy + (r0 - sr.y) * zy, y1 = oy + (r1 - sr.y) * zy;
+			float v0 = 1 - (r0 - g->ys[j]) / th, v1 = 1 - (r1 - g->ys[j]) / th;
+			float x0, x1, u0, u1;
+			if (!o->mirror) {
+				x0 = ox + (c0 - sr.x) * zx;
+				x1 = ox + (c1 - sr.x) * zx;
+				u0 = (c0 - g->xs[i]) / tw;
+				u1 = (c1 - g->xs[i]) / tw;
+			} else {
+				/* column c lands at ox + (sr.x + sr.w - c) * zx */
+				x0 = ox + (sr.x + sr.w - c1) * zx;
+				x1 = ox + (sr.x + sr.w - c0) * zx;
+				u0 = (c1 - g->xs[i]) / tw;
+				u1 = (c0 - g->xs[i]) / tw;
+			}
+			quad(x0, y0, x1, y1, u0, v0, u1, v1, a, (float) o->angle, o->cx, o->cy);
+		}
+	}
+}
+
 void gpu_draw(Canvas *c, Bitmap *src, Rect sr, const DrawOpts *o)
 {
 	if (sr.x < 0) { sr.w += sr.x; sr.x = 0; }
@@ -312,32 +559,26 @@ void gpu_draw(Canvas *c, Bitmap *src, Rect sr, const DrawOpts *o)
 	if (sr.w <= 0 || sr.h <= 0 || o->opacity <= 0 || o->zx == 0 || o->zy == 0)
 		return;
 	GpuTex *g = texture_of(src);
-	if (!g)
+	if (!g || g->transparent)
 		return;
+	if (g->repeat) {
+		C3D_TexSetWrap(&g->tex[0], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		g->repeat = false;
+	}
 	set_clip(c->clip);
 	set_blend(o->blend);
 	Tone merged;
 	set_tev(true, o->color, merge_tone(o->tone, c->tone, &merged));
-	C3D_TexBind(0, &g->tex);
-	float tw = g->tex.width, th = g->tex.height;
-	float x0 = o->x, y0 = o->y, x1 = o->x + sr.w * (float) o->zx, y1 = o->y + sr.h * (float) o->zy;
-	float u0 = sr.x / tw, u1 = (sr.x + sr.w) / tw;
-	if (o->mirror) {
-		float t = u0;
-		u0 = u1;
-		u1 = t;
-	}
 	float a = o->opacity / 255.0f;
 	if (o->bush_depth > 0 && o->bush_depth < sr.h) {
 		/* the lower bush_depth rows: less opaque */
 		int split = sr.h - o->bush_depth;
-		float ys = o->y + split * (float) o->zy;
-		quad(x0, y0, x1, ys, u0, 1 - sr.y / th, u1, 1 - (sr.y + split) / th, a, (float) o->angle, o->cx, o->cy);
-		quad(x0, ys, x1, y1, u0, 1 - (sr.y + split) / th, u1, 1 - (sr.y + sr.h) / th,
-		     a * o->bush_opacity / 255.0f, (float) o->angle, o->cx, o->cy);
+		draw_pieces(g, (Rect) { sr.x, sr.y, sr.w, split }, o->x, o->y, o, a);
+		draw_pieces(g, (Rect) { sr.x, sr.y + split, sr.w, sr.h - split }, o->x, o->y + split * (float) o->zy, o,
+		            a * o->bush_opacity / 255.0f);
 		return;
 	}
-	quad(x0, y0, x1, y1, u0, 1 - sr.y / th, u1, 1 - (sr.y + sr.h) / th, a, (float) o->angle, o->cx, o->cy);
+	draw_pieces(g, sr, o->x, o->y, o, a);
 }
 
 void gpu_fill(Canvas *c, Rect r, const Color *col, int alpha)
@@ -361,10 +602,18 @@ void gpu_fill(Canvas *c, Rect r, const Color *col, int alpha)
 
 void gpu_frame_begin(void)
 {
-	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	gpu_frame_begin_sync(true);
+}
+
+/* sync: wait for the screen's next refresh first (when the game is on time;
+ * late, it draws at once and the picture shows at the next refresh) */
+void gpu_frame_begin_sync(bool sync)
+{
+	C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0);
+	frame_no++;
 	/* the GPU is done with the last frame: free textures of disposed bitmaps */
 	for (int i = 0; i < ntrash; i++) {
-		C3D_TexDelete(&trash[i]->tex);
+		tex_delete(trash[i]);
 		free(trash[i]);
 	}
 	ntrash = 0;
@@ -377,6 +626,7 @@ void gpu_scene_begin(int which)
 	C3D_FrameDrawOn(scene_rt[which]);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
 	presenting = false;
+	tev_last.valid = false;
 	cur_clip = (Rect) { -1, -1, -1, -1 };
 	cur_blend = -1;
 }
@@ -386,9 +636,29 @@ static void present_tex(int which, float alpha)
 {
 	set_blend(0);
 	set_tev(true, NULL, NULL);
+	if (settings.colors) {
+		/* vivid: 1.2 * c - 0.1 (contrast around the middle) */
+		C3D_TexEnv *e = C3D_GetTexEnv(0);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_MODULATE);
+		C3D_TexEnvScale(e, C3D_RGB, GPU_TEVSCALE_2);
+		C3D_TexEnvSrc(e, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(e, C3D_Alpha, GPU_MODULATE);
+		C3D_TexEnvColor(e, abgr(153, 153, 153, 255));
+		e = C3D_GetTexEnv(1);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_SUBTRACT);
+		C3D_TexEnvSrc(e, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_Alpha, GPU_REPLACE);
+		C3D_TexEnvColor(e, abgr(26, 26, 26, 255));
+		tev_last.valid = false;
+	}
 	C3D_TexBind(0, &scene_tex[which]);
-	float u1 = (float) game_w / SCENE_W, v1 = (float) game_h / SCENE_H;
-	quad(off_x, off_y, off_x + game_w * scale, off_y + game_h * scale, 0, 0, u1, v1, alpha, 0, 0, 0);
+	int pw = game_w + 2 * gpu_margin;
+	float u1 = (float) pw / SCENE_W, v1 = (float) game_h / SCENE_H;
+	quad(off_x, off_y, off_x + pw * scale_x, off_y + game_h * scale_y, 0, 0, u1, v1, alpha, 0, 0, 0);
 }
 
 /* frozen_alpha: -1 just the picture; 0..254 the frozen picture over it
@@ -400,6 +670,7 @@ void gpu_present(int frozen_alpha, int brightness)
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_top);
 	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 	presenting = true;
+	tev_last.valid = false;
 	cur_clip = (Rect) { -1, -1, -1, -1 };
 	cur_blend = -1;
 	if (frozen_alpha < 255)
@@ -424,14 +695,18 @@ static float tile_tw, tile_th, tile_alpha;
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity)
 {
 	GpuTex *g = texture_of(b);
-	if (!g)
+	if (!g || g->nx * g->ny != 1)
 		return false;
+	if (g->repeat) {
+		C3D_TexSetWrap(&g->tex[0], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		g->repeat = false;
+	}
 	set_clip(c->clip);
 	set_blend(0);
 	set_tev(true, NULL, c->tone);
-	C3D_TexBind(0, &g->tex);
-	tile_tw = g->tex.width;
-	tile_th = g->tex.height;
+	C3D_TexBind(0, &g->tex[0]);
+	tile_tw = g->tex[0].width;
+	tile_th = g->tex[0].height;
 	tile_alpha = opacity / 255.0f;
 	return true;
 }
@@ -476,4 +751,35 @@ void gpu_draw_buffer(const float *verts, int first, int count, float tx, float t
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &m);
 	C3D_DrawArrays(GPU_TRIANGLES, first, count);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
+}
+
+/* a Plane in one quad: the texture repeats by itself (only when the bitmap
+ * is exactly its texture's size, i.e. power-of-two sides); false: not
+ * possible, draw it in pieces */
+bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
+               const Color *color, const Tone *tone)
+{
+	GpuTex *g = texture_of(b);
+	if (!g)
+		return true;
+	if (g->transparent || opacity <= 0)
+		return true; /* nothing to see */
+	if (g->nx * g->ny != 1 || g->tex[0].width != b->w || g->tex[0].height != b->h || zx <= 0 || zy <= 0)
+		return false;
+	if (!g->repeat) {
+		C3D_TexSetWrap(&g->tex[0], GPU_REPEAT, GPU_REPEAT);
+		g->repeat = true;
+	}
+	set_clip(c->clip);
+	set_blend(blend);
+	Tone merged;
+	set_tev(true, color, merge_tone(tone, c->tone, &merged));
+	C3D_TexBind(0, &g->tex[0]);
+	/* the clip area; texture coordinates counted from the plane's origin */
+	float x0 = c->clip.x, y0 = c->clip.y, x1 = c->clip.x + c->clip.w, y1 = c->clip.y + c->clip.h;
+	float tw = b->w * (float) zx, th = b->h * (float) zy;
+	float u0 = (x0 - bx) / tw, u1 = (x1 - bx) / tw;
+	float v0 = 1 - (y0 - by) / th, v1 = 1 - (y1 - by) / th;
+	quad(x0, y0, x1, y1, u0, v0, u1, v1, opacity / 255.0f, 0, 0, 0);
+	return true;
 }

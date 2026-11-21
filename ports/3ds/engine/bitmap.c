@@ -2,6 +2,10 @@
 #include "engine.h"
 #include <errno.h>
 #include <png.h>
+#include <lz4frame.h>
+#include <3ds.h>
+#include <malloc.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -13,11 +17,130 @@ static void bitmap_mark(void *p)
 {
 	rb_gc_mark(((Bitmap *) p)->font);
 }
+/* --- dropping pixels of images loaded from files (the game's cache keeps
+ * every image it loaded; the original 3DS has only ~25 MB of normal memory
+ * for a game). The list: file images that have pixels, most recently used
+ * first. */
+static Bitmap *lru_first, *lru_last;
+unsigned bitmap_drops, bitmap_reloads;
+#define HEAP_RESERVE (4 * 1024 * 1024) /* kept free for Ruby */
+
+static void lru_remove(Bitmap *b)
+{
+	if (b->lru_prev) b->lru_prev->lru_next = b->lru_next; else if (lru_first == b) lru_first = b->lru_next;
+	if (b->lru_next) b->lru_next->lru_prev = b->lru_prev; else if (lru_last == b) lru_last = b->lru_prev;
+	b->lru_prev = b->lru_next = NULL;
+}
+
+static void lru_touch(Bitmap *b)
+{
+	if (!b->file || !b->px || lru_first == b)
+		return;
+	lru_remove(b);
+	b->lru_next = lru_first;
+	if (lru_first)
+		lru_first->lru_prev = b;
+	lru_first = b;
+	if (!lru_last)
+		lru_last = b;
+}
+
+/* lets go of the pixels of the image used longest ago (unchanged since
+ * loaded; the 4 most recently used are kept: they may be in use right
+ * now); in_arena: only those in the pixel arena (memory.c), else only
+ * those in the normal heap. false: nothing left to let go of */
+static bool drop_one_keeping(bool in_arena, int keep)
+{
+	for (Bitmap *b = lru_last; b; b = b->lru_prev) {
+		int n = 0;
+		for (Bitmap *x = b->lru_prev; x && n < keep; x = x->lru_prev)
+			n++;
+		if (n < keep)
+			return false;
+		if (b->version != b->file_version || px_in_arena(b->px) != in_arena)
+			continue;
+		lru_remove(b);
+		px_free(b->px, (size_t) b->w * b->h * 4);
+		b->px = NULL;
+		b->dropped = true;
+		bitmap_drops++;
+		return true;
+	}
+	return false;
+}
+
+static bool drop_one(bool in_arena)
+{
+	return drop_one_keeping(in_arena, 4);
+}
+
+/* memory.c: a pixel buffer (or fiber stack) didn't fit. The 4 most
+ * recently used images are kept first; if that's not enough (a 1536x1024
+ * character sheet is 6 MB in one piece), down to the last one used: no
+ * more than that is in use while a new buffer is made. */
+bool mem_release(size_t need, bool in_arena)
+{
+	return drop_one_keeping(in_arena, 4) || drop_one_keeping(in_arena, 1);
+}
+
+/* keeps the normal heap's reserve free (for Ruby); need: a pixel buffer
+ * that goes there (small ones; big ones go into the arena) */
+static void make_room(size_t need)
+{
+	if (need >= PX_MAP_MIN)
+		need = 0;
+	while (heap_free() < need + HEAP_RESERVE && drop_one(false))
+		;
+}
+
+static bool load_image(Bitmap *b, const char *path);
+
+static Bitmap *reload_target;
+static VALUE reload_protected(VALUE path)
+{
+	return load_image(reload_target, (const char *) path) ? Qtrue : Qfalse;
+}
+
+px_t *bitmap_px(Bitmap *b)
+{
+	if (!b->px && b->dropped && !b->disposed) {
+		int w = b->w, h = b->h;
+		make_room((size_t) w * h * 4);
+		Bitmap t = { 0 };
+		/* (no Ruby error from here: it may be in the middle of drawing) */
+		int state = 0;
+		reload_target = &t;
+		VALUE ok = rb_protect(reload_protected, (VALUE) b->file, &state);
+		if (state)
+			rb_set_errinfo(Qnil);
+		if (!state && ok == Qtrue && t.w == w && t.h == h) {
+			b->px = t.px;
+			b->dropped = false;
+			bitmap_reloads++;
+		} else {
+			px_free(t.px, (size_t) t.w * t.h * 4);
+			log_only("%s: couldn't read it again\n", b->file);
+		}
+	}
+	if (b->px)
+		lru_touch(b);
+	return b->px;
+}
+
+static void bitmap_forget_file(Bitmap *b)
+{
+	lru_remove(b);
+	free(b->file);
+	b->file = NULL;
+	b->dropped = false;
+}
+
 static void bitmap_free(void *p)
 {
 	Bitmap *b = p;
 	gpu_forget(b);
-	free(b->px);
+	bitmap_forget_file(b);
+	px_free(b->px, (size_t) b->w * b->h * 4);
 	xfree(b);
 }
 static size_t bitmap_size(const void *p)
@@ -40,7 +163,7 @@ Bitmap *bitmap_get_maybe(VALUE v)
 	if (NIL_P(v))
 		return NULL;
 	Bitmap *b = rb_check_typeddata(v, &bitmap_type);
-	return b->disposed || !b->px ? NULL : b;
+	return b->disposed || (!b->px && !b->dropped) ? NULL : b;
 }
 
 Bitmap *bitmap_get(VALUE v)
@@ -48,8 +171,15 @@ Bitmap *bitmap_get(VALUE v)
 	Bitmap *b = rb_check_typeddata(v, &bitmap_type);
 	if (b->disposed)
 		rb_raise(eRGSSError, "disposed bitmap");
-	if (!b->px)
+	if (!bitmap_px(b)) {
+		if (b->dropped) {
+			rb_gc();
+			if (bitmap_px(b))
+				return b;
+			rb_raise(rb_eNoMemError, "out of memory reading %s again", b->file);
+		}
 		rb_raise(eRGSSError, "uninitialized bitmap");
+	}
 	return b;
 }
 
@@ -57,12 +187,17 @@ static void bitmap_set_size(Bitmap *b, int w, int h)
 {
 	if (w <= 0 || h <= 0)
 		rb_raise(rb_eArgError, "failed to create bitmap (%dx%d)", w, h);
-	b->px = calloc((size_t) w * h, 4);
+	make_room((size_t) w * h * 4);
+	b->px = px_alloc((size_t) w * h * 4, true);
 	if (!b->px) {
 		rb_gc();
-		b->px = calloc((size_t) w * h, 4);
-		if (!b->px)
+		b->px = px_alloc((size_t) w * h * 4, true);
+		if (!b->px) {
+			log_only("no memory for a %dx%d bitmap: %lu KB free, %u images in the arena (%lu KB, %lu KB free)\n", w, h,
+			         (unsigned long) (heap_free() / 1024), mem_px_maps, (unsigned long) (mem_px_bytes / 1024),
+			         (unsigned long) (mem_arena_free() / 1024));
 			rb_raise(rb_eNoMemError, "failed to create bitmap (%dx%d): out of memory", w, h);
+		}
 	}
 	b->w = w;
 	b->h = h;
@@ -78,50 +213,156 @@ static bool load_png(Bitmap *b, const char *path)
 		return false;
 	img.format = PNG_FORMAT_RGBA;
 	bitmap_set_size(b, img.width, img.height);
-	if (!png_image_finish_read(&img, NULL, b->px, 0, NULL)) {
+	bool ok = png_image_finish_read(&img, NULL, b->px, 0, NULL);
+	if (!ok) {
 		png_image_free(&img);
-		free(b->px);
+		px_free(b->px, (size_t) b->w * b->h * 4);
 		b->px = NULL;
 		return false;
 	}
 	return true;
 }
 
-static bool file_exists(const char *p)
-{
-	FILE *f = fopen(p, "rb");
-	if (f)
-		fclose(f);
-	return f != NULL;
-}
-
 /* RGSS finds "Graphics/Titles1/Foo" as Foo.png (also case-insensitively on
  * the SD card, whose file system ignores case anyway) */
 static bool find_image(const char *name, char *out, size_t n)
 {
-	static const char *const ext[] = { "", ".png", ".PNG", ".jpg", ".bmp" };
-	for (size_t i = 0; i < sizeof ext / sizeof *ext; i++) {
-		snprintf(out, n, "%s%s", name, ext[i]);
-		if (file_exists(out))
-			return true;
-	}
-	return false;
+	/* converted ahead (.mkxi) first: also for a name given with .png */
+	char stem[512];
+	snprintf(stem, sizeof stem, "%s", name);
+	char *dot = strrchr(stem, '.');
+	if (dot && !strchr(dot, '/') && !strchr(dot, '\\') &&
+	    (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".bmp")))
+		*dot = 0;
+	static const char *const mkxi[] = { ".mkxi", NULL };
+	if (file_find(stem, mkxi, out, n))
+		return true;
+	static const char *const ext[] = { ".png", ".jpg", ".bmp", "", NULL };
+	return file_find(name, ext, out, n);
 }
+
+/* .mkxi (made by tools/convert-images.py): "MKXI", version, width, height
+ * (32 bits each), then the RGBA pixels as an LZ4 frame; unpacks far faster
+ * than PNG */
+static bool load_mkxi(Bitmap *b, const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return false;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (size > 16)
+		make_room((size_t) size);
+	unsigned char *data = size > 16 ? px_alloc(size, false) : NULL;
+	size_t got = data ? fread(data, 1, size, f) : 0;
+	bool ok = data && got == (size_t) size;
+	fclose(f);
+	if (!ok)
+		log_only("%s: read %u of %ld bytes%s\n", path, (unsigned) got, size, data ? "" : " (no memory)");
+	uint32_t head[4];
+	if (ok)
+		memcpy(head, data, 16);
+	if (!ok || memcmp(head, "MKXI", 4) || head[1] != 1 || !head[2] || !head[3] || head[2] > 8192 || head[3] > 8192) {
+		px_free(data, size > 16 ? size : 0);
+		return false;
+	}
+	bitmap_set_size(b, head[2], head[3]);
+	LZ4F_dctx *dctx;
+	if (LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION))) {
+		log_only("%s: no LZ4 context\n", path);
+		px_free(data, size);
+		return false;
+	}
+	size_t want = (size_t) b->w * b->h * 4, done = 0, pos = 16;
+	while (done < want && pos < (size_t) size) {
+		size_t dst = want - done, src = size - pos;
+		size_t r = LZ4F_decompress(dctx, (char *) b->px + done, &dst, data + pos, &src, NULL);
+		if (LZ4F_isError(r)) {
+			log_only("%s: %s\n", path, LZ4F_getErrorName(r));
+			break;
+		}
+		done += dst;
+		pos += src;
+		if (r == 0)
+			break;
+	}
+	LZ4F_freeDecompressionContext(dctx);
+	px_free(data, size);
+	if (done != want) {
+		log_only("%s: unpacked %u of %u bytes\n", path, (unsigned) done, (unsigned) want);
+		px_free(b->px, want);
+		b->px = NULL;
+		return false;
+	}
+	return true;
+}
+
+static bool load_image(Bitmap *b, const char *path)
+{
+	size_t l = strlen(path);
+	if (l > 5 && !strcasecmp(path + l - 5, ".mkxi"))
+		return load_mkxi(b, path);
+	return load_png(b, path);
+}
+
+unsigned bitmaps_created;
 
 static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 {
 	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
+	/* (the log: how many, and every 50th one's script line) */
+	static unsigned noted;
+	if (++bitmaps_created % 50 == 0 && noted < 40) {
+		char where[600];
+		prof_caller(where, sizeof where);
+		noted++;
+		log_only("Bitmap.new (%s) from %s\n", argc == 1 ? "file" : "size", where);
+	}
 	if (argc == 1) {
 		const char *name = StringValueCStr(argv[0]);
 		char path[512];
-		if (!find_image(name, path, sizeof path) || !load_png(b, path))
-			rb_syserr_fail_str(ENOENT, rb_sprintf("Unable to find or load image %s", name));
+		bool found = find_image(name, path, sizeof path), loaded = found && load_image(b, path);
+		if (found && !loaded) {
+			/* a .mkxi that doesn't load: the PNG */
+			size_t l = strlen(path);
+			if (l > 5 && !strcasecmp(path + l - 5, ".mkxi")) {
+				static const char *const exts[] = { ".png", ".jpg", ".bmp", NULL };
+				char alt[512] = "";
+				if (file_find(name, exts, alt, sizeof alt) && (loaded = load_image(b, alt)))
+					snprintf(path, sizeof path, "%s", alt);
+				log_only("%s: PNG %s\n", name, loaded ? "loaded instead" : "not found or not loadable either");
+			} else {
+				log_only("%s: couldn't load\n", path);
+			}
+		}
+		if (loaded) {
+			b->file = strdup(path);
+			b->file_version = b->version;
+			lru_touch(b);
+		}
+		if (!loaded) {
+			/* missing (e.g. from the RTP, which isn't on the 3DS): an empty
+			 * image instead of stopping the game; noted once per name */
+			static char noted[16][128];
+			static int nnoted;
+			bool seen = false;
+			for (int i = 0; i < nnoted && !seen; i++)
+				seen = !strcmp(noted[i], name);
+			if (!seen) {
+				say("Missing image: %s\n", name);
+				if (nnoted < 16)
+					snprintf(noted[nnoted++], sizeof noted[0], "%s", name);
+			}
+			bitmap_set_size(b, 32, 32);
+		}
 	} else if (argc == 2) {
 		bitmap_set_size(b, num2int(argv[0]), num2int(argv[1]));
 	} else {
 		rb_raise(rb_eArgError, "wrong number of arguments (%d for 1 or 2)", argc);
 	}
 	b->font = rb_class_new_instance(0, NULL, cFont);
+	mem_tell_ruby();
 	return self;
 }
 
@@ -145,8 +386,10 @@ static VALUE bitmap_dispose(VALUE self)
 	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
 	b->disposed = true;
 	gpu_forget(b);
-	free(b->px);
+	bitmap_forget_file(b);
+	px_free(b->px, (size_t) b->w * b->h * 4);
 	b->px = NULL;
+	mem_tell_ruby();
 	return Qnil;
 }
 static VALUE bitmap_disposed(VALUE self) { return ((Bitmap *) rb_check_typeddata(self, &bitmap_type))->disposed ? Qtrue : Qfalse; }

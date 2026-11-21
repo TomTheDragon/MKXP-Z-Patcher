@@ -123,14 +123,261 @@ alias print msgbox if $MKXPZ_RGSS >= 2
 
 $stdout.sync = true
 
+# >>> mkxpz-fast-helpers (tools/fast-checksums.rb uses these too)
+# a method's text, without comments and indentation
+def mkxpz_norm(text)
+  text.lines.map { |l| l.sub(/(\A|\s)#.*/, '').strip }.reject(&:empty?).join("\n")
+end
+
+# the text of the method defined at line of a script section: up to the
+# first "end" with the indentation of its "def"
+def mkxpz_method_text(script, line)
+  l = script.lines
+  d = l[line - 1] or return nil
+  ind = d[/\A */]
+  j = (line...l.size).find { |k| l[k] =~ /\A#{ind}end\b/ } or return nil
+  l[(line - 1)..j].join
+end
+# <<< mkxpz-fast-helpers
+
+# Faster standard VX Ace scripts: Sprite_Character#update runs in C
+# (scene.c), but only while every method it stands for is the standard one.
+# Checksums of the standard methods' text (ports/3ds/tools/fast-checksums.rb);
+# :attr an attr_reader/accessor, :c the engine's own.
+MKXPZ_STOCK = {
+  'Sprite_Character#update' => 2558777199,
+  'Sprite_Character#update_bitmap' => 4103765253,
+  'Sprite_Character#graphic_changed?' => 3797258696,
+  'Sprite_Character#update_src_rect' => 1942911822,
+  'Sprite_Character#update_position' => 1236191671,
+  'Sprite_Character#update_other' => 1919106263,
+  'Sprite_Character#update_balloon' => 3185305667,
+  'Sprite_Character#setup_new_effect' => 3675786357,
+  'Sprite_Base#update' => 1901904939,
+  'Sprite_Base#animation?' => 4013398038,
+  'Game_CharacterBase#screen_x' => 1265888610,
+  'Game_CharacterBase#screen_y' => 414283810,
+  'Game_CharacterBase#screen_z' => 16537052,
+  'Game_CharacterBase#shift_y' => 3177371100,
+  'Game_CharacterBase#jump_height' => 1514128538,
+  'Game_CharacterBase#object_character?' => 2074604390,
+  'Game_Map#adjust_x' => 1413106839,
+  'Game_Map#adjust_y' => 3928380013,
+  'Game_Map#loop_horizontal?' => 812218791,
+  'Game_Map#loop_vertical?' => 975953756,
+  'Game_Map#screen_tile_x' => 1211119882,
+  'Game_Map#screen_tile_y' => 3058309681,
+  'Game_Map#width' => 4255624125,
+  'Game_Map#height' => 4262117737,
+  'Game_CharacterBase#tile_id' => :attr,
+  'Game_CharacterBase#character_name' => :attr,
+  'Game_CharacterBase#character_index' => :attr,
+  'Game_CharacterBase#pattern' => :attr,
+  'Game_CharacterBase#direction' => :attr,
+  'Game_CharacterBase#opacity' => :attr,
+  'Game_CharacterBase#blend_type' => :attr,
+  'Game_CharacterBase#bush_depth' => :attr,
+  'Game_CharacterBase#transparent' => :attr,
+  'Game_CharacterBase#animation_id' => :attr,
+  'Game_CharacterBase#balloon_id' => :attr,
+  'Sprite#update' => :c,
+  'Sprite#x=' => :c,
+  'Sprite#y=' => :c,
+  'Sprite#z=' => :c,
+  'Sprite#opacity=' => :c,
+  'Sprite#blend_type=' => :c,
+  'Sprite#bush_depth=' => :c,
+  'Sprite#visible=' => :c,
+  'Sprite#src_rect' => :c,
+}
+MKXPZ_FAST_NEEDS = {
+  sprite: %w[update_bitmap graphic_changed? update_src_rect update_position update_other update_balloon
+             setup_new_effect animation? x= y= z= opacity= blend_type= bush_depth= visible= src_rect],
+  character: %w[screen_x screen_y screen_z shift_y jump_height object_character? tile_id character_name
+                character_index pattern direction opacity blend_type bush_depth transparent animation_id balloon_id],
+  map: %w[adjust_x adjust_y loop_horizontal? loop_vertical? screen_tile_x screen_tile_y width height],
+}
+
+def mkxpz_stock?(klass, name)
+  m = klass.instance_method(name)
+  exp = MKXPZ_STOCK["#{m.owner}##{m.original_name}"] or return false
+  file, line = m.source_location
+  return file.nil? if exp == :c
+  script = file && $mkxpz_sections[file] or return false
+  return RubyVM::InstructionSequence.of(m).nil? && script.lines[line - 1].to_s =~ /\A\s*attr_(reader|accessor)\b/ if exp == :attr
+  text = mkxpz_method_text(script, line) or return false
+  Zlib.crc32(mkxpz_norm(text)) == exp
+rescue NameError
+  false
+end
+
+# (asked by the engine for each class it meets)
+def mkxpz_fast_ok?(klass, kind)
+  return false if kind == :sprite && !(klass <= Sprite_Character)
+  MKXPZ_FAST_NEEDS[kind].all? { |n| mkxpz_stock?(klass, n) }
+rescue StandardError
+  false
+end
+
+def mkxpz_fast_setup
+  return if $MKXPZ_RGSS != 3 || MKXPZ_STOCK.empty?
+  return unless defined?(Sprite_Character) && defined?(Sprite_Base) && defined?(Game_Event) && defined?(Game_Map)
+  return unless Sprite_Character.superclass == Sprite_Base && Sprite_Base.superclass == Sprite
+  a = Sprite_Character.ancestors
+  return unless a[1] == Sprite_Base && a[2] == Sprite
+  return unless mkxpz_stock?(Sprite_Character, :update) && mkxpz_stock?(Sprite_Base, :update) && mkxpz_stock?(Sprite, :update)
+  return unless mkxpz_fast_ok?(Sprite_Character, :sprite) && mkxpz_fast_ok?(Game_Event, :character) &&
+                mkxpz_fast_ok?(Game_Map, :map)
+  Sprite_Character.send(:alias_method, :mkxpz_slow_update, :update)
+  mkxpz_fast_install(Sprite_Character)
+  mkxpz_log('character sprites: native')
+rescue StandardError => e
+  mkxpz_log("character sprites: Ruby (#{e.class})")
+end
+
+# Message boxes over the whole top screen (settings: "Text boxes", with the
+# fit screen mode): the engine draws the picture Graphics.mkxpz_margin wider
+# on each side than the game's screen, and the message box (only it and its
+# helper windows) reaches into those sides. Laid out again when the setting
+# changes, once the box is closed.
+def mkxpz_wide_setup
+  return unless defined?(Window_Message) && Window_Message.method_defined?(:update)
+  Window_Message.class_eval do
+    alias_method :mkxpz_wide_update, :update
+    def update
+      mkxpz_wide_fit
+      mkxpz_wide_update
+    end
+
+    def mkxpz_wide_fit
+      m = Graphics.mkxpz_margin
+      return if @mkxpz_m == m || (@mkxpz_m && openness > 0) || disposed?
+      old = @mkxpz_m || 0
+      @mkxpz_m = m
+      self.mkxpz_wide = true
+      self.x = x + old - m
+      self.width = width - 2 * old + 2 * m
+      create_contents
+      if @back_bitmap && @back_sprite && respond_to?(:create_back_bitmap, true)
+        # VX Ace's dimmed background, as wide as the box
+        @back_bitmap.dispose
+        create_back_bitmap
+        @back_sprite.bitmap = @back_bitmap
+      end
+      if @back_sprite
+        @back_sprite.x = x
+        @back_sprite.mkxpz_wide = true
+      end
+      @gold_window.x += m - old if @gold_window && @gold_window.x + @gold_window.width >= Graphics.width + old
+      [@gold_window, @choice_window, @number_window, @item_window].each do |w|
+        w.mkxpz_wide = true if w.respond_to?(:mkxpz_wide=)
+      end
+    rescue StandardError => e
+      mkxpz_log("wide message box: #{e.class}: #{e.message}")
+    end
+  end
+  # VX Ace's choices: at the box's right end
+  if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement)
+    Window_ChoiceList.class_eval do
+      alias_method :mkxpz_wide_update_placement, :update_placement
+      def update_placement
+        mkxpz_wide_update_placement
+        self.x += Graphics.mkxpz_margin if x + width >= Graphics.width
+      end
+    end
+  end
+rescue StandardError => e
+  mkxpz_log("wide message box: #{e.class}")
+end
+
+# Save probe (a file "mkxpz-savelog" in the game folder): logs each part of
+# the save data as it's converted (Marshal), each map event, and each block
+# written to the SD card, so a save that never finishes shows where it
+# stopped (every log line is written out at once).
+class MkxpzLoggedFile
+  def initialize(f) @f = f; @n = 0 end
+  def binmode; @f.binmode; self end
+  def write(*s)
+    s.each do |x|
+      @n += x.bytesize
+      mkxpz_log("save: writing #{x.bytesize} bytes (#{@n} in all)")
+      @f.write(x)
+      mkxpz_log("save: written")
+    end
+    s.sum(&:bytesize)
+  end
+end
+
+def mkxpz_save_probe(contents)
+  free = Graphics.mkxpz_speed[/free [0-9\/]+ KB/]
+  mkxpz_log("save probe: #{contents.size} parts, #{free}")
+  contents.each do |k, v|
+    mkxpz_log("save probe: #{k} (#{v.class})...")
+    if k == :map
+      v.instance_variables.each do |iv|
+        x = v.instance_variable_get(iv)
+        mkxpz_log("save probe:   map #{iv} (#{x.class})...")
+        if iv == :@events && x.is_a?(Hash)
+          x.each do |id, e|
+            mkxpz_log("save probe:     event #{id}...")
+            mkxpz_log("save probe:     event #{id}: #{Marshal.dump(e).bytesize} bytes")
+          end
+        else
+          mkxpz_log("save probe:   map #{iv}: #{Marshal.dump(x).bytesize} bytes")
+        end
+      end
+    end
+    mkxpz_log("save probe: #{k}: #{Marshal.dump(v).bytesize} bytes")
+  end
+  mkxpz_log("save probe: all parts converted")
+end
+
+def mkxpz_save_probe_setup
+  return unless File.exist?('mkxpz-savelog') && defined?(DataManager) &&
+                DataManager.respond_to?(:save_game_without_rescue)
+  class << DataManager
+    alias_method :mkxpz_probe_save, :save_game_without_rescue
+    def save_game_without_rescue(index)
+      mkxpz_log("save: slot #{index + 1}")
+      mkxpz_save_probe(make_save_contents)
+      File.open(make_filename(index), 'wb') do |file|
+        f = MkxpzLoggedFile.new(file)
+        $game_system.on_before_save
+        Marshal.dump(make_save_header, f)
+        Marshal.dump(make_save_contents, f)
+        @last_savefile_index = index
+      end
+      mkxpz_log("save: done")
+      true
+    end
+  end
+  mkxpz_log('save probe on (mkxpz-savelog)')
+rescue StandardError => e
+  mkxpz_log("save probe: #{e.class}")
+end
+
 def mkxpz_run_scripts
   $RGSS_SCRIPTS = load_data($MKXPZ_SCRIPTS)
   $RGSS_SCRIPTS.each_with_index do |s, i|
     s[3] = Zlib::Inflate.inflate(s[2]).force_encoding(Encoding::UTF_8)
   end
   test = File.exist?('mkxpz-test.rb')
+  # section name (as Ruby reports it) -> text; nil for names used twice
+  $mkxpz_sections = {}
   $RGSS_SCRIPTS.each_with_index do |s, i|
     name = s[1].to_s.force_encoding(Encoding::UTF_8)
+    file = name.empty? ? "Section#{i}" : name
+    $mkxpz_sections[file] = $mkxpz_sections.key?(file) ? nil : s[3]
+  end
+  fast = true
+  $RGSS_SCRIPTS.each_with_index do |s, i|
+    name = s[1].to_s.force_encoding(Encoding::UTF_8)
+    if fast && name.strip == 'Main'
+      mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
+      mkxpz_wide_setup
+      mkxpz_save_probe_setup
+      fast = false
+    end
     # for testing: mkxpz-test.rb in the game folder, before Main (which doesn't return)
     if test && name.strip == 'Main'
       eval(File.read('mkxpz-test.rb'), TOPLEVEL_BINDING, 'mkxpz-test.rb')

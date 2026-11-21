@@ -39,6 +39,7 @@ if [ ! -f "$BUILD/ruby/Makefile" ]; then
     (cd "$BUILD/ruby" && ../src/configure --host=arm-none-eabi --build=x86_64-pc-linux-gnu \
         ac_cv_func_waitpid=yes ac_cv_header_poll_h=yes ac_cv_func_poll=yes \
         rb_cv_binary_elf=no ac_cv_func_dladdr=no ac_cv_header_dlfcn_h=no \
+        stack_protector=no --disable-fortify-source \
         CC=arm-none-eabi-gcc AR=arm-none-eabi-ar RANLIB=arm-none-eabi-ranlib \
         CFLAGS="$ARCH -std=gnu17 -O2 -ffunction-sections -fdata-sections" \
         CPPFLAGS="-D__3DS__ -DTRANSIENT_HEAP_TOTAL_SIZE=2097152 -I$C/include -include mkxpz-3ds-compat.h -I$DEVKITPRO/libctru/include -I$DEVKITPRO/portlibs/3ds/include" \
@@ -61,7 +62,7 @@ arm-none-eabi-gcc $CF -include mkxpz-3ds-compat.h -I"$R/.ext/include/arm-eabi" -
 arm-none-eabi-gcc $CF -c "$C/compat.c" -o "$T/compat.o"
 arm-none-eabi-gcc $CF -c "$C/pipe.c" -o "$T/pipe.o"
 EXTS=$(cd "$R" && find ext enc -name '*.a' ! -name extinit.a ! -name encinit.a | sed "s|^|$R/|")
-arm-none-eabi-gcc -specs=3dsx.specs $ARCH -Wl,--gc-sections -Wl,--wrap=fcntl -o "$T/rbtest.elf" \
+arm-none-eabi-gcc -specs=3dsx.specs $ARCH -Wl,--gc-sections -Wl,--wrap=fcntl -Wl,--wrap=select -o "$T/rbtest.elf" \
     "$T/main.o" "$T/compat.o" "$T/pipe.o" "$R/ext/extinit.o" "$R/enc/encinit.o" \
     -Wl,--start-group "$R/libruby-static.a" $EXTS -Wl,--end-group \
     -L"$DEVKITPRO/libctru/lib" -L"$DEVKITPRO/portlibs/3ds/lib" -lz -lm -lctru
@@ -101,16 +102,17 @@ PY
 # the fallback font (mkxp-z's Liberation Sans)
 cp "$(dirname "$RUBY_SRC")/../assets/liberation.ttf" "$E/romfs/fonts/" 2>/dev/null || true
 OBJS=""
-for f in main types bitmap font scene window graphics input gpu tilemap audio; do
+for f in main types bitmap font scene window graphics input gpu tilemap audio settings files memory profile rbinternal; do
     arm-none-eabi-gcc $CF -O2 -Wall -Wno-unused-parameter -include mkxpz-3ds-compat.h -I"$E" \
         -I"$R/.ext/include/arm-eabi" -I"$RS/include" -I"$DEVKITPRO/portlibs/3ds/include" \
-        -I"$DEVKITPRO/portlibs/3ds/include/freetype2" -c "$HERE/engine/$f.c" -o "$E/$f.o"
+        -I"$DEVKITPRO/portlibs/3ds/include/freetype2" $( [ $f = rbinternal ] && echo "-I$RS -I$R" ) \
+        -c "$HERE/engine/$f.c" -o "$E/$f.o"
     OBJS="$OBJS $E/$f.o"
 done
-arm-none-eabi-gcc -specs=3dsx.specs $ARCH -Wl,--gc-sections -Wl,--wrap=fcntl -o "$E/mkxpz.elf" \
+arm-none-eabi-gcc -specs=3dsx.specs $ARCH -Wl,--gc-sections -Wl,--wrap=fcntl -Wl,--wrap=select -o "$E/mkxpz.elf" \
     $OBJS "$T/compat.o" "$T/pipe.o" "$R/ext/extinit.o" "$R/enc/encinit.o" \
     -Wl,--start-group "$R/libruby-static.a" $EXTS -Wl,--end-group \
-    -L"$DEVKITPRO/libctru/lib" -L"$DEVKITPRO/portlibs/3ds/lib" -lfreetype -lbz2 -lpng16 -lvorbisidec -logg -lz -lm -lcitro3d -lctru
+    -L"$DEVKITPRO/libctru/lib" -L"$DEVKITPRO/portlibs/3ds/lib" -lfreetype -lbz2 -lpng16 -lvorbisidec -logg -llz4 -lz -lm -lcitro3d -lctru
 smdhtool --create "MKXP-Z" "RPG Maker XP/VX/VX Ace games" "MKXP-Z Patcher" \
     "$DEVKITPRO/libctru/default_icon.png" "$E/mkxpz.smdh"
 3dsxtool "$E/mkxpz.elf" "$BUILD/mkxpz.3dsx" --smdh="$E/mkxpz.smdh" --romfs="$E/romfs"

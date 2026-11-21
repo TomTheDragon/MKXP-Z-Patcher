@@ -270,3 +270,45 @@ int poll(struct pollfd *fds, nfds_t n, int timeout_ms)
 		}
 	}
 }
+
+/* select() (linked in place of libctru's with --wrap=select): Ruby 3.1 uses
+ * poll() only on Linux and select() elsewhere, e.g. when a write to a file
+ * was interrupted and it waits for the file to be writable. libctru's
+ * select is for network sockets: it turned the file into something poll()
+ * doesn't know, so a save on the console waited forever. Here it's poll()
+ * underneath: files are always ready, the pipes as they are. */
+#include <sys/select.h>
+#include <sys/time.h>
+
+int __wrap_select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv)
+{
+	struct pollfd fds[64];
+	int n = 0;
+	for (int fd = 0; fd < nfds && n < 64; fd++) {
+		short ev = 0;
+		if (rd && FD_ISSET(fd, rd)) ev |= POLLIN;
+		if (wr && FD_ISSET(fd, wr)) ev |= POLLOUT;
+		if (ex && FD_ISSET(fd, ex)) ev |= POLLPRI;
+		if (ev) {
+			fds[n].fd = fd;
+			fds[n].events = ev;
+			fds[n].revents = 0;
+			n++;
+		}
+	}
+	int timeout_ms = tv ? (int) (tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000) : -1;
+	int r = poll(fds, n, timeout_ms);
+	if (r < 0)
+		return r;
+	if (rd) FD_ZERO(rd);
+	if (wr) FD_ZERO(wr);
+	if (ex) FD_ZERO(ex);
+	int count = 0;
+	for (int i = 0; i < n; i++) {
+		short re = fds[i].revents;
+		if (rd && (re & (POLLIN | POLLHUP | POLLERR))) { FD_SET(fds[i].fd, rd); count++; }
+		if (wr && (re & (POLLOUT | POLLERR))) { FD_SET(fds[i].fd, wr); count++; }
+		if (ex && (re & POLLPRI)) { FD_SET(fds[i].fd, ex); count++; }
+	}
+	return count;
+}

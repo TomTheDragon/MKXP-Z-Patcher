@@ -48,6 +48,9 @@ static Window *window_get(VALUE self)
 	return w;
 }
 
+/* message boxes: may use the screen's sides (gpu_margin) */
+static VALUE window_set_wide(VALUE self, VALUE v) { window_get(self)->el.wide = RTEST(v); return v; }
+
 /* Window.new, Window.new(viewport) or (VX Ace) Window.new(x, y, w, h) */
 static VALUE window_init(int argc, VALUE *argv, VALUE self)
 {
@@ -264,6 +267,7 @@ void init_window(void)
 	rb_define_method(cWindow, "dispose", window_dispose, 0);
 	rb_define_method(cWindow, "disposed?", window_disposed, 0);
 	rb_define_method(cWindow, "update", window_update, 0);
+	rb_define_method(cWindow, "mkxpz_wide=", window_set_wide, 1);
 	rb_define_method(cWindow, "move", window_move, 4);
 	rb_define_method(cWindow, "open?", window_is_open, 0);
 	rb_define_method(cWindow, "close?", window_is_close, 0);

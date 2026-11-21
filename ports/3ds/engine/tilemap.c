@@ -32,6 +32,7 @@ typedef struct {
 	int nbatches;
 	int key[12]; /* what the cache was built for */
 	bool built;
+	int cx0, cy0, cx1, cy1; /* the tiles in the cache (more than visible) */
 } Tilemap;
 
 static void tilemap_draw_ground(Element *e, Canvas *c, int ox, int oy);
@@ -389,21 +390,29 @@ static void draw_layers(Tilemap *t, Canvas *c, int vox, int voy, bool above)
 	int y0 = ((c->clip.y - by) >> 5) - 1, y1 = (c->clip.y + c->clip.h - 1 - by) >> 5;
 	static const unsigned char ani_a[12] = { 0, 1, 2, 1, 0, 1, 2, 1, 0, 1, 2, 1 };
 	int aa = ani_a[(t->frame / 30) % 12], ac = (t->frame / 30) % 3;
-	int key[12] = { x0, y0, x1, y1, aa, ac, (int) m->version, (int) (intptr_t) m,
+	/* the cache covers MARGIN tiles more on each side, so it's rebuilt when
+	 * the view leaves that area (not at every tile scrolled) */
+	enum { MARGIN = 4 };
+	bool inside = t->built && x0 >= t->cx0 && y0 >= t->cy0 && x1 <= t->cx1 && y1 <= t->cy1;
+	int key[12] = { 0, 0, 0, 0, aa, ac, (int) m->version, (int) (intptr_t) m,
 	                NIL_P(t->flags) ? 0 : (int) table_get(t->flags)->version, 0, 0, 0 };
 	for (int i = 0; i < 9; i++) {
 		Bitmap *b = bitmap_get_maybe(rb_ary_entry(t->bitmaps, i));
 		key[9] = key[9] * 31 + (int) (intptr_t) b;
 		key[10] = key[10] * 31 + (b ? (int) b->version : 0);
 	}
-	if (!t->built || memcmp(key, t->key, sizeof key)) {
-		build(t, m, x0, y0, x1, y1, aa, ac);
+	if (!inside || memcmp(key, t->key, sizeof key)) {
+		t->cx0 = x0 - MARGIN;
+		t->cy0 = y0 - MARGIN;
+		t->cx1 = x1 + MARGIN;
+		t->cy1 = y1 + MARGIN;
+		build(t, m, t->cx0, t->cy0, t->cx1, t->cy1, aa, ac);
 		memcpy(t->key, key, sizeof key);
 		t->built = true;
 	}
 	if (!t->verts)
 		return;
-	float tx = bx + x0 * 32, ty = by + y0 * 32;
+	float tx = bx + t->cx0 * 32, ty = by + t->cy0 * 32;
 	for (int i = 0; i < t->nbatches; i++) {
 		Batch *b = &t->batches[i];
 		if (b->above != above)

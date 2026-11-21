@@ -3,7 +3,11 @@
  * The bottom screen shows messages (and errors). */
 #include "engine.h"
 #include <3ds.h>
+#include <errno.h>
+#include <malloc.h>
+#include <unistd.h>
 #include <ruby/encoding.h>
+#include <sys/iosupport.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +21,20 @@ VALUE eRGSSError, eRGSSReset;
 int rgss_version = 3;
 
 void fonts_scan(const char *engine_dir);
+
+/* Memory split (libctru reads this at startup): graphics ("linear") memory
+ * 20 MB, the rest for the normal heap. libctru's default caps the heap at
+ * 24 MB and gives graphics up to 32 MB, but on an original 3DS (64 MB for
+ * the game) Ruby, the scripts and the images' pixels need the heap more:
+ * textures are freed and uploaded again when graphics memory runs low
+ * (a frame needs at most ~11 MB on Dazed's biggest map). */
+u32 __ctru_linear_heap_size = 20 * 1024 * 1024;
+
+/* The main thread's stack (libctru's default is 32 KB): Ruby, the game's
+ * scenes and e.g. Marshal.dump when saving all run on it; 22 KB were used
+ * right after starting. Ruby knows its size (ruby-3ds.patch), so running
+ * out is a SystemStackError rather than a crash. */
+u32 __stacksize__ = 512 * 1024;
 
 static FILE *log_file;
 
@@ -32,6 +50,18 @@ void say(const char *fmt, ...)
 		va_end(ap);
 		fflush(log_file);
 	}
+}
+
+/* only into mkxpz-3ds.log (not the bottom screen) */
+void log_only(const char *fmt, ...)
+{
+	if (!log_file)
+		return;
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(log_file, fmt, ap);
+	va_end(ap);
+	fflush(log_file);
 }
 
 static VALUE m_log(VALUE self, VALUE s)
@@ -127,15 +157,38 @@ static VALUE run_scripts(VALUE unused)
 	return rb_funcall(rb_cObject, rb_intern("mkxpz_run_scripts"), 0);
 }
 
+/* "Class: message" and the first lines of the backtrace */
+static VALUE error_text(VALUE err)
+{
+	VALUE s = rb_str_dup(rb_class_name(rb_obj_class(err)));
+	rb_str_cat_cstr(s, ": ");
+	rb_str_append(s, rb_obj_as_string(rb_funcall(err, rb_intern("message"), 0)));
+	VALUE bt = rb_funcall(err, rb_intern("backtrace"), 0);
+	for (long i = 0; RB_TYPE_P(bt, T_ARRAY) && i < RARRAY_LEN(bt) && i < 8; i++) {
+		rb_str_cat_cstr(s, "\n  ");
+		rb_str_append(s, rb_obj_as_string(RARRAY_AREF(bt, i)));
+	}
+	return s;
+}
+
 static void show_error(void)
 {
 	VALUE err = rb_errinfo();
 	if (NIL_P(err))
 		return;
-	VALUE cls = rb_class_name(rb_obj_class(err));
-	say("(%s)\n", StringValueCStr(cls));
-	VALUE msg = rb_funcall(err, rb_intern("full_message"), 1, rb_hash_new());
-	say("\n%s\n", StringValueCStr(msg));
+	int state = 0;
+	VALUE text = rb_protect(error_text, err, &state);
+	if (state || !RB_TYPE_P(text, T_STRING)) {
+		rb_set_errinfo(Qnil);
+		say("\n(an error; its message couldn't be read)\n");
+		return;
+	}
+	/* (no NUL bytes for printf) */
+	char *p = RSTRING_PTR(text);
+	for (long i = 0; i < RSTRING_LEN(text); i++)
+		if (!p[i])
+			p[i] = '?';
+	say("\n%.*s\n", (int) RSTRING_LEN(text), p);
 }
 
 static bool finished;
@@ -161,8 +214,152 @@ static void wait_start(void)
 	}
 }
 
+/* The main thread's stack (libctru puts __stacksize__ bytes at the start of
+ * the heap): filled with a pattern at startup, so the log can say how much
+ * of it was ever used. */
+static volatile unsigned char *stack_bottom, *stack_top;
+
+static __attribute__((noinline)) void stack_paint(void)
+{
+	extern char *fake_heap_start;
+	extern u32 __stacksize__;
+	volatile unsigned char here = 0;
+	stack_top = (unsigned char *) fake_heap_start;
+	stack_bottom = stack_top - __stacksize__;
+	for (volatile u32 *p = (volatile u32 *) (stack_bottom + 64); (u32) p < (u32) &here - 256; p++)
+		*p = 0xa5a5a5a5u;
+}
+
+/* (the deepest point only moves down: checked from there in 1 KB steps,
+ * so it costs next to nothing) */
+unsigned stack_used_kb(void)
+{
+	static volatile u32 *low;
+	if (!stack_bottom)
+		return 0;
+	if (!low)
+		low = (volatile u32 *) ((u32) stack_top & ~3u);
+	for (;;) {
+		volatile u32 *q = low - 256;
+		if ((volatile unsigned char *) q < stack_bottom + 64)
+			break;
+		bool touched = false;
+		for (volatile u32 *r = q; r < low && !touched; r++)
+			touched = *r != 0xa5a5a5a5u;
+		if (!touched)
+			break;
+		low = q;
+	}
+	return (unsigned) ((stack_top - (volatile unsigned char *) low) / 1024);
+}
+
+/* what goes to stderr (e.g. Ruby's "[FATAL] failed to allocate memory"
+ * before it quits) also goes into mkxpz-3ds.log */
+static devoptab_t err_tab;
+static const devoptab_t *err_orig;
+
+static ssize_t err_write(struct _reent *r, void *fd, const char *ptr, size_t len)
+{
+	if (log_file) {
+		fwrite(ptr, 1, len, log_file);
+		fflush(log_file);
+	}
+	return err_orig && err_orig->write_r ? err_orig->write_r(r, fd, ptr, len) : (ssize_t) len;
+}
+
+/* Writes to the SD card. On the console a save hung: a write reported 0
+ * bytes written, and Ruby (which then waits until the file is writable,
+ * and our poll says files always are) tried again forever. So a write that
+ * writes nothing is tried again here, then with the data copied into a new
+ * buffer straight through the FS service; if nothing helps it fails with
+ * EIO (Ruby raises, the game's save reports a failure). With
+ * "mkxpz-savelog" in the game folder every write goes into the log. */
+static devoptab_t sd_tab;
+static const devoptab_t *sd_orig;
+static bool sd_log;
+
+/* libctru's archive file (archive_dev.c): the FS handle, flags, offset */
+typedef struct { Handle h; u32 flags; u64 offset; } ArchiveFile;
+
+static void *log_fd;   /* the log's own writes pass straight through */
+static bool in_sd_write;
+
+static ssize_t sd_write_checked(struct _reent *r, void *fd, const char *ptr, size_t len);
+
+static ssize_t sd_write(struct _reent *r, void *fd, const char *ptr, size_t len)
+{
+	if (fd == log_fd || in_sd_write)
+		return sd_orig->write_r(r, fd, ptr, len);
+	in_sd_write = true;
+	ssize_t n = sd_write_checked(r, fd, ptr, len);
+	in_sd_write = false;
+	return n;
+}
+
+static ssize_t sd_write_checked(struct _reent *r, void *fd, const char *ptr, size_t len)
+{
+	ArchiveFile *f = fd;
+	u64 at = f->offset;
+	ssize_t n = sd_orig->write_r(r, fd, ptr, len);
+	if (sd_log || n != (ssize_t) len)
+		log_only("sd write: %u bytes at %llu from %p: %d%s\n", (unsigned) len, (unsigned long long) at, ptr, (int) n,
+		         n < 0 ? " (error)" : "");
+	if (n != 0 || len == 0)
+		return n;
+	/* nothing written: again, then from a copy straight through FS */
+	n = sd_orig->write_r(r, fd, ptr, len);
+	log_only("sd write: again: %d\n", (int) n);
+	if (n != 0)
+		return n;
+	void *copy = memalign(64, len);
+	if (copy) {
+		memcpy(copy, ptr, len);
+		u32 bytes = 0;
+		Result rc = FSFILE_Write(f->h, &bytes, f->offset, copy, len, FS_WRITE_FLUSH);
+		log_only("sd write: FSFILE_Write from a copy: result %08lx, %lu bytes\n", (unsigned long) rc, (unsigned long) bytes);
+		free(copy);
+		if (R_SUCCEEDED(rc) && bytes > 0) {
+			f->offset += bytes;
+			return bytes;
+		}
+	}
+	r->_errno = EIO;
+	return -1;
+}
+
+static void guard_sd_writes(void)
+{
+	int i = FindDevice("sdmc:");
+	if (i < 0 || !devoptab_list[i] || !devoptab_list[i]->write_r)
+		return;
+	sd_orig = devoptab_list[i];
+	sd_tab = *sd_orig;
+	sd_tab.write_r = sd_write;
+	devoptab_list[i] = &sd_tab;
+	if (log_file) {
+		__handle *h = __get_handle(fileno(log_file));
+		log_fd = h ? h->fileStruct : NULL;
+	}
+	FILE *f = fopen("mkxpz-savelog", "r");
+	if (f) {
+		fclose(f);
+		sd_log = true;
+	}
+}
+
+static void tee_stderr(void)
+{
+	err_orig = devoptab_list[STD_ERR];
+	if (err_orig)
+		err_tab = *err_orig;
+	err_tab.name = "stderr";
+	err_tab.write_r = err_write;
+	devoptab_list[STD_ERR] = &err_tab;
+}
+
 int main(int argc, char **argv)
 {
+	stack_paint();
 	gfxInitDefault();
 	consoleInit(GFX_BOTTOM, NULL);
 	atexit(hold_on_exit);
@@ -186,12 +383,26 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	log_file = fopen("mkxpz-3ds.log", "w");
+	tee_stderr();
+	guard_sd_writes();
+	settings_load();
 	char scripts[256];
 	read_ini(scripts, sizeof scripts);
 	const char *ext = strrchr(scripts, '.');
 	rgss_version = ext && !strcasecmp(ext, ".rvdata2") ? 3 : ext && !strcasecmp(ext, ".rvdata") ? 2 : 1;
 	say("MKXP-Z 3DS: %s (RGSS%d)\n", dir, rgss_version);
 
+	/* Ruby's garbage collector: by default it lets 16 MB be allocated before
+	 * collecting, nearly all of the ~19 MB heap here (with the image pixels
+	 * counted too, see memory.c, garbage piled up until a save ran out of
+	 * memory on the console) */
+	setenv("RUBY_GC_MALLOC_LIMIT", "4000000", 0);
+	setenv("RUBY_GC_MALLOC_LIMIT_MAX", "8000000", 0);
+	setenv("RUBY_GC_OLDMALLOC_LIMIT", "4000000", 0);
+	setenv("RUBY_GC_OLDMALLOC_LIMIT_MAX", "8000000", 0);
+	/* fibers (event scripts, message boxes): 128 KB of C stack each instead
+	 * of 256 KB (Ruby's minimum on 32-bit), with the 64 KB Ruby stack */
+	setenv("RUBY_FIBER_MACHINE_STACK_SIZE", "131072", 0);
 	ruby_sysinit(&argc, &argv);
 	{
 		RUBY_INIT_STACK;
@@ -223,8 +434,35 @@ int main(int argc, char **argv)
 		init_font();
 		init_bitmap();
 		init_scene();
+		init_fast();
 		init_window();
 		gpu_init();
+		{
+			extern u32 __ctru_heap_size, __ctru_linear_heap_size;
+			bool n3ds = false;
+			APT_CheckNew3DS(&n3ds);
+			s64 appmem = 0;
+			svcGetSystemInfo(&appmem, 0, 1); /* the application memory region */
+			log_only("memory: %s, application %lu KB, heap %lu KB, linear %lu KB (free %lu KB), VRAM free %lu KB\n",
+			         n3ds ? "New 3DS" : "3DS", (unsigned long) (appmem / 1024), (unsigned long) (__ctru_heap_size / 1024),
+			         (unsigned long) (__ctru_linear_heap_size / 1024), (unsigned long) (linearSpaceFree() / 1024),
+			         (unsigned long) (vramSpaceFree() / 1024));
+		}
+		/* (test: the emulator gives 96 MB; a real original 3DS 64 MB, which
+		 * leaves about 35 MB of normal memory next to the 20 MB of graphics
+		 * memory) */
+		FILE *lm = fopen("mkxpz-lowmem", "r");
+		if (lm) {
+			fclose(lm);
+			/* the heap as big as an original 3DS's (38 MB) */
+			extern u32 __ctru_heap_size;
+			size_t keep = 38060 * 1024;
+			static void *volatile hog; /* (volatile: kept by the compiler) */
+			hog = __ctru_heap_size > keep ? malloc(__ctru_heap_size - keep) : NULL;
+			if (hog)
+				say("test: normal memory reduced to %lu KB\n", (unsigned long) (heap_free() / 1024));
+		}
+		mem_init();
 		if (!audio_start())
 			say("No sound: the DSP firmware is missing (run \"DSP1\" once: sdmc:/3ds/dspfirm.cdc)\n");
 		init_graphics();
@@ -232,6 +470,7 @@ int main(int argc, char **argv)
 		init_audio();
 		if (rgss_version >= 2)
 			init_tilemap();
+		prof_init();
 		say("step: classes\n");
 		bool ok = eval_source(boot_rb, "boot.rb");
 		say("step: boot.rb\n");
