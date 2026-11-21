@@ -70,7 +70,7 @@ typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;
 /* the text layer at scale sx, sy (NULL: none); full: also when not native */
 Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy);
 void bitmap_text_layers_drop_full(void); /* the scale-1 layers made for a freeze */
-void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale);
+void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale, int xs);
 
 extern VALUE cBitmap, cFont;
 Bitmap *bitmap_get(VALUE v); /* raises if disposed */
@@ -150,7 +150,10 @@ void gpu_frame_end(void);
  * finished picture (gx, gy: the contents' origin, clip: what shows, in
  * game pixels) */
 void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity);
-void gpu_text_forget(Bitmap *b); /* bitmap.c: disposed or freed */
+void gpu_text_forget(Bitmap *b);
+extern int gpu_top_xs; /* 2: the top screen in wide mode (800 across) */
+bool gpu_wide_possible(void);
+void gpu_set_wide(void); /* bitmap.c: disposed or freed */
 /* loading bar: an extra frame (the last picture and a bar at the top) while
  * something loads for a long time between frames */
 void gpu_loading_frame(int frozen_alpha, int brightness, float frac);
@@ -230,6 +233,7 @@ typedef struct {
 	int sharp_text; /* window text drawn at the top screen's resolution */
 	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
 	int battery;    /* battery icon at the top screen's top left */
+	int wide_screen; /* the top screen's 800 columns (not on the original 2DS) */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;

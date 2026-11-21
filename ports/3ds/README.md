@@ -346,15 +346,28 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   sound decoding and load_data draws an extra frame (the last picture,
   its window text, a 4 px bar on the right edge filling from the bottom)
   after 150 ms without a frame, every 50 ms at most.
+- Deferred texture uploads (big images during a frame): the texture is
+  created only after the frame, together with its upload. Created during
+  the frame and filled after it, textures came out empty after resets and
+  loads (characters, tiles missing; found with a reset/load loop and
+  Bitmap#mkxpz_tex_info). Texture pieces are at most 512 (1024 for axes
+  over 2048): 1 MB blocks still fit a fragmented linear heap.
+- Wide mode (settings "Top screen"): gfxSetWide, a 240x800 render target,
+  scale_x doubled; window text rendered with letters twice as wide
+  (FT_Set_Pixel_Sizes(2 * size, size), font.c text_xs); battery and
+  loading bar drawn with a 400-wide projection. Not on the original 2DS
+  (CFGU_GetSystemModel). Azahar shows only the left 400 columns.
+- Speed display: drawn into the bottom framebuffer (rows 0-2, the console
+  font at 2x for "Speed"), the message console below it.
 - Battery icon (battery.c, drawn last in gpu_present): mcu::HWC's
   percentage when it fits ptm:u's 0..5 step (Azahar's MCU answers with
   the step), else the step; asked every 2 s; charging from ptm:u.
 - Buttons (default): A confirm, B cancel, Y run, X / R page up / down,
   ZL / ZR the X / Y keys, L held = speed-up (no waiting for the screen,
   every 4th picture drawn); settings "Buttons" has the old layout.
-- The speed display is the bottom screen's last line, drawn again after
-  every other console output (libctru's scrolling of a console window
-  wiped the line next to it: flicker).
+- The speed display is drawn again after every other console output
+  (libctru's scrolling of a console window wiped the line next to it:
+  flicker).
 - The profiler (mkxpz-profile) was involved in all three "random" console
   crashes (its job sampling while Ruby builds an exception); it's for
   diagnosis only and no longer in the test package.

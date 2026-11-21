@@ -1,7 +1,7 @@
 /* Graphics: the game's screen (in memory, at its own resolution), shown on
  * the 3DS's top screen (400x240), scaled to fit. */
 #include "engine.h"
-extern unsigned gpu_loading_frames; /* gpu.c */
+extern unsigned gpu_loading_frames, gpu_null_pending, gpu_null_alloc, gpu_null_px, gpu_evictions; /* gpu.c */
 #include <3ds.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -182,7 +182,7 @@ static void overlay_text(void)
 	overlay_since = now;
 	extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 	char text[80];
-	snprintf(text, sizeof text, "Speed %3d%%  RAM %.1f/%lu  GFX %.1f/%lu MB", pct,
+	snprintf(text, sizeof text, "Speed %3d%%|RAM %.1f/%lu MB|GFX %.1f/%lu MB", pct,
 	         (heap_free() + mem_arena_free()) / 1048576.0, (unsigned long) (__ctru_heap_size >> 20),
 	         linearSpaceFree() / 1048576.0, (unsigned long) (__ctru_linear_heap_size >> 20));
 	status_line(text);
@@ -296,12 +296,13 @@ static VALUE g_update(VALUE self)
 	} else if (t_frames == 60) {
 		unsigned used_n;
 		snprintf(speed_line, sizeof speed_line, "ms: ruby %.1f (gc %.1f, %u runs), draw %.1f, wait %.1f, other %.1f, skipped %d, "
-		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u (+%u after upload), reloaded %u, images %u (%lu KB, fiber stacks %lu KB), stack %u KB, new bitmaps %u, loading bars %u", ms(t_script) / 60,
+		         "free %lu/%lu KB, freed tex %u, used %u KB in %u, dropped %u (+%u after upload), reloaded %u, images %u (%lu KB, fiber stacks %lu KB), stack %u KB, new bitmaps %u, loading bars %u, no texture %u/%u/%u (later/memory/pixels), evicted %u", ms(t_script) / 60,
 		         (double) (gc_now - gc_last) / 60, (unsigned) (gc_runs - gc_runs_last), ms(t_draw) / 60, ms(t_begin) / 60,
 		         (ms(t_compose) - ms(t_draw) - ms(t_begin)) / 60, t_skipped,
 		         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (heap_free() / 1024), gpu_evictions,
 		         gpu_used_kb(&used_n), used_n, bitmap_drops, bitmap_released, bitmap_reloads, mem_px_maps, (unsigned long) (mem_px_bytes / 1024), (unsigned long) (mem_stack_bytes / 1024), stack_used_kb(),
-		         bitmaps_created - bitmaps_last, gpu_loading_frames);
+		         bitmaps_created - bitmaps_last, gpu_loading_frames, gpu_null_pending, gpu_null_alloc, gpu_null_px,
+		         gpu_evictions);
 		bitmaps_last = bitmaps_created;
 		gc_last = gc_now;
 		gc_runs_last = gc_runs;

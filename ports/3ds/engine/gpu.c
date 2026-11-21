@@ -19,7 +19,15 @@ static C3D_RenderTarget *top;
 static DVLB_s *vsh;
 static shaderProgram_s prog;
 static int u_proj;
-static C3D_Mtx proj_scene, proj_top;
+static C3D_Mtx proj_scene, proj_top, proj_ui;
+/* the top screen's width in pixels: 400, or 800 in wide mode (settings
+ * "Top screen"; the panel has 800 columns, 3D shows them to one eye each):
+ * twice the detail across, half-wide pixels. gpu_top_xs: 1 or 2. Things
+ * of the engine's own (battery, loading bar) are drawn on 400 (proj_ui). */
+static int top_w = 400;
+int gpu_top_xs = 1;
+static void top_target(void);
+static bool in_frame;
 static float scale_x, scale_y, off_x, off_y; /* game -> top screen */
 static Rect cur_clip = { -1, -1, -1, -1 };
 static int cur_blend = -1;
@@ -149,8 +157,7 @@ u64 gpu_upload_ticks;
 void gpu_init(void)
 {
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-	top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-	C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+	top_target();
 	for (int i = 0; i < 2; i++) {
 		if (!C3D_TexInitVRAM(&scene_tex[i], SCENE_W, SCENE_H, GPU_RGBA8))
 			C3D_TexInit(&scene_tex[i], SCENE_W, SCENE_H, GPU_RGBA8);
@@ -171,8 +178,48 @@ void gpu_init(void)
 	C3D_CullFace(GPU_CULL_NONE);
 	/* the scene texture: game pixels, y down; the top screen: its pixels */
 	Mtx_Ortho(&proj_scene, 0.0f, SCENE_W, 0.0f, SCENE_H, 0.0f, 1.0f, true);
-	Mtx_OrthoTilt(&proj_top, 0.0f, 400.0f, 240.0f, 0.0f, 0.0f, 1.0f, true);
+	Mtx_OrthoTilt(&proj_ui, 0.0f, 400.0f, 240.0f, 0.0f, 0.0f, 1.0f, true);
 	gpu_on = true;
+}
+
+/* wide mode works everywhere but on the original 2DS */
+bool gpu_wide_possible(void)
+{
+	static int possible = -1;
+	if (possible < 0) {
+		u8 model = 0;
+		possible = 1;
+		if (R_SUCCEEDED(cfguInit())) {
+			if (R_SUCCEEDED(CFGU_GetSystemModel(&model)) && model == CFG_MODEL_2DS)
+				possible = 0;
+			cfguExit();
+		}
+	}
+	return possible;
+}
+
+/* the top screen's render target, for the setting (between frames) */
+static void top_target(void)
+{
+	bool wide = settings.wide_screen && gpu_wide_possible();
+	if (top) {
+		C3D_FrameSync();
+		C3D_RenderTargetDelete(top);
+	}
+	gfxSetWide(wide);
+	top_w = wide ? 800 : 400;
+	gpu_top_xs = wide ? 2 : 1;
+	top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+	Mtx_OrthoTilt(&proj_top, 0.0f, (float) top_w, 240.0f, 0.0f, 0.0f, 1.0f, true);
+}
+
+void gpu_set_wide(void)
+{
+	if (!gpu_on || in_frame)
+		return;
+	top_target();
+	gpu_set_screen(game_w, game_h);
 }
 
 int gpu_margin;
@@ -195,13 +242,14 @@ void gpu_set_screen(int w, int h)
 	w += 2 * gpu_margin;
 	if (settings.screen == 1) {
 		/* stretched to fill the screen */
-		scale_x = 400.0f / w;
+		scale_x = (float) top_w / w;
 		scale_y = 240.0f / h;
 	} else {
-		/* the whole picture, aspect ratio kept */
-		scale_x = scale_y = w * 240 > h * 400 ? 400.0f / w : 240.0f / h;
+		/* the whole picture, aspect ratio kept (wide: pixels half as wide) */
+		scale_y = w * 240 > h * 400 ? 400.0f / w : 240.0f / h;
+		scale_x = scale_y * gpu_top_xs;
 	}
-	off_x = (400 - w * scale_x) / 2;
+	off_x = (top_w - w * scale_x) / 2;
 	off_y = (240 - h * scale_y) / 2;
 }
 
@@ -341,18 +389,21 @@ static int pow2(int n)
 	return p;
 }
 
-/* an axis in pieces: a power of two (at most 1024) as long as one texture
- * for the rest would be more than a quarter padding; 0: too long */
+/* an axis in pieces: a power of two (at most 512, or 1024 for axes over
+ * 2048) as long as one texture for the rest would be more than a quarter
+ * padding; 0: too long. (Pieces of at most 1 MB: a 1536x1024 sheet as one
+ * 4 MB and one 2 MB block didn't fit any more into the linear memory in
+ * pieces after a few resets, and the character was missing.) */
 static int split_axis(int n, int *edges)
 {
-	int k = 0, at = 0;
+	int k = 0, at = 0, most = n > 512 * MAXP ? 1024 : 512;
 	edges[0] = 0;
 	while (at < n && k < MAXP) {
 		int r = n - at, p = pow2(r), len = r;
 		if (k < MAXP - 1 && p > 8 && p - r > r / 4)
 			len = p / 2;
-		if (len > 1024)
-			len = 1024;
+		if (len > most)
+			len = most;
 		at += len;
 		edges[++k] = at;
 	}
@@ -372,7 +423,7 @@ static bool tex_init(GpuTex *g)
 	return true;
 }
 
-static bool in_frame;
+
 static unsigned long long last_frame_end;
 bool gpu_in_frame(void) { return in_frame; }
 unsigned long long gpu_last_frame_end(void) { return last_frame_end; }
@@ -382,6 +433,7 @@ unsigned long long gpu_last_frame_end(void) { return last_frame_end; }
  * frame later) */
 static Bitmap *pending[32];
 static int npending;
+unsigned gpu_null_pending, gpu_null_alloc, gpu_null_px; /* (for the log) */
 
 /* rows y0 .. y0+n-1 of the bitmap (px: those rows, stride pixels apart)
  * into the texture pieces: RGBA8 in 8x8 tiles (Morton order inside); the
@@ -428,6 +480,19 @@ static GpuTex *texture_of(Bitmap *b)
 		live_touch(g);
 		return g;
 	}
+	/* an image without its pixels, during drawing: read from its file after
+	 * the frame (gpu_frame_end; then the loading bar can show), the texture
+	 * made only then too (one made during the frame and filled after it
+	 * came out empty after a while: characters and tiles went missing) */
+	if (in_frame && !b->px && b->dropped && npending < 32) {
+		bool there = false;
+		for (int i = 0; i < npending && !there; i++)
+			there = pending[i] == b;
+		if (!there)
+			pending[npending++] = b;
+		gpu_null_pending++;
+		return NULL;
+	}
 	if (!g || g->w != b->w || g->h != b->h) {
 		if (g) {
 			live_remove(g);
@@ -459,6 +524,7 @@ static GpuTex *texture_of(Bitmap *b)
 				log_only("texture %dx%d (%u KB) failed: free %lu KB, used this frame %u KB\n", b->w, b->h,
 				         (unsigned) (need / 1024), (unsigned long) (linearSpaceFree() / 1024), frame_used_kb());
 			free(g);
+			gpu_null_alloc++;
 			return NULL;
 		}
 		g->owner = b;
@@ -478,21 +544,12 @@ static GpuTex *texture_of(Bitmap *b)
 	UploadCtx up = { g, 0 };
 	/* an image without its pixels: straight from its file, in rows; else
 	 * from the pixels (read again if needed: only this image's are in use) */
-	if (in_frame && !b->px && b->dropped && npending < 32) {
-		/* (read after the frame: gpu_frame_end) */
-		bool there = false;
-		for (int i = 0; i < npending && !there; i++)
-			there = pending[i] == b;
-		if (!there)
-			pending[npending++] = b;
-		gpu_uploads--;
-		gpu_upload_px -= (unsigned) (b->w * b->h);
-		return NULL;
-	}
 	bool streamed = !b->px && b->dropped && bitmap_stream_file(b, upload_rows_cb, &up);
 	if (!streamed) {
-		if (!bitmap_px_alone(b))
+		if (!bitmap_px_alone(b)) {
+			gpu_null_px++;
 			return NULL;
+		}
 		up.alpha_or = 0;
 		upload_rows(&up, 0, b->h, b->px, b->w);
 	}
@@ -505,6 +562,25 @@ static GpuTex *texture_of(Bitmap *b)
 	gpu_upload_ticks += svcGetSystemTick() - t_up;
 	bitmap_uploaded(b);
 	return g;
+}
+
+/* (tests) the texture's state as text */
+void gpu_tex_info(Bitmap *b, char *out, size_t n)
+{
+	GpuTex *g = b->gpu;
+	if (!g) {
+		snprintf(out, n, "no tex, px=%d dropped=%d ver=%u", b->px != NULL, b->dropped, b->version);
+		return;
+	}
+	u32 sum = 0;
+	for (int k = 0; k < g->nx * g->ny; k++) {
+		const u32 *d = g->tex[k].data;
+		for (size_t i = 0; i < g->tex[k].size / 4; i += 61)
+			sum |= d[i];
+	}
+	snprintf(out, n, "tex %dx%d pieces %dx%d current=%d transparent=%d sample=%08lx owner_ok=%d px=%d dropped=%d",
+	         g->w, g->h, g->nx, g->ny, b->gpu_version == b->version + 1, g->transparent, (unsigned long) sum,
+	         g->owner == b, b->px != NULL, b->dropped);
 }
 
 void gpu_forget(Bitmap *b)
@@ -695,7 +771,7 @@ void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity)
 
 static void draw_text_jobs(void)
 {
-	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
+	Canvas c = { .w = top_w, .h = 240, .clip = { 0, 0, top_w, 240 }, .gpu = true };
 	for (int i = 0; i < ntext_jobs; i++) {
 		TextJob *j = &text_jobs[i];
 		Bitmap *l = bitmap_text_layer(j->cont, scale_x, scale_y);
@@ -820,10 +896,12 @@ void gpu_present(int frozen_alpha, int brightness)
 	if (frozen_alpha >= 0)
 		present_tex(1, frozen_alpha / 255.0f);
 	if (brightness < 255) {
-		Canvas c = { .clip = { 0, 0, 400, 240 } };
+		Canvas c = { .clip = { 0, 0, top_w, 240 } };
 		Color black = { 0, 0, 0, 255 };
 		gpu_fill(&c, c.clip, &black, 255 - brightness);
 	}
+	/* (the engine's own things at 400 pixels across) */
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_ui);
 	draw_battery();
 }
 

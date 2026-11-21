@@ -359,38 +359,77 @@ static void tee_stderr(void)
 
 /* The bottom screen: its last line is the speed display (status_line),
  * the rest the messages (they scroll above it) */
-static PrintConsole con_log, con_status;
+static PrintConsole con_log;
 
 static void guard_status_line(void);
+#define STATUS_ROWS 3 /* console rows the speed display covers */
 static void console_init(void)
 {
 	consoleInit(GFX_BOTTOM, &con_log);
-	con_status = con_log;
-	/* (the status at the bottom: libctru's scrolling of a console window
-	 * also moved the line just above it, and the speed display flickered) */
-	consoleSetWindow(&con_status, 0, 29, 40, 1);
-	consoleSetWindow(&con_log, 0, 0, 40, 29);
+	/* the speed display at the top (status_draw), an empty row, then the
+	 * messages (libctru's scrolling of a console window also wiped the line
+	 * next to it: the empty row, and the display drawn again after output) */
+	consoleSetWindow(&con_log, 0, STATUS_ROWS + 1, 40, 30 - STATUS_ROWS - 1);
 	consoleSelect(&con_log);
 	guard_status_line();
 }
 
-static char status_text[48];
+static char status_text[96];
 static bool in_status;
 
 static const devoptab_t *out_orig;
 
-/* (straight to the console's device, not through stdio: this also runs
- * from inside stdout's own writes) */
+/* the speed display: the bottom screen's top 24 pixels, drawn straight
+ * into its framebuffer with the console's font: "Speed 100%" twice as big,
+ * the parts after it ("|" between them) at normal size beside it, one per
+ * line. (status_text "": the area cleared.) */
+static void status_pixel(u16 *fb, int x, int y, u16 c)
+{
+	if (x >= 0 && x < 320 && y >= 0 && y < 240)
+		fb[x * 240 + (239 - y)] = c;
+}
+
+static void status_text_at(u16 *fb, int x, int y, const char *t, int len, int scale, u16 fg)
+{
+	const ConsoleFont *f = &con_log.font;
+	for (int i = 0; i < len; i++, x += 8 * scale) {
+		int ch = (unsigned char) t[i] - f->asciiOffset;
+		if (ch < 0 || ch >= f->numChars)
+			continue;
+		const u8 *g = f->gfx + 8 * ch;
+		for (int r = 0; r < 8; r++)
+			for (int b = 0; b < 8; b++)
+				if (g[r] & (0x80 >> b))
+					for (int sy = 0; sy < scale; sy++)
+						for (int sx = 0; sx < scale; sx++)
+							status_pixel(fb, x + b * scale + sx, y + r * scale + sy, fg);
+	}
+}
+
 static void status_draw(void)
 {
-	if (!out_orig || !out_orig->write_r)
+	u16 *fb = (u16 *) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+	if (!fb)
 		return;
-	char line[64];
-	int n = snprintf(line, sizeof line, "\x1b[1;1H\x1b[7m%-39.39s\x1b[0m", status_text);
 	in_status = true;
-	consoleSelect(&con_status);
-	out_orig->write_r(_REENT, NULL, line, (size_t) n);
-	consoleSelect(&con_log);
+	const u16 back = 0x18e3, white = 0xffff, grey = 0xbdf7; /* RGB565 */
+	bool on = status_text[0] != 0;
+	for (int x = 0; x < 320; x++)
+		for (int y = 0; y < STATUS_ROWS * 8; y++)
+			status_pixel(fb, x, y, on ? back : 0);
+	if (on) {
+		const char *bar = strchr(status_text, '|');
+		int n = bar ? (int) (bar - status_text) : (int) strlen(status_text);
+		status_text_at(fb, 4, 4, status_text, n, 2, white);
+		int y = 4;
+		while (bar && y < STATUS_ROWS * 8) {
+			const char *p = bar + 1;
+			bar = strchr(p, '|');
+			int m = bar ? (int) (bar - p) : (int) strlen(p);
+			status_text_at(fb, 320 - 4 - 8 * m, y, p, m, 1, grey);
+			y += 9;
+		}
+	}
 	in_status = false;
 }
 

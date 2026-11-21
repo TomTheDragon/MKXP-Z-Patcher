@@ -93,6 +93,7 @@ static bool attr_true(VALUE font, const char *name)
 }
 
 static float text_scale = 1; /* font_draw_text_scaled */
+static int text_xs = 1;       /* letters this many times as wide (wide top screen) */
 
 static int font_px_size(VALUE font)
 {
@@ -121,7 +122,7 @@ static uint32_t next_cp(const unsigned char **p, const unsigned char *end)
 typedef struct {
 	FT_Face face;
 	uint32_t cp;
-	unsigned char size, bold, italic, used;
+	unsigned char size, bold, italic, used, xs;
 	short advance, left, top, w, h;
 	uint8_t *cov;  /* w x h */
 	uint8_t *out;  /* (w + 2) x (h + 2): the outline */
@@ -138,14 +139,15 @@ typedef struct {
 } Metrics;
 static Metrics metrics[16];
 static FT_Face sized_face;
-static int sized_px;
+static int sized_px, sized_xs;
 
 static void set_size(FT_Face face, int size)
 {
-	if (sized_face != face || sized_px != size) {
-		FT_Set_Pixel_Sizes(face, 0, size);
+	if (sized_face != face || sized_px != size || sized_xs != text_xs) {
+		FT_Set_Pixel_Sizes(face, (FT_UInt) (size * text_xs), size);
 		sized_face = face;
 		sized_px = size;
+		sized_xs = text_xs;
 	}
 }
 
@@ -177,12 +179,12 @@ static void glyphs_clear(void)
 
 static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uint32_t cp)
 {
-	uint32_t h = (cp * 2654435761u) ^ ((uint32_t) (uintptr_t) face >> 4) ^ (uint32_t) (size << 3 | bold << 1 | italic);
+	uint32_t h = (cp * 2654435761u) ^ ((uint32_t) (uintptr_t) face >> 4) ^ (uint32_t) (size << 3 | bold << 1 | italic) ^ (uint32_t) text_xs << 12;
 	for (int n = 0, i = h % GLYPHS; n < 16; n++, i = (i + 1) % GLYPHS) {
 		Glyph *g = &glyphs[i];
 		if (!g->face)
 			break;
-		if (g->face == face && g->cp == cp && g->size == size && g->bold == bold && g->italic == italic)
+		if (g->face == face && g->cp == cp && g->size == size && g->bold == bold && g->italic == italic && g->xs == text_xs)
 			return g;
 	}
 	if (nglyphs > GLYPHS * 3 / 4)
@@ -202,6 +204,7 @@ static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uin
 	g->size = size;
 	g->bold = bold;
 	g->italic = italic;
+	g->xs = (unsigned char) text_xs;
 	nglyphs++;
 	/* small sizes (e.g. sharp window text, ~14 px): light auto-hinting
 	 * puts horizontal strokes on whole pixels */
@@ -435,7 +438,7 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 	Mask only = m;
 	int sh = text_scale < 0.75f ? 1 : 2; /* (the shadow's offset, at the scale) */
 	if (attr_true(font, "@shadow"))
-		stamp(b, &only, sw, tx + sh, ty + sh, (Color) { 0, 0, 0, 255 }, clip);
+		stamp(b, &only, sw, tx + sh * text_xs, ty + sh, (Color) { 0, 0, 0, 255 }, clip);
 	if (outline && m.o) {
 		Mask o = { m.o, NULL, m.w, m.h };
 		stamp(b, &o, sw, tx, ty, font_color(font, "@out_color", (Color) { 0, 0, 0, 128 }), clip);
@@ -447,11 +450,13 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 
 /* the same text with the font size times scale (sharp text at the top
  * screen's resolution: the rect is already scaled) */
-void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale)
+void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale, int xs)
 {
 	text_scale = scale;
+	text_xs = xs;
 	font_draw_text(b, font, x, y, w, h, str, align);
 	text_scale = 1;
+	text_xs = 1;
 }
 
 void init_font(void)

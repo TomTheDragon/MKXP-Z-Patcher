@@ -16,6 +16,7 @@ Settings settings = {
 	.sharp_text = 1,
 	.smooth = 1,
 	.battery = 1,
+	.wide_screen = 1,
 	.colors = 0,
 	.wide_text = 1,
 };
@@ -40,6 +41,7 @@ void settings_load(void)
 		else if (sscanf(line, "sharp_text=%d", &v) == 1) settings.sharp_text = CLAMP(v, 0, 1);
 		else if (sscanf(line, "smooth=%d", &v) == 1) settings.smooth = CLAMP(v, 0, 1);
 		else if (sscanf(line, "battery=%d", &v) == 1) settings.battery = CLAMP(v, 0, 1);
+		else if (sscanf(line, "wide_screen=%d", &v) == 1) settings.wide_screen = CLAMP(v, 0, 1);
 		else if (sscanf(line, "colors=%d", &v) == 1) settings.colors = CLAMP(v, 0, 1);
 		else if (sscanf(line, "wide_text=%d", &v) == 1) settings.wide_text = CLAMP(v, 0, 1);
 	}
@@ -52,13 +54,13 @@ static void settings_save(void)
 	if (!f)
 		return;
 	fprintf(f, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
-	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nshow_speed=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\n", settings.music_volume,
+	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nshow_speed=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nwide_screen=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
-	        settings.show_speed, settings.overlay, settings.sharp_text, settings.smooth, settings.battery);
+	        settings.show_speed, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.wide_screen);
 	fclose(f);
 }
 
-enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_RESET, I_BACK, I_COUNT };
+enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_RESET, I_BACK, I_COUNT };
 
 static void show(int sel)
 {
@@ -69,6 +71,8 @@ static void show(int sel)
 	snprintf(v[I_SOUND], 40, "%d%%", settings.sound_volume);
 	snprintf(v[I_BUTTONS], 40, "%s", buttons[settings.buttons]);
 	snprintf(v[I_SCREEN], 40, "%s", screens[settings.screen]);
+	snprintf(v[I_WIDE], 40, "%s", !gpu_wide_possible() ? "400 (2DS: no 800)" :
+	         settings.wide_screen ? "800 across (sharper)" : "400 across");
 	snprintf(v[I_TEXT], 40, "%s", settings.screen != 0 ? "(only with fit)" :
 	         settings.wide_text ? "whole screen width" : "game's width");
 	snprintf(v[I_SHARP], 40, "%s", settings.sharp_text ? "sharp" : "game resolution");
@@ -79,7 +83,7 @@ static void show(int sel)
 	snprintf(v[I_OVERLAY], 40, "%s", settings.overlay ? "on (bottom line)" : "off");
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
 	v[I_RESET][0] = v[I_BACK][0] = 0;
-	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Colors", "Frame skip",
+	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Colors", "Frame skip",
 	                                            "Speed display", "Bottom numbers", "Reset game (title)", "Back to the game" };
 	printf("\x1b[2J\x1b[1;1H\x1b[1m MKXP-Z settings\x1b[0m   (START: back)\n\n");
 	for (int i = 0; i < I_COUNT; i++) {
@@ -122,6 +126,7 @@ bool settings_menu(void)
 			case I_SOUND: settings.sound_volume = CLAMP(settings.sound_volume + dir * 10, 0, 100); audio_volumes_changed(); break;
 			case I_BUTTONS: settings.buttons ^= 1; break;
 			case I_SCREEN: settings.screen ^= 1; gpu_set_screen(screen_w, screen_h); break;
+			case I_WIDE: settings.wide_screen ^= 1; gpu_set_wide(); break;
 			case I_TEXT: settings.wide_text ^= 1; gpu_set_screen(screen_w, screen_h); break;
 			case I_SHARP: settings.sharp_text ^= 1; break;
 			case I_SMOOTH: settings.smooth ^= 1; break;

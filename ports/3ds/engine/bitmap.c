@@ -128,7 +128,9 @@ Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy)
 		TextOp *o = &b->ops[i];
 		int x0 = (int) (o->r.x * sx + 0.5f), y0 = (int) (o->r.y * sy + 0.5f);
 		int x1 = (int) ((o->r.x + o->r.w) * sx + 0.5f), y1 = (int) ((o->r.y + o->r.h) * sy + 0.5f);
-		font_draw_text_scaled(l, o->font, x0, y0, x1 - x0, y1 - y0, o->str, o->align, sy);
+		/* (letters twice as wide for the wide top screen: sx is twice sy) */
+		int xs = sx >= 1.9f * sy ? 2 : 1;
+		font_draw_text_scaled(l, o->font, x0, y0, x1 - x0, y1 - y0, o->str, o->align, sy, xs);
 	}
 	l->version++;
 	b->layer_gen = b->ops_gen;
@@ -973,6 +975,14 @@ static VALUE bitmap_text_size(VALUE self, VALUE str)
 	return rect_new(0, 0, w, h);
 }
 
+static VALUE bitmap_tex_info(VALUE self)
+{
+	char s[200];
+	void gpu_tex_info(Bitmap *b, char *out, size_t n);
+	gpu_tex_info((Bitmap *) rb_check_typeddata(self, &bitmap_type), s, sizeof s);
+	return rb_str_new_cstr(s);
+}
+
 void init_bitmap(void)
 {
 	cBitmap = rb_define_class("Bitmap", rb_cObject);
@@ -981,6 +991,7 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "initialize_copy", bitmap_init_copy, 1);
 	rb_define_method(cBitmap, "dispose", bitmap_dispose, 0);
 	rb_define_method(cBitmap, "disposed?", bitmap_disposed, 0);
+	rb_define_method(cBitmap, "mkxpz_tex_info", bitmap_tex_info, 0);
 	rb_define_method(cBitmap, "width", bitmap_width, 0);
 	rb_define_method(cBitmap, "height", bitmap_height, 0);
 	rb_define_method(cBitmap, "rect", bitmap_rect, 0);
