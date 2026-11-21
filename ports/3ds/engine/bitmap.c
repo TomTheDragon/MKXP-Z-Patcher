@@ -82,7 +82,16 @@ static bool ops_add(Bitmap *b, Rect r, VALUE str, int align)
 		b->ops = n;
 		b->ops_cap = nc;
 	}
-	b->ops[b->nops++] = (TextOp) { r, align, rb_str_new_frozen(str), rb_obj_dup(b->font) };
+	/* the Ruby objects first: making them can start the garbage collector,
+	 * which marks ops[0 .. nops) (bitmap_mark); counting the entry before
+	 * it was filled made it mark leftover memory (a crash on the console
+	 * in Changed's first scene) */
+	VALUE s = rb_str_new_frozen(str);
+	VALUE f = rb_obj_dup(b->font);
+	b->ops[b->nops] = (TextOp) { r, align, s, f };
+	b->nops++;
+	RB_GC_GUARD(s);
+	RB_GC_GUARD(f);
 	return true;
 }
 
