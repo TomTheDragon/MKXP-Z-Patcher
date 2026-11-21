@@ -776,6 +776,33 @@ static void present_tex(int which, float alpha)
 
 /* frozen_alpha: -1 just the picture; 0..254 the frozen picture over it
  * (transition); 255 just the frozen picture */
+/* the battery icon at the top left (settings: "Battery icon"): a 15x8
+ * outline with a nub, filled by the charge; light blue while charging,
+ * yellow below 30%, red below 15% */
+static void draw_battery(void)
+{
+	int pct;
+	bool charging;
+	if (!settings.battery || !battery_get(&pct, &charging))
+		return;
+	Canvas c = { .clip = { 0, 0, 400, 240 } };
+	Color shade = { 0, 0, 0, 255 }, line = { 235, 235, 235, 255 };
+	Color fill = charging ? (Color) { 120, 200, 255, 255 } : pct < 15 ? (Color) { 255, 70, 60, 255 }
+	           : pct < 30 ? (Color) { 255, 210, 60, 255 } : (Color) { 120, 230, 110, 255 };
+	const int x = 3, y = 3, w = 15, h = 8;
+	gpu_fill(&c, (Rect) { x - 1, y - 1, w + 4, h + 2 }, &shade, 110); /* (readable on bright pictures) */
+	gpu_fill(&c, (Rect) { x, y, w, 1 }, &line, 255);
+	gpu_fill(&c, (Rect) { x, y + h - 1, w, 1 }, &line, 255);
+	gpu_fill(&c, (Rect) { x, y + 1, 1, h - 2 }, &line, 255);
+	gpu_fill(&c, (Rect) { x + w - 1, y + 1, 1, h - 2 }, &line, 255);
+	gpu_fill(&c, (Rect) { x + w, y + 2, 2, h - 4 }, &line, 255);
+	int fw = (pct * (w - 4) + 50) / 100;
+	if (fw < 1 && pct > 0)
+		fw = 1;
+	if (fw > 0)
+		gpu_fill(&c, (Rect) { x + 2, y + 2, fw, h - 4 }, &fill, 255);
+}
+
 void gpu_present(int frozen_alpha, int brightness)
 {
 	C3D_RenderTargetClear(top, C3D_CLEAR_ALL, 0x000000ff, 0);
@@ -797,6 +824,7 @@ void gpu_present(int frozen_alpha, int brightness)
 		Color black = { 0, 0, 0, 255 };
 		gpu_fill(&c, c.clip, &black, 255 - brightness);
 	}
+	draw_battery();
 }
 
 void gpu_frame_end(void)

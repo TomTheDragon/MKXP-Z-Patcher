@@ -346,6 +346,9 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   sound decoding and load_data draws an extra frame (the last picture,
   its window text, a 4 px bar on the right edge filling from the bottom)
   after 150 ms without a frame, every 50 ms at most.
+- Battery icon (battery.c, drawn last in gpu_present): mcu::HWC's
+  percentage when it fits ptm:u's 0..5 step (Azahar's MCU answers with
+  the step), else the step; asked every 2 s; charging from ptm:u.
 - Buttons (default): A confirm, B cancel, Y run, X / R page up / down,
   ZL / ZR the X / Y keys, L held = speed-up (no waiting for the screen,
   every 4th picture drawn); settings "Buttons" has the old layout.

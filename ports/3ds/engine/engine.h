@@ -228,11 +228,14 @@ typedef struct {
 	int show_speed;
 	int overlay;    /* game speed and memory on the bottom screen */
 	int sharp_text; /* window text drawn at the top screen's resolution */
-	int smooth;     /* the picture shrunk with mipmaps (smoother edges) */
+	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
+	int battery;    /* battery icon at the top screen's top left */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;
 void settings_load(void);
+void battery_init(void);
+bool battery_get(int *percent, bool *charging); /* battery.c; false: unknown */
 bool settings_menu(void); /* true: reset the game */
 void audio_volumes_changed(void);
 /* rbinternal.c: Ruby internals */

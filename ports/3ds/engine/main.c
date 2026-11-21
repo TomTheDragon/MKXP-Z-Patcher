@@ -430,6 +430,7 @@ int main(int argc, char **argv)
 	console_init();
 	atexit(hold_on_exit);
 	romfsInit();
+	battery_init();
 	osSetSpeedupEnable(true); /* New 3DS: 804 MHz */
 
 	/* the game: next to the .3dsx, else sdmc:/mkxpz */
