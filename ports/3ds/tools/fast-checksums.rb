@@ -1,5 +1,6 @@
-# Checksums of the standard VX Ace methods that the 3DS engine's native
-# Sprite_Character#update stands for (engine/scene.c, engine/boot.rb).
+# Checksums of the standard VX Ace methods that the 3DS engine's native code
+# stands for (Sprite_Character#update: engine/scene.c, Game_Event#refresh:
+# engine/events.c; engine/boot.rb).
 #
 #   ruby fast-checksums.rb <VX Ace game with the standard scripts> [--write]
 #
@@ -22,8 +23,15 @@ defs = {
   'Sprite_Character' => %w[update update_bitmap graphic_changed? update_src_rect update_position update_other
                            update_balloon setup_new_effect],
   'Sprite_Base' => %w[update animation?],
-  'Game_CharacterBase' => %w[screen_x screen_y screen_z shift_y jump_height object_character?],
+  'Game_CharacterBase' => %w[screen_x screen_y screen_z shift_y jump_height object_character? update update_stop
+                             update_animation update_anime_count moving? jumping? real_move_speed dash?],
   'Game_Map' => %w[adjust_x adjust_y loop_horizontal? loop_vertical? screen_tile_x screen_tile_y width height],
+  'Game_Event' => %w[refresh find_proper_page conditions_met? update update_stop update_self_movement near_the_screen?
+                     stop_count_threshold check_event_trigger_auto],
+  'Game_Character' => %w[update_stop],
+  'Game_Switches' => %w[[]],
+  'Game_Variables' => %w[[]],
+  'Game_SelfSwitches' => %w[[]],
 }
 attrs = { 'Game_CharacterBase' => %w[tile_id character_name character_index pattern direction opacity blend_type
                                      bush_depth transparent animation_id balloon_id] }

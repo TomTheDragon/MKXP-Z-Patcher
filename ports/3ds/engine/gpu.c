@@ -197,9 +197,6 @@ void gpu_set_screen(int w, int h)
 		/* stretched to fill the screen */
 		scale_x = 400.0f / w;
 		scale_y = 240.0f / h;
-	} else if (settings.screen == 2) {
-		/* 1:1, the middle of the picture */
-		scale_x = scale_y = 1;
 	} else {
 		/* the whole picture, aspect ratio kept */
 		scale_x = scale_y = w * 240 > h * 400 ? 400.0f / w : 240.0f / h;
@@ -683,6 +680,15 @@ void gpu_present(int frozen_alpha, int brightness)
 		Color black = { 0, 0, 0, 255 };
 		gpu_fill(&c, c.clip, &black, 255 - brightness);
 	}
+}
+
+/* a bitmap over the finished picture (the speed display), in top screen
+ * pixels, 1:1 */
+void gpu_draw_top(Bitmap *b, int x, int y)
+{
+	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
+	DrawOpts o = { .x = x, .y = y, .zx = 1, .zy = 1, .opacity = 255 };
+	gpu_draw(&c, b, (Rect) { 0, 0, b->w, b->h }, &o);
 }
 
 void gpu_frame_end(void)

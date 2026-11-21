@@ -161,6 +161,14 @@ MKXPZ_STOCK = {
   'Game_CharacterBase#shift_y' => 3177371100,
   'Game_CharacterBase#jump_height' => 1514128538,
   'Game_CharacterBase#object_character?' => 2074604390,
+  'Game_CharacterBase#update' => 3737941549,
+  'Game_CharacterBase#update_stop' => 3926629533,
+  'Game_CharacterBase#update_animation' => 2588247382,
+  'Game_CharacterBase#update_anime_count' => 2986621416,
+  'Game_CharacterBase#moving?' => 3458338668,
+  'Game_CharacterBase#jumping?' => 4224591806,
+  'Game_CharacterBase#real_move_speed' => 680567531,
+  'Game_CharacterBase#dash?' => 1832952089,
   'Game_Map#adjust_x' => 1413106839,
   'Game_Map#adjust_y' => 3928380013,
   'Game_Map#loop_horizontal?' => 812218791,
@@ -169,6 +177,19 @@ MKXPZ_STOCK = {
   'Game_Map#screen_tile_y' => 3058309681,
   'Game_Map#width' => 4255624125,
   'Game_Map#height' => 4262117737,
+  'Game_Event#refresh' => 2670169069,
+  'Game_Event#find_proper_page' => 1545490489,
+  'Game_Event#conditions_met?' => 3819658317,
+  'Game_Event#update' => 2489914872,
+  'Game_Event#update_stop' => 3832805855,
+  'Game_Event#update_self_movement' => 2002458890,
+  'Game_Event#near_the_screen?' => 2803408571,
+  'Game_Event#stop_count_threshold' => 1758990067,
+  'Game_Event#check_event_trigger_auto' => 1741691701,
+  'Game_Character#update_stop' => 634477818,
+  'Game_Switches#[]' => 1897994590,
+  'Game_Variables#[]' => 3739613371,
+  'Game_SelfSwitches#[]' => 3480227492,
   'Game_CharacterBase#tile_id' => :attr,
   'Game_CharacterBase#character_name' => :attr,
   'Game_CharacterBase#character_index' => :attr,
@@ -191,6 +212,14 @@ MKXPZ_STOCK = {
   'Sprite#src_rect' => :c,
 }
 MKXPZ_FAST_NEEDS = {
+  # (not the methods the engine replaces, refresh and update: those are
+  # checked once, before they're replaced; after that they're the engine's)
+  event: %w[find_proper_page conditions_met?],
+  event_update: %w[update_stop update_self_movement near_the_screen? stop_count_threshold
+                   check_event_trigger_auto update_animation update_anime_count moving? jumping? real_move_speed dash?],
+  switches: %w[[]],
+  variables: %w[[]],
+  self_switches: %w[[]],
   sprite: %w[update_bitmap graphic_changed? update_src_rect update_position update_other update_balloon
              setup_new_effect animation? x= y= z= opacity= blend_type= bush_depth= visible= src_rect],
   character: %w[screen_x screen_y screen_z shift_y jump_height object_character? tile_id character_name
@@ -203,6 +232,7 @@ def mkxpz_stock?(klass, name)
   exp = MKXPZ_STOCK["#{m.owner}##{m.original_name}"] or return false
   file, line = m.source_location
   return file.nil? if exp == :c
+  return file == 'module_rpg.rb' && RubyVM::InstructionSequence.of(m).nil? if exp == :rpg
   script = file && $mkxpz_sections[file] or return false
   return RubyVM::InstructionSequence.of(m).nil? && script.lines[line - 1].to_s =~ /\A\s*attr_(reader|accessor)\b/ if exp == :attr
   text = mkxpz_method_text(script, line) or return false
@@ -233,6 +263,50 @@ def mkxpz_fast_setup
   mkxpz_log('character sprites: native')
 rescue StandardError => e
   mkxpz_log("character sprites: Ruby (#{e.class})")
+end
+
+# Game_Event#refresh in C (events.c), with find_proper_page and
+# conditions_met?, while those and the readers they use are the standard
+# ones (each class is asked again by the engine: mkxpz_fast_ok?)
+def mkxpz_fast_setup_events
+  return if $MKXPZ_RGSS != 3 || MKXPZ_STOCK.empty? || !defined?(RPG::Event::Page::Condition)
+  return unless defined?(Game_Event) && defined?(Game_Switches) && defined?(Game_Variables) && defined?(Game_SelfSwitches)
+  readers = {
+    RPG::Event => %w[id pages],
+    RPG::Event::Page => %w[condition],
+    RPG::Event::Page::Condition => %w[switch1_valid switch1_id switch2_valid switch2_id variable_valid variable_id
+                                      variable_value self_switch_valid self_switch_ch item_valid actor_valid],
+  }
+  return unless readers.all? { |k, names| names.all? { |n| MKXPZ_STOCK["#{k}##{n}"] = :rpg; mkxpz_stock?(k, n) } }
+  return unless mkxpz_stock?(Game_Event, :refresh) && mkxpz_fast_ok?(Game_Event, :event)
+  Game_Event.send(:alias_method, :mkxpz_slow_refresh, :refresh)
+  mkxpz_fast_install_events(Game_Event)
+  mkxpz_log('events: native refresh')
+  mkxpz_fast_setup_event_update
+rescue StandardError => e
+  mkxpz_log("events: Ruby (#{e.class})")
+end
+
+# Game_Event#update in C (scene.c) for events standing still; the super
+# chain (Game_Character, Game_CharacterBase) must be the standard one too
+def mkxpz_fast_setup_event_update
+  return unless Game_Event.ancestors[1] == Game_Character && Game_Character.ancestors[1] == Game_CharacterBase
+  return unless mkxpz_stock?(Game_Character, :update_stop) && mkxpz_stock?(Game_CharacterBase, :update_stop) &&
+                mkxpz_stock?(Game_CharacterBase, :update) && Game_Character.instance_method(:update).owner == Game_CharacterBase
+  return unless mkxpz_stock?(Game_Event, :update) && mkxpz_fast_ok?(Game_Event, :event_update) &&
+                mkxpz_fast_ok?(Game_Map, :map)
+  Game_Event.class_eval do
+    alias_method :mkxpz_slow_event_update, :update
+    # the end of the standard Game_Event#update (its event script)
+    def mkxpz_update_interpreter
+      @interpreter.setup(@list, @event.id) unless @interpreter.running?
+      @interpreter.update
+    end
+  end
+  mkxpz_fast_install_event_update(Game_Event)
+  mkxpz_log('events: native update')
+rescue StandardError => e
+  mkxpz_log("events: Ruby update (#{e.class})")
 end
 
 # Message boxes over the whole top screen (settings: "Text boxes", with the
@@ -374,6 +448,7 @@ def mkxpz_run_scripts
     name = s[1].to_s.force_encoding(Encoding::UTF_8)
     if fast && name.strip == 'Main'
       mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
+      mkxpz_fast_setup_events unless File.exist?('mkxpz-no-fast') || File.exist?('mkxpz-no-fast-events')
       mkxpz_wide_setup
       mkxpz_save_probe_setup
       fast = false

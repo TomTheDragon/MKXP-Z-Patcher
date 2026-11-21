@@ -435,6 +435,7 @@ int main(int argc, char **argv)
 		init_bitmap();
 		init_scene();
 		init_fast();
+		init_events();
 		init_window();
 		gpu_init();
 		{

@@ -126,6 +126,7 @@ void gpu_frame_begin_sync(bool sync);
 void gpu_scene_begin(int which); /* 0: the picture, 1: the frozen picture */
 void gpu_present(int frozen_alpha, int brightness);
 void gpu_frame_end(void);
+void gpu_draw_top(Bitmap *b, int x, int y); /* after gpu_present: in top screen pixels */
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity);
 bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
                const Color *color, const Tone *tone);
@@ -159,6 +160,7 @@ void scene_draw(Canvas *c);
 extern VALUE cViewport, cSprite, cPlane, cWindow, cTilemap;
 void init_scene(void);
 void init_fast(void); /* native Sprite_Character#update (scene.c) */
+void init_events(void); /* native Game_Event#refresh (events.c) */
 void init_window(void);
 void init_tilemap(void);
 
@@ -189,10 +191,11 @@ bool file_find(const char *path, const char *const *exts, char *out, size_t n);
 typedef struct {
 	int music_volume, sound_volume; /* 0..100 */
 	int buttons;    /* 0: B confirm, A cancel, Y dash; 1: A confirm, B cancel, X dash */
-	int screen;     /* 0 fit, 1 stretch, 2 1:1 (crop) */
+	int screen;     /* 0 fit, 1 stretch */
 	int wide_text;  /* fit: message boxes over the screen's whole width */
 	int frame_skip; /* 0 off, 1 auto */
 	int show_speed;
+	int overlay;    /* game speed and memory in the top screen's corner */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;

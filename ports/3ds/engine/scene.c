@@ -726,7 +726,7 @@ static int fast_n;
 
 static bool fast_ok(VALUE klass, int kind)
 {
-	static const char *const kinds[] = { "sprite", "character", "map" };
+	static const char *const kinds[] = { "sprite", "character", "map", "event_update" };
 	if (FL_TEST(klass, FL_SINGLETON))
 		return false;
 	for (int i = 0; i < fast_n; i++)
@@ -884,6 +884,107 @@ static VALUE fast_update(VALUE self)
 	return Qnil;
 }
 
+/* --- Game_Event#update for an event standing still: the standard methods
+ * in C (Game_CharacterBase#update, update_animation, update_anime_count,
+ * the three update_stop, update_self_movement, near_the_screen?,
+ * check_event_trigger_auto). Moving or jumping events, and any value of
+ * another type than expected, take the original Ruby update (checked
+ * before anything changes); a step (move_type_*), update_anime_pattern,
+ * update_routine_move, start and the event's own script are called in
+ * Ruby. On the console these were ~15 Ruby calls per event per frame. */
+static ID id_slow_event_update, id_update_anime_pattern, id_update_routine_move, id_move_type[4], id_start,
+	id_update_interpreter, iv_x, iv_y, iv_original_pattern, iv_move_speed, iv_anime_count, iv_step_anime,
+	iv_locked, iv_stop_count, iv_move_route_forcing, iv_move_type, iv_move_frequency, iv_trigger, iv_interpreter;
+
+static bool num_eq(Num a, Num b) { return a.f || b.f ? num_d(a) == num_d(b) : a.i == b.i; }
+static VALUE num_value(Num a) { return a.f ? DBL2NUM(a.d) : LL2NUM(a.i); }
+
+/* near_the_screen?(12, 8) */
+static bool near_the_screen(VALUE self, VALUE gm, bool *ok)
+{
+	*ok = false;
+	VALUE map = IV(gm, iv_map);
+	if (!RB_TYPE_P(map, T_OBJECT))
+		return false;
+	VALUE mw = IV(map, iv_width), mh = IV(map, iv_height), st = IV(map, iv_scroll_type);
+	Num rx, ry, dx, dy;
+	if (!FIXNUM_P(mw) || !FIXNUM_P(mh) || !FIXNUM_P(st) || !num_of(IV(self, iv_real_x), &rx) ||
+	    !num_of(IV(self, iv_real_y), &ry) || !num_of(IV(gm, iv_display_x), &dx) || !num_of(IV(gm, iv_display_y), &dy))
+		return false;
+	*ok = true;
+	long scroll = FIX2LONG(st);
+	Num ax = num_addi(adjust(rx, dx, scroll == 2 || scroll == 3, FIX2LONG(mw), screen_w / 32), -(screen_w / 2 / 32));
+	Num ay = num_addi(adjust(ry, dy, scroll == 1 || scroll == 3, FIX2LONG(mh), screen_h / 32), -(screen_h / 2 / 32));
+	Num lo_x = { false, -12, 0 }, hi_x = { false, 12, 0 }, lo_y = { false, -8, 0 }, hi_y = { false, 8, 0 };
+	return !num_lt(ax, lo_x) && !num_lt(hi_x, ax) && !num_lt(ay, lo_y) && !num_lt(hi_y, ay);
+}
+
+static VALUE fast_event_update(VALUE self)
+{
+	VALUE gm = mkxpz_gvar(id_game_map);
+	if (!fast_ok(CLASS_OF(self), 3) || RB_SPECIAL_CONST_P(gm) || !fast_ok(CLASS_OF(gm), 2))
+		return rb_funcall(self, id_slow_event_update, 0);
+	/* everything checked first: only an event that stands still, with
+	 * values of the usual types */
+	VALUE jc = IV(self, iv_jump_count), pat = IV(self, iv_pattern), opat = IV(self, iv_original_pattern);
+	VALUE ms = IV(self, iv_move_speed), sc = IV(self, iv_stop_count), mt = IV(self, iv_move_type);
+	VALUE mf = IV(self, iv_move_frequency);
+	Num rx, ry, x, y, ac;
+	if (!FIXNUM_P(jc) || FIX2LONG(jc) > 0 || !num_of(IV(self, iv_real_x), &rx) || !num_of(IV(self, iv_real_y), &ry) ||
+	    !num_of(IV(self, iv_x), &x) || !num_of(IV(self, iv_y), &y) || !num_eq(rx, x) || !num_eq(ry, y) ||
+	    !FIXNUM_P(pat) || !FIXNUM_P(opat) || !FIXNUM_P(ms) || !FIXNUM_P(sc) || !FIXNUM_P(mt) || !FIXNUM_P(mf) ||
+	    !num_of(IV(self, iv_anime_count), &ac))
+		return rb_funcall(self, id_slow_event_update, 0);
+	/* update_animation: update_anime_count (not moving) */
+	if (RTEST(IV(self, iv_step_anime)) || pat != opat) {
+		ac = num_addi(ac, 1);
+		rb_ivar_set(self, iv_anime_count, num_value(ac));
+	}
+	/* if @anime_count > 18 - real_move_speed * 2 (dash? is false) */
+	if (num_lt((Num) { false, 18 - FIX2LONG(ms) * 2, 0 }, ac)) {
+		rb_funcall(self, id_update_anime_pattern, 0);
+		rb_ivar_set(self, iv_anime_count, INT2FIX(0));
+	}
+	/* update_stop: Game_CharacterBase */
+	if (!RTEST(IV(self, iv_locked))) {
+		sc = IV(self, iv_stop_count);
+		rb_ivar_set(self, iv_stop_count, FIXNUM_P(sc) ? LONG2NUM(FIX2LONG(sc) + 1) : rb_funcall(sc, rb_intern("+"), 1, INT2FIX(1)));
+	}
+	/* Game_Character */
+	if (RTEST(IV(self, iv_move_route_forcing)))
+		rb_funcall(self, id_update_routine_move, 0);
+	/* Game_Event: update_self_movement unless @move_route_forcing */
+	if (!RTEST(IV(self, iv_move_route_forcing))) {
+		bool ok;
+		bool near = near_the_screen(self, gm, &ok);
+		sc = IV(self, iv_stop_count);
+		mf = IV(self, iv_move_frequency);
+		mt = IV(self, iv_move_type);
+		if (!ok || !FIXNUM_P(sc) || !FIXNUM_P(mf) || !FIXNUM_P(mt)) {
+			rb_funcall(self, rb_intern("update_self_movement"), 0);
+		} else if (near && FIX2LONG(sc) > 30 * (5 - FIX2LONG(mf))) {
+			long t = FIX2LONG(mt);
+			if (t >= 1 && t <= 3)
+				rb_funcall(self, id_move_type[t], 0);
+		}
+	}
+	/* check_event_trigger_auto: start if @trigger == 3 */
+	VALUE tr = IV(self, iv_trigger);
+	if (FIXNUM_P(tr) ? tr == INT2FIX(3) : rb_equal(tr, INT2FIX(3)))
+		rb_funcall(self, id_start, 0);
+	/* the event's own script (parallel) */
+	if (RTEST(IV(self, iv_interpreter)))
+		return rb_funcall(self, id_update_interpreter, 0);
+	return Qnil;
+}
+
+static VALUE fast_install_event_update(VALUE self, VALUE klass)
+{
+	(void) self;
+	rb_define_method(klass, "update", fast_event_update, 0);
+	return Qtrue;
+}
+
 /* (boot.rb, once it checked the scripts) */
 static VALUE fast_install(VALUE self, VALUE klass)
 {
@@ -915,6 +1016,15 @@ void init_fast(void)
 	I(iv_jump_count, "@jump_count"); I(iv_display_x, "@display_x"); I(iv_display_y, "@display_y");
 	I(iv_map, "@map"); I(iv_width, "@width"); I(iv_height, "@height"); I(iv_scroll_type, "@scroll_type");
 	I(cv_ani_checker, "@@ani_checker"); I(cv_ani_spr_checker, "@@ani_spr_checker");
+	I(id_slow_event_update, "mkxpz_slow_event_update"); I(id_update_anime_pattern, "update_anime_pattern");
+	I(id_update_routine_move, "update_routine_move"); I(id_move_type[1], "move_type_random");
+	I(id_move_type[2], "move_type_toward_player"); I(id_move_type[3], "move_type_custom"); I(id_start, "start");
+	I(id_update_interpreter, "mkxpz_update_interpreter"); I(iv_x, "@x"); I(iv_y, "@y");
+	I(iv_original_pattern, "@original_pattern"); I(iv_move_speed, "@move_speed"); I(iv_anime_count, "@anime_count");
+	I(iv_step_anime, "@step_anime"); I(iv_locked, "@locked"); I(iv_stop_count, "@stop_count");
+	I(iv_move_route_forcing, "@move_route_forcing"); I(iv_move_type, "@move_type");
+	I(iv_move_frequency, "@move_frequency"); I(iv_trigger, "@trigger"); I(iv_interpreter, "@interpreter");
 #undef I
 	rb_define_global_function("mkxpz_fast_install", fast_install, 1);
+	rb_define_global_function("mkxpz_fast_install_event_update", fast_install_event_update, 1);
 }

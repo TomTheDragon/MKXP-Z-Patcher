@@ -102,7 +102,7 @@ PY
 # the fallback font (mkxp-z's Liberation Sans)
 cp "$(dirname "$RUBY_SRC")/../assets/liberation.ttf" "$E/romfs/fonts/" 2>/dev/null || true
 OBJS=""
-for f in main types bitmap font scene window graphics input gpu tilemap audio settings files memory profile rbinternal; do
+for f in main types bitmap font scene window graphics input gpu tilemap audio settings files memory profile rbinternal events; do
     arm-none-eabi-gcc $CF -O2 -Wall -Wno-unused-parameter -include mkxpz-3ds-compat.h -I"$E" \
         -I"$R/.ext/include/arm-eabi" -I"$RS/include" -I"$DEVKITPRO/portlibs/3ds/include" \
         -I"$DEVKITPRO/portlibs/3ds/include/freetype2" $( [ $f = rbinternal ] && echo "-I$RS -I$R" ) \

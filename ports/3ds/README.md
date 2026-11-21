@@ -299,6 +299,23 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   maps: ~4 MB instead of ~10 MB. Three 1536x1024 sheets on screen in one
   frame need more textures than graphics memory holds (one or two fit).
 
+- Native events: Game_Event#refresh with find_proper_page and
+  conditions_met? (events.c) and Game_Event#update for events standing still
+  (scene.c: animation and stop counters, the three update_stop,
+  update_self_movement with near_the_screen?, check_event_trigger_auto;
+  steps, pattern changes, move routes, start and the event's script call
+  the Ruby methods), enabled by source checksums like Sprite_Character
+  (the replaced methods themselves are checked once, before they're
+  replaced). Tested with fixed random numbers and sound off (a scene in the
+  user's save depends on the sound thread's timing): all 108 street events'
+  state identical to the Ruby scripts at 40 checkpoints; Ruby time on the
+  street 5.0 -> 4.0 ms (new game), 12.7 -> 7.5 ms (user's save) in the
+  emulator. `mkxpz-no-fast-events` turns only this off.
+- Speed display (settings: "Speed display"): game speed (game frames a
+  second against 60), free/total RAM and graphics memory, drawn after the
+  picture at the top screen's own resolution (gpu_draw_top).
+- The 1:1 screen mode is gone (fit and stretch).
+
 The game's own Ruby code is now most of the time. On a real original 3DS
 (2026-11-20, Dazed) it was 15-18 ms per frame on the maps (the emulator
 shows about half), with drawing 2-4 ms: the game ran at 45-55 frames a
@@ -306,7 +323,7 @@ second.
 
 Settings (START in the game, saved in `mkxpz-settings.ini` in the game
 folder): music / sound volume, buttons (B confirm, A cancel, Y dash, or
-A/B/X), screen (fit, stretch, 1:1 crop), colors (normal, vivid: more
+A/B/X), screen (fit, stretch), colors (normal, vivid: more
 contrast for the original 3DS's pale screen), frame skip, show speed, reset.
 
 ## Next steps
