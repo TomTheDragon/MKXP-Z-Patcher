@@ -47,3 +47,36 @@
  #endif
      }
  
+--- a/numeric.c	2026-11-22 00:14:04.859426680 +0100
++++ b/numeric.c	2026-11-22 00:14:04.861426694 +0100
+@@ -1590,6 +1590,13 @@
+ {
+     VALUE result;
+     if (x == y) return Qtrue;
++    /* mkxpz 3DS: nil, true, false or a symbol with the standard == (identity):
++     * not equal, without asking it through the recursion guard (hashes
++     * made for every comparison: games doing "@width == nil" for every
++     * event each frame spent a third of their time here) */
++    if (RB_SPECIAL_CONST_P(y) && !FIXNUM_P(y) && !FLONUM_P(y) &&
++        rb_method_basic_definition_p(CLASS_OF(y), id_eq))
++        return Qfalse;
+     result = num_funcall1(y, id_eq, x);
+     return RBOOL(RTEST(result));
+ }
+--- a/vm_insnhelper.c	2026-11-22 00:22:47.558149246 +0100
++++ b/vm_insnhelper.c	2026-11-22 00:22:47.561149267 +0100
+@@ -2047,6 +2047,14 @@
+     else if (STATIC_SYM_P(recv) && STATIC_SYM_P(obj) && EQ_UNREDEFINED_P(SYMBOL)) {
+         goto compare_by_identity;
+     }
++    /* mkxpz 3DS: an Integer against nil, true, false or a symbol whose ==
++     * is the standard one: not equal (Integer#== would ask the other side
++     * through a recursion guard; "@width == nil" / "x != nil" for hundreds
++     * of events each frame cost a fifth of a game's time) */
++    else if (FIXNUM_P(recv) && SPECIAL_CONST_P(obj) && !FIXNUM_P(obj) && !FLONUM_P(obj) &&
++             EQ_UNREDEFINED_P(INTEGER) && rb_method_basic_definition_p(CLASS_OF(obj), idEq)) {
++        return Qfalse;
++    }
+     else if (SPECIAL_CONST_P(recv)) {
+         //
+     }

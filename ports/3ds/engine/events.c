@@ -156,6 +156,49 @@ static VALUE fast_install_events(VALUE self, VALUE klass)
 	return Qtrue;
 }
 
+/* --- "Anti Lag VX" (Anaryu, used by many VX games, e.g. Changed):
+ * Game_Event#on_screen, asked twice per event every frame (Changed: 269
+ * events, half of the game's time). boot.rb installs this only while the
+ * method's text is the script's (checksum) and Game_Map#display_x/y are
+ * plain readers. Values it doesn't handle: the Ruby method. */
+static ID id_slow_on_screen, iv_width, iv_height, iv_real_x, iv_real_y, iv_xov, iv_yov, iv_xos, iv_yos,
+	iv_display_x, iv_display_y, gv_game_map;
+static VALUE antilag_map_class;
+
+static VALUE fast_on_screen(VALUE self)
+{
+	VALUE w = IV(self, iv_width), h = IV(self, iv_height);
+	if (!FIXNUM_P(w) || !FIXNUM_P(h))
+		return rb_funcall(self, id_slow_on_screen, 0); /* (sizes not known yet) */
+	VALUE xov = IV(self, iv_xov), yov = IV(self, iv_yov);
+	if (NIL_P(xov) || NIL_P(yov))
+		return Qtrue;
+	VALUE gm = mkxpz_gvar(gv_game_map);
+	VALUE xos = IV(self, iv_xos), yos = IV(self, iv_yos), rx = IV(self, iv_real_x), ry = IV(self, iv_real_y);
+	if (RB_SPECIAL_CONST_P(gm) || CLASS_OF(gm) != antilag_map_class)
+		return rb_funcall(self, id_slow_on_screen, 0);
+	VALUE dx = IV(gm, iv_display_x), dy = IV(gm, iv_display_y);
+	if (!FIXNUM_P(xov) || !FIXNUM_P(yov) || !FIXNUM_P(xos) || !FIXNUM_P(yos) || !FIXNUM_P(rx) || !FIXNUM_P(ry) ||
+	    !FIXNUM_P(dx) || !FIXNUM_P(dy))
+		return rb_funcall(self, id_slow_on_screen, 0);
+	/* (Ruby's integer division rounds down) */
+	long hw = FIX2LONG(w) >= 0 ? FIX2LONG(w) / 2 : -((-FIX2LONG(w) + 1) / 2);
+	long hh = FIX2LONG(h) >= 0 ? FIX2LONG(h) / 2 : -((-FIX2LONG(h) + 1) / 2);
+	long x = FIX2LONG(rx), y = FIX2LONG(ry), d = FIX2LONG(dx), e = FIX2LONG(dy);
+	bool xin = x <= d + FIX2LONG(xov) + hw && x >= d - FIX2LONG(xos) - hw;
+	bool yin = y <= e + FIX2LONG(yov) + hh && y >= e - FIX2LONG(yos) - hh;
+	return xin && yin ? Qtrue : Qfalse;
+}
+
+static VALUE fast_install_antilag(VALUE self, VALUE event_class, VALUE map_class)
+{
+	(void) self;
+	antilag_map_class = map_class;
+	rb_gc_register_mark_object(map_class);
+	rb_define_method(event_class, "on_screen", fast_on_screen, 0);
+	return Qtrue;
+}
+
 void init_events(void)
 {
 #define I(v, s) v = rb_intern(s)
@@ -169,6 +212,11 @@ void init_events(void)
 	I(iv_variable_valid, "@variable_valid"); I(iv_variable_id, "@variable_id"); I(iv_variable_value, "@variable_value");
 	I(iv_self_switch_valid, "@self_switch_valid"); I(iv_self_switch_ch, "@self_switch_ch");
 	I(iv_item_valid, "@item_valid"); I(iv_actor_valid, "@actor_valid");
-#undef I
 	rb_define_global_function("mkxpz_fast_install_events", fast_install_events, 1);
+	I(id_slow_on_screen, "mkxpz_slow_on_screen"); I(iv_width, "@width"); I(iv_height, "@height");
+	I(iv_real_x, "@real_x"); I(iv_real_y, "@real_y"); I(iv_xov, "@x_offscreen_value");
+	I(iv_yov, "@y_offscreen_value"); I(iv_xos, "@x_offscreen_squares"); I(iv_yos, "@y_offscreen_squares");
+	I(iv_display_x, "@display_x"); I(iv_display_y, "@display_y"); I(gv_game_map, "$game_map");
+	rb_define_global_function("mkxpz_fast_install_antilag", fast_install_antilag, 2);
+#undef I
 }

@@ -387,6 +387,14 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (the game's overrides disposed windows twice).
 - romfs stays mounted at exit (FreeType keeps its fonts open; the C
   library's final fclose crashed after romfsExit).
+- VX (RGSS2) speed-ups: Sprite_Character#update in C (scene.c
+  fast_update_vx, MKXPZ_STOCK_VX checksums from VX's standard scripts),
+  "Anti Lag VX"'s Game_Event#on_screen in C (events.c). Method source for
+  the checksums is also read from script files (loader games). Ruby patch
+  (ruby-3ds.patch): Integer == nil/true/false/symbol is false at once
+  (num_equal and the VM's opt_eq/opt_neq) instead of going through the
+  recursion guard. Changed's lab map (269 events, Azahar): 24.5 -> 9.8 ms
+  of Ruby per frame; the console was about 110 ms before.
 - Games without a "Main" section (scripts from files through a loader,
   e.g. Changed with the RGSS Script Editor loader): boot.rb's preparations
   (and mkxpz-test.rb) run at the first Graphics.update / freeze /

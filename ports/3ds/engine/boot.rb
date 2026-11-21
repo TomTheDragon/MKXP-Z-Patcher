@@ -252,27 +252,91 @@ MKXPZ_FAST_NEEDS = {
 
 def mkxpz_stock?(klass, name)
   m = klass.instance_method(name)
-  exp = MKXPZ_STOCK["#{m.owner}##{m.original_name}"] or return false
+  exp = mkxpz_stock_table["#{m.owner}##{m.original_name}"] or return false
   file, line = m.source_location
   return file.nil? if exp == :c
   return file == 'module_rpg.rb' && RubyVM::InstructionSequence.of(m).nil? if exp == :rpg
-  script = file && $mkxpz_sections[file] or return false
+  script = mkxpz_script_text(file) or return false
   return RubyVM::InstructionSequence.of(m).nil? && script.lines[line - 1].to_s =~ /\A\s*attr_(reader|accessor)\b/ if exp == :attr
   text = mkxpz_method_text(script, line) or return false
   Zlib.crc32(mkxpz_norm(text)) == exp
 rescue NameError
   false
 end
+# the same for RPG Maker VX (RGSS2): Sprite_Character#update (scene.c
+# fast_update_vx); checksums from VX's standard scripts
+MKXPZ_STOCK_VX = {
+  'Sprite_Character#update' => 1579953485,
+  'Sprite_Character#update_bitmap' => 3188977104,
+  'Sprite_Character#update_src_rect' => 1942911822,
+  'Sprite_Character#update_balloon' => 3727418189,
+  'Sprite_Base#update' => 208928782,
+  'Game_Character#screen_x' => 4149964556,
+  'Game_Character#screen_y' => 2379379738,
+  'Game_Character#screen_z' => 283499415,
+  'Game_Character#object?' => 1400731312,
+  'Game_Map#adjust_x' => 2112496703,
+  'Game_Map#adjust_y' => 269686746,
+  'Game_Map#loop_horizontal?' => 3787205086,
+  'Game_Map#loop_vertical?' => 729937964,
+  'Game_Character#tile_id' => :attr,
+  'Game_Character#character_name' => :attr,
+  'Game_Character#character_index' => :attr,
+  'Game_Character#pattern' => :attr,
+  'Game_Character#direction' => :attr,
+  'Game_Character#opacity' => :attr,
+  'Game_Character#blend_type' => :attr,
+  'Game_Character#bush_depth' => :attr,
+  'Game_Character#transparent' => :attr,
+  'Game_Character#animation_id' => :attr,
+  'Game_Character#balloon_id' => :attr,
+  'Game_Event#on_screen' => 1066362925, # ("Anti Lag VX" by Anaryu)
+  'Game_Map#display_x' => :attr,
+  'Game_Map#display_y' => :attr,
+  'RPG::Map#scroll_type' => :rpg,
+  'RPG::Map#width' => :rpg,
+  'RPG::Map#height' => :rpg,
+  'Sprite#update' => :c,
+  'Sprite#x=' => :c,
+  'Sprite#y=' => :c,
+  'Sprite#z=' => :c,
+  'Sprite#opacity=' => :c,
+  'Sprite#blend_type=' => :c,
+  'Sprite#bush_depth=' => :c,
+  'Sprite#visible=' => :c,
+  'Sprite#src_rect' => :c,
+}
+MKXPZ_FAST_NEEDS_VX = {
+  sprite: %w[update_bitmap update_src_rect update_balloon x= y= z= opacity= blend_type= bush_depth= visible= src_rect],
+  character: %w[screen_x screen_y screen_z object? tile_id character_name character_index pattern direction opacity
+                blend_type bush_depth transparent animation_id balloon_id],
+  map: %w[adjust_x adjust_y loop_horizontal? loop_vertical?],
+}
+
+def mkxpz_stock_table
+  $MKXPZ_RGSS == 2 ? MKXPZ_STOCK_VX : MKXPZ_STOCK
+end
+
+# a script's text by the file name Ruby reports: a section of
+# Scripts.rvdata(2), or a file (games that load their scripts from files)
+def mkxpz_script_text(file)
+  return nil unless file
+  return $mkxpz_sections[file] if $mkxpz_sections.key?(file)
+  ($mkxpz_files ||= {})[file] ||= (File.exist?(file) ? File.read(file).force_encoding(Encoding::UTF_8) : false)
+  $mkxpz_files[file] || nil
+end
 
 # (asked by the engine for each class it meets)
 def mkxpz_fast_ok?(klass, kind)
   return false if kind == :sprite && !(klass <= Sprite_Character)
-  MKXPZ_FAST_NEEDS[kind].all? { |n| mkxpz_stock?(klass, n) }
+  needs = $MKXPZ_RGSS == 2 ? MKXPZ_FAST_NEEDS_VX : MKXPZ_FAST_NEEDS
+  needs[kind].all? { |n| mkxpz_stock?(klass, n) }
 rescue StandardError
   false
 end
 
 def mkxpz_fast_setup
+  return mkxpz_fast_setup_vx if $MKXPZ_RGSS == 2
   return if $MKXPZ_RGSS != 3 || MKXPZ_STOCK.empty?
   return unless defined?(Sprite_Character) && defined?(Sprite_Base) && defined?(Game_Event) && defined?(Game_Map)
   return unless Sprite_Character.superclass == Sprite_Base && Sprite_Base.superclass == Sprite
@@ -286,6 +350,34 @@ def mkxpz_fast_setup
   mkxpz_log('character sprites: native')
 rescue StandardError => e
   mkxpz_log("character sprites: Ruby (#{e.class})")
+end
+
+def mkxpz_fast_setup_vx
+  return unless defined?(Sprite_Character) && defined?(Sprite_Base) && defined?(Game_Event) && defined?(Game_Map)
+  a = Sprite_Character.ancestors
+  return unless a[1] == Sprite_Base && a[2] == Sprite
+  return unless mkxpz_stock?(Sprite_Character, :update) && mkxpz_stock?(Sprite_Base, :update) && mkxpz_stock?(Sprite, :update)
+  return mkxpz_log('character sprites: Ruby (not the standard VX methods)') unless
+    mkxpz_fast_ok?(Sprite_Character, :sprite) && mkxpz_fast_ok?(Game_Event, :character) && mkxpz_fast_ok?(Game_Map, :map)
+  Sprite_Character.send(:alias_method, :mkxpz_slow_update, :update)
+  mkxpz_fast_install_vx(Sprite_Character)
+  mkxpz_log('character sprites: native (VX)')
+rescue StandardError => e
+  mkxpz_log("character sprites: Ruby (#{e.class}: #{e.message})")
+ensure
+  mkxpz_fast_setup_antilag
+end
+
+# "Anti Lag VX": Game_Event#on_screen in C (events.c)
+def mkxpz_fast_setup_antilag
+  return unless defined?(Game_Event) && Game_Event.method_defined?(:on_screen) && defined?(Game_Map)
+  return unless mkxpz_stock?(Game_Event, :on_screen) && mkxpz_stock?(Game_Map, :display_x) &&
+                mkxpz_stock?(Game_Map, :display_y)
+  Game_Event.send(:alias_method, :mkxpz_slow_on_screen, :on_screen)
+  mkxpz_fast_install_antilag(Game_Event, $game_map ? $game_map.class : Game_Map)
+  mkxpz_log('anti lag: native on_screen')
+rescue StandardError => e
+  mkxpz_log("anti lag: Ruby (#{e.class}: #{e.message})")
 end
 
 # Game_Event#refresh in C (events.c), with find_proper_page and

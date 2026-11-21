@@ -922,6 +922,129 @@ static VALUE fast_update(VALUE self)
 	return Qnil;
 }
 
+/* --- the same for RPG Maker VX (RGSS2): Sprite_Character#update with
+ * Sprite_Base#update, update_bitmap, update_src_rect and Game_Character's
+ * screen_x / screen_y / screen_z (positions * 256, Game_Map#adjust_x with
+ * @margin_x). An animation playing or to start, or a balloon to start: the
+ * whole Ruby update (mkxpz_slow_update). Changed has 269 events on a map,
+ * each one's sprite updated every frame. */
+static ID iv_margin_x, iv_margin_y, cv_animations, id_screen_x, id_screen_y, id_screen_z;
+static VALUE animations_cv;
+static int animations_frame = -1;
+
+/* Game_Map#adjust_x / adjust_y (VX); false: not integers */
+static bool adjust_vx(VALUE v, VALUE disp, VALUE margin, bool loop, VALUE size, long long *out)
+{
+	if (!FIXNUM_P(v) || !FIXNUM_P(disp) || !FIXNUM_P(margin) || !FIXNUM_P(size))
+		return false;
+	long long x = FIX2LONG(v), d = FIX2LONG(disp);
+	*out = loop && x < d - FIX2LONG(margin) ? x - d + FIX2LONG(size) * 256 : x - d;
+	return true;
+}
+
+static VALUE fast_update_vx(VALUE self)
+{
+	VALUE chr = IV(self, iv_character);
+	VALUE gm = mkxpz_gvar(id_game_map);
+	if (!fast_ok(CLASS_OF(self), 0) || !fast_ok(CLASS_OF(chr), 1) || !fast_ok(CLASS_OF(gm), 2))
+		return rb_funcall(self, id_slow_update, 0);
+	VALUE aid = IV(chr, iv_animation_id), bid = IV(chr, iv_balloon_id);
+	if (!NIL_P(IV(self, iv_animation)) || !FIXNUM_P(aid) || FIX2LONG(aid) != 0 || !FIXNUM_P(bid) ||
+	    FIX2LONG(bid) != 0)
+		return rb_funcall(self, id_slow_update, 0);
+	/* Sprite_Base#update: Sprite#update, @@animations.clear */
+	sprite_update(self);
+	if (animations_frame != graphics_frame()) {
+		animations_cv = rb_cvar_get(cSpriteBase, cv_animations);
+		animations_frame = graphics_frame();
+	}
+	if (RB_TYPE_P(animations_cv, T_ARRAY)) {
+		if (RARRAY_LEN(animations_cv))
+			rb_ary_clear(animations_cv);
+	} else {
+		rb_funcall(animations_cv, id_clear, 0);
+	}
+	/* update_bitmap: only when the graphic changed */
+	if (!rb_equal(IV(self, iv_tile_id), IV(chr, iv_tile_id)) ||
+	    !rb_equal(IV(self, iv_character_name), IV(chr, iv_character_name)) ||
+	    !rb_equal(IV(self, iv_character_index), IV(chr, iv_character_index)))
+		rb_funcall(self, id_update_bitmap, 0);
+	Sprite *s = sprite_get(self);
+	s->visible = !RTEST(IV(chr, iv_transparent));
+	/* update_src_rect */
+	VALUE tile = IV(self, iv_tile_id);
+	if (rb_equal(tile, INT2FIX(0))) {
+		VALUE idx = IV(chr, iv_character_index), pat = IV(chr, iv_pattern);
+		VALUE dir = IV(chr, iv_direction), cw = IV(self, iv_cw), ch = IV(self, iv_ch);
+		if (FIXNUM_P(idx) && FIXNUM_P(pat) && FIXNUM_P(dir) && FIXNUM_P(cw) && FIXNUM_P(ch)) {
+			long long index = FIX2LONG(idx), pattern = FIX2LONG(pat) < 3 ? FIX2LONG(pat) : 1;
+			Rect *r = rect_get(s->src_rect);
+			r->x = (int) ((floor_mod(index, 4) * 3 + pattern) * FIX2LONG(cw));
+			r->y = (int) ((floor_div(index, 4) * 4 + floor_div(FIX2LONG(dir) - 2, 2)) * FIX2LONG(ch));
+			r->w = (int) FIX2LONG(cw);
+			r->h = (int) FIX2LONG(ch);
+		} else {
+			rb_funcall(self, id_update_src_rect, 0);
+		}
+	}
+	/* screen_x, screen_y, screen_z */
+	VALUE map = IV(gm, iv_map);
+	VALUE ctile = IV(chr, iv_tile_id), name = IV(chr, iv_character_name), prio = IV(chr, iv_priority_type);
+	VALUE peak = IV(chr, iv_jump_peak), count = IV(chr, iv_jump_count);
+	long long ax, ay;
+	VALUE st = RB_TYPE_P(map, T_OBJECT) ? IV(map, iv_scroll_type) : Qnil;
+	if (FIXNUM_P(st) && FIXNUM_P(ctile) && RB_TYPE_P(name, T_STRING) && FIXNUM_P(peak) && FIXNUM_P(count) &&
+	    adjust_vx(IV(chr, iv_real_x), IV(gm, iv_display_x), IV(gm, iv_margin_x),
+	              FIX2LONG(st) == 2 || FIX2LONG(st) == 3, IV(map, iv_width), &ax) &&
+	    adjust_vx(IV(chr, iv_real_y), IV(gm, iv_display_y), IV(gm, iv_margin_y),
+	              FIX2LONG(st) == 1 || FIX2LONG(st) == 3, IV(map, iv_height), &ay)) {
+		bool object = FIX2LONG(ctile) > 0 || (RSTRING_LEN(name) > 0 && RSTRING_PTR(name)[0] == '!');
+		long long p = FIX2LONG(peak), c = FIX2LONG(count), n = c >= p ? c - p : p - c;
+		s->x = (int) CLAMP(floor_div(ax + 8007, 8) - 1000 + 16, -999999, 999999);
+		long long y = floor_div(ay + 8007, 8) - 1000 + 32 - (object ? 0 : 4);
+		s->y = (int) CLAMP(y - floor_div(p * p - n * n, 2), -999999, 999999);
+	} else {
+		VALUE x = rb_funcall(chr, id_screen_x, 0), y = rb_funcall(chr, id_screen_y, 0);
+		rb_funcall(self, rb_intern("x="), 1, x);
+		rb_funcall(self, rb_intern("y="), 1, y);
+	}
+	/* screen_z: 200 above, 60 below, a tile by its passage flags (Ruby), 100 */
+	if (FIXNUM_P(prio) && FIX2LONG(prio) == 2)
+		s->el.z = 200;
+	else if (FIXNUM_P(prio) && FIX2LONG(prio) == 0)
+		s->el.z = 60;
+	else if (FIXNUM_P(prio) && FIXNUM_P(ctile) && FIX2LONG(ctile) <= 0)
+		s->el.z = 100;
+	else
+		rb_funcall(self, rb_intern("z="), 1, rb_funcall(chr, id_screen_z, 0)); /* (a tile: passages) */
+	/* opacity, blend_type, bush_depth */
+	VALUE op = IV(chr, iv_opacity), bl = IV(chr, iv_blend_type), bu = IV(chr, iv_bush_depth);
+	if (FIXNUM_P(op) && FIXNUM_P(bl) && FIXNUM_P(bu)) {
+		s->opacity = CLAMP((int) FIX2LONG(op), 0, 255);
+		s->blend_type = CLAMP((int) FIX2LONG(bl), 0, 2);
+		s->bush_depth = CLAMP((int) FIX2LONG(bu), 0, 999999);
+	} else {
+		rb_funcall(self, rb_intern("opacity="), 1, op);
+		rb_funcall(self, rb_intern("blend_type="), 1, bl);
+		rb_funcall(self, rb_intern("bush_depth="), 1, bu);
+	}
+	/* update_balloon: only while one shows */
+	VALUE bd = IV(self, iv_balloon_duration);
+	if (!FIXNUM_P(bd) || FIX2LONG(bd) > 0)
+		rb_funcall(self, id_update_balloon, 0);
+	return Qnil;
+}
+
+static VALUE fast_install_vx(VALUE self, VALUE klass)
+{
+	(void) self;
+	cSpriteBase = rb_class_superclass(klass);
+	rb_gc_register_mark_object(cSpriteBase);
+	rb_gc_register_address(&animations_cv);
+	rb_define_method(klass, "update", fast_update_vx, 0);
+	return Qtrue;
+}
+
 /* --- Game_Event#update for an event standing still: the standard methods
  * in C (Game_CharacterBase#update, update_animation, update_anime_count,
  * the three update_stop, update_self_movement, near_the_screen?,
@@ -1054,6 +1177,8 @@ void init_fast(void)
 	I(iv_jump_count, "@jump_count"); I(iv_display_x, "@display_x"); I(iv_display_y, "@display_y");
 	I(iv_map, "@map"); I(iv_width, "@width"); I(iv_height, "@height"); I(iv_scroll_type, "@scroll_type");
 	I(cv_ani_checker, "@@ani_checker"); I(cv_ani_spr_checker, "@@ani_spr_checker");
+	I(iv_margin_x, "@margin_x"); I(iv_margin_y, "@margin_y"); I(cv_animations, "@@animations");
+	I(id_screen_x, "screen_x"); I(id_screen_y, "screen_y"); I(id_screen_z, "screen_z");
 	I(id_slow_event_update, "mkxpz_slow_event_update"); I(id_update_anime_pattern, "update_anime_pattern");
 	I(id_update_routine_move, "update_routine_move"); I(id_move_type[1], "move_type_random");
 	I(id_move_type[2], "move_type_toward_player"); I(id_move_type[3], "move_type_custom"); I(id_start, "start");
@@ -1064,5 +1189,6 @@ void init_fast(void)
 	I(iv_move_frequency, "@move_frequency"); I(iv_trigger, "@trigger"); I(iv_interpreter, "@interpreter");
 #undef I
 	rb_define_global_function("mkxpz_fast_install", fast_install, 1);
+	rb_define_global_function("mkxpz_fast_install_vx", fast_install_vx, 1);
 	rb_define_global_function("mkxpz_fast_install_event_update", fast_install_event_update, 1);
 }
