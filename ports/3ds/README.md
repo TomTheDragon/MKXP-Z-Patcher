@@ -438,6 +438,11 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   overlapped in creation order before.
 - Frame skip: 0 off, 1..5 auto with at most that many skipped pictures in
   a row (the lateness that is still caught up grows with it).
+- Games in an RGSS archive (Game.rgssad / .rgss2a / .rgss3a):
+  `tools/extract-archive.py <archive> [<folder>]` unpacks it (RGSSAD 1
+  and 3, as the patcher's archive.rs) for the package; the engine reads
+  only plain files. A package: game folder without the archive, plus the
+  unpacked Data/Graphics, then convert-images.py and make-package.py.
 - Packaging: `tools/make-package.py [--icon <picture>] <game> <mkxpz.3dsx>
   [<out>]` writes `<Title>.3dsx` with the game's title (Game.ini) and
   Game.exe's icon (48x48) in the SMDH (replaced in place: the 3DSX
