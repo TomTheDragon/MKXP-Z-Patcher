@@ -261,7 +261,57 @@ pub fn read_scripts(files: &GameFiles, ver: usize) -> Option<Vec<(String, Vec<u8
         let src = inflate(code)?;
         out.push((String::from_utf8_lossy(name.as_bytes().unwrap_or(b"")).into_owned(), src));
     }
+    let loaded = loader_scripts(&files.dir, &out);
+    out.extend(loaded);
     Some(out)
+}
+
+/// Scripts that a loader section reads from files at startup ("RGSS Script
+/// Editor Loader" by SnowSzn, e.g. Changed): Scripts.rvdata then only holds
+/// the loader, and the real scripts (which the patcher checks for DLLs,
+/// RtlMoveMemory tricks, Fullscreen++...) are in a folder with a
+/// load_order.txt. Its rules: lines ending in .rb, not starting with #,
+/// relative to the load_order.txt's folder.
+fn loader_scripts(dir: &std::path::Path, sections: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut folders: Vec<String> = Vec::new();
+    for (_, src) in sections {
+        let text = String::from_utf8_lossy(src);
+        if !text.contains("load_order.txt") {
+            continue;
+        }
+        for key in ["PRELOAD_PATH", "SCRIPTS_PATH"] {
+            for line in text.lines() {
+                let l = line.trim();
+                let Some(rest) = l.strip_prefix(key) else { continue };
+                let Some(value) = rest.trim_start().strip_prefix('=') else { continue };
+                let v = value.trim();
+                let q = v.chars().next().filter(|c| *c == '\'' || *c == '"');
+                if let Some(q) = q {
+                    if let Some(end) = v[1..].find(q) {
+                        let path = &v[1..1 + end];
+                        if !path.is_empty() && !folders.iter().any(|f| f == path) {
+                            folders.push(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for folder in folders {
+        let base = dir.join(&folder);
+        let Ok(order) = std::fs::read(base.join("load_order.txt")) else { continue };
+        for entry in String::from_utf8_lossy(&order).split('\n') {
+            let e = entry.trim_end_matches('\r');
+            if e.starts_with('#') || !e.to_lowercase().ends_with(".rb") {
+                continue;
+            }
+            if let Ok(src) = std::fs::read(base.join(e)) {
+                out.push((format!("{}/{}", folder.trim_start_matches("./"), e), src));
+            }
+        }
+    }
+    out
 }
 
 // Strings only the editor shows; they never reach the screen, so they don't need glyphs.
@@ -401,4 +451,26 @@ pub fn needs_rtp(dir: &Path, ini: &HashMap<String, String>, ver: usize) -> bool 
         .map(|e| e.path().file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default())
         .collect();
     !names.iter().any(|n| n == "window" || n.starts_with("001-"))
+}
+
+#[cfg(test)]
+mod loader_tests {
+    #[test]
+    fn scripts_from_a_loader_folder() {
+        let dir = std::env::temp_dir().join(format!("mkxpz-loader-test-{}", std::process::id()));
+        let scripts = dir.join("Scripts");
+        std::fs::create_dir_all(scripts.join("sub")).unwrap();
+        std::fs::write(scripts.join("load_order.txt"),
+                       "a.rb\r\n*separator*\n#skipped.rb\nsub/b.rb\nmissing.rb\nnotes.txt\n").unwrap();
+        std::fs::write(scripts.join("a.rb"), "A").unwrap();
+        std::fs::write(scripts.join("skipped.rb"), "S").unwrap();
+        std::fs::write(scripts.join("sub/b.rb"), "B").unwrap();
+        let loader = ("Loader".to_string(),
+                      b"SCRIPTS_PATH = './Scripts'\nPRELOAD_PATH = ''\nFile.join(x, 'load_order.txt')".to_vec());
+        let got = super::loader_scripts(&dir, &[loader]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Scripts/a.rb", "Scripts/sub/b.rb"]);
+        assert_eq!(got[1].1, b"B");
+    }
 }
