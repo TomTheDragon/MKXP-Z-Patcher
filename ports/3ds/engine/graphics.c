@@ -226,15 +226,18 @@ static void gpu_frame_with(int frozen_alpha)
 	engine_check_reset();
 	const u64 period = SYSCLOCK_ARM11 / 60;
 	u64 now = svcGetSystemTick();
-	/* speed-up (L held): no waiting for the screen, every 4th picture
-	 * drawn; the pacing starts again afterwards */
-	static int fast_n;
+	/* speed-up (L held): no waiting for the screen, and a picture at most
+	 * 15 times a second (by the clock): all the rest of the time runs the
+	 * game (as fast as its scripts allow); the pacing starts again
+	 * afterwards */
+	static u64 fast_drawn;
 	if (input_speedup()) {
 		due = 0;
-		if (++fast_n % 4 && frozen_alpha < 0) {
+		if (frozen_alpha < 0 && now - fast_drawn < SYSCLOCK_ARM11 / 15) {
 			frame_count++;
 			return;
 		}
+		fast_drawn = now;
 		bool stereo = gpu_stereo_update();
 		gpu_frame_begin_sync(false);
 		draw_eyes(frozen_alpha, stereo);

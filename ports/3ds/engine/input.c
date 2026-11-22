@@ -36,10 +36,10 @@ static u32 keys_for(int k)
 	}
 }
 
-/* R held for 3 seconds: reset (a bar fills up on the top screen, shown
+/* R held for 2 seconds: reset (a bar fills up on the top screen, shown
  * after the first 0.3 s so ordinary presses don't flash it); R has to be
  * let go of before it can do it again */
-#define RESET_HOLD_MS 3000
+#define RESET_HOLD_MS 2000
 #define RESET_SHOW_MS 300
 static u64 r_since;
 static bool r_armed = true;

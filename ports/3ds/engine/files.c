@@ -16,6 +16,17 @@ typedef struct {
 static Listing *listings;
 static int nlistings;
 
+/* (a name from the pack: added like one in the folder) */
+static void listing_add(const char *name, void *ctx)
+{
+	Listing *l = ctx;
+	char **nn = realloc(l->names, sizeof *nn * (l->n + 1));
+	if (!nn)
+		return;
+	l->names = nn;
+	l->names[l->n++] = strdup(name);
+}
+
 static const Listing *listing_of(const char *dir)
 {
 	for (int i = 0; i < nlistings; i++)
@@ -30,8 +41,10 @@ static const Listing *listing_of(const char *dir)
 	l->names = NULL;
 	l->n = 0;
 	DIR *d = opendir(*dir ? dir : ".");
-	if (!d)
+	if (!d) {
+		pack_list(dir, listing_add, l); /* (a folder only in the pack) */
 		return l;
+	}
 	struct dirent *e;
 	int cap = 0;
 	while ((e = readdir(d))) {
@@ -47,6 +60,7 @@ static const Listing *listing_of(const char *dir)
 		l->names[l->n++] = strdup(e->d_name);
 	}
 	closedir(d);
+	pack_list(dir, listing_add, l);
 	return l;
 }
 

@@ -91,6 +91,19 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
  * possible for this image: then bitmap_stream_file) */
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
+/* pack.c: the game's files in Game.mkxpz */
+struct _reent;
+struct stat;
+void pack_init(const void *sd_devoptab);
+bool pack_active(void);
+bool pack_is(void *fd);
+int pack_open(struct _reent *r, void *fileStruct, const char *path, int flags);
+int pack_close(void *fd);
+long pack_read(struct _reent *r, void *fd, char *ptr, size_t len);
+long pack_seek(struct _reent *r, void *fd, long pos, int dir);
+int pack_fstat(void *fd, struct stat *st);
+int pack_stat(const char *path, struct stat *st);
+void pack_list(const char *dir, void (*add)(const char *name, void *ctx), void *ctx);
 /* a tiled .mkxi's tile (i, j) unpacked (a buffer reused by the next call;
  * NULL: not a tiled image); its size in *tw, *th; *tile its edge length */
 const px_t *bitmap_tile(Bitmap *b, int i, int j, int *tw, int *th, int *tile);

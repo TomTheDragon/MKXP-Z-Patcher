@@ -296,8 +296,26 @@ static bool in_sd_write;
 
 static ssize_t sd_write_checked(struct _reent *r, void *fd, const char *ptr, size_t len);
 
+static ssize_t sd_read(struct _reent *r, void *fd, char *ptr, size_t len)
+{
+	if (pack_is(fd))
+		return pack_read(r, fd, ptr, len);
+	return sd_orig->read_r(r, fd, ptr, len);
+}
+
+static off_t sd_seek(struct _reent *r, void *fd, off_t pos, int dir)
+{
+	if (pack_is(fd))
+		return pack_seek(r, fd, pos, dir);
+	return sd_orig->seek_r(r, fd, pos, dir);
+}
+
 static ssize_t sd_write(struct _reent *r, void *fd, const char *ptr, size_t len)
 {
+	if (pack_is(fd)) {
+		r->_errno = EBADF;
+		return -1;
+	}
 	if (fd == log_fd || in_sd_write)
 		return sd_orig->write_r(r, fd, ptr, len);
 	in_sd_write = true;
@@ -360,6 +378,8 @@ static void sd_set_mtime(const char *path, struct stat *st)
 static int sd_open(struct _reent *r, void *fileStruct, const char *path, int flags, int mode)
 {
 	int rc = sd_orig->open_r(r, fileStruct, path, flags, mode);
+	if (rc == -1 && pack_open(r, fileStruct, path, flags) == 0)
+		return 0; /* (from Game.mkxpz) */
 	if (rc != -1) {
 		for (int i = 0; i < 32; i++)
 			if (!sd_paths[i].fd) {
@@ -373,6 +393,8 @@ static int sd_open(struct _reent *r, void *fileStruct, const char *path, int fla
 
 static int sd_close(struct _reent *r, void *fd)
 {
+	if (pack_is(fd))
+		return pack_close(fd);
 	for (int i = 0; i < 32; i++)
 		if (sd_paths[i].fd == fd)
 			sd_paths[i].fd = NULL;
@@ -382,6 +404,10 @@ static int sd_close(struct _reent *r, void *fd)
 static int sd_stat(struct _reent *r, const char *file, struct stat *st)
 {
 	int rc = sd_orig->stat_r(r, file, st);
+	if (rc != 0 && pack_stat(file, st) == 0) {
+		r->_errno = 0;
+		return 0;
+	}
 	if (rc == 0 && !st->st_mtime)
 		sd_set_mtime(file, st);
 	return rc;
@@ -389,6 +415,8 @@ static int sd_stat(struct _reent *r, const char *file, struct stat *st)
 
 static int sd_fstat(struct _reent *r, void *fd, struct stat *st)
 {
+	if (pack_is(fd))
+		return pack_fstat(fd, st);
 	int rc = sd_orig->fstat_r(r, fd, st);
 	if (rc == 0 && !st->st_mtime)
 		for (int i = 0; i < 32; i++)
@@ -407,6 +435,10 @@ static void guard_sd_writes(void)
 	sd_orig = devoptab_list[i];
 	sd_tab = *sd_orig;
 	sd_tab.write_r = sd_write;
+	if (sd_orig->read_r)
+		sd_tab.read_r = sd_read;
+	if (sd_orig->seek_r)
+		sd_tab.seek_r = sd_seek;
 	if (sd_orig->open_r && sd_orig->close_r) {
 		sd_tab.open_r = sd_open;
 		sd_tab.close_r = sd_close;
@@ -710,6 +742,7 @@ int main(int argc, char **argv)
 	tee_stderr();
 	guard_sd_writes();
 	log_only("started as %s\n", self_path[0] ? self_path : "(no path)");
+	pack_init(sd_orig);
 	bg_icon_load();
 	bg_icon_draw();
 	char scripts[256];

@@ -386,7 +386,7 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
 - Bottom screen background: the .3dsx's SMDH icon (argv[0], or a .3dsx in
   the game folder), 4x, dimmed to 30%, drawn into dark pixels only after
   each console output. Settings are written only when they changed.
-- Reset with R held for 3 s (input.c: shown after 0.3 s as "RESET" and a
+- Reset with R held for 2 s (input.c: shown after 0.3 s as "RESET" and a
   bar, gpu.c draw_reset_hold; R must be let go of before the next one).
   Graphics.mkxpz_reset draws one frame of the emptied scene (black, the
   load icon) so the last picture doesn't stay while the scripts reload.
@@ -443,6 +443,16 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   and 3, as the patcher's archive.rs) for the package; the engine reads
   only plain files. A package: game folder without the archive, plus the
   unpacked Data/Graphics, then convert-images.py and make-package.py.
+- Pack (engine/pack.c): `tools/make-3ds-package.py [--icon <picture>]
+  <game> <mkxpz.3dsx> <out>` makes the whole SD card folder: <Title>.3dsx,
+  Game.ini, Fonts/, text files, and Game.mkxpz with everything else
+  (archive unpacked, images only as .mkxi, no PNGs; no exe/dll/archive/
+  project files/saves). Format: "MKXPZPK1", u32 count, u32 index length,
+  index sorted by lowercase name (u32 offset, u32 size, u16 length, name),
+  then the files. main.c's sdmc hooks (open/close/read/seek/stat/fstat)
+  serve a read-only file from the pack when it isn't a plain file (plain
+  files first: the game's own writes); files.c listings add the pack's
+  names. The pack is read through sdmc's own functions under a lock.
 - Packaging: `tools/make-package.py [--icon <picture>] <game> <mkxpz.3dsx>
   [<out>]` writes `<Title>.3dsx` with the game's title (Game.ini) and
   Game.exe's icon (48x48) in the SMDH (replaced in place: the 3DSX
@@ -495,7 +505,8 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   the step), else the step; asked every 2 s; charging from ptm:u.
 - Buttons (default): A confirm, B cancel, Y run, X / R page up / down,
   ZL / ZR the X / Y keys, L held = speed-up (no waiting for the screen,
-  every 4th picture drawn); settings "Buttons" has the old layout.
+  a picture at most 15 times a second by the clock, the rest of the time
+  runs the game: about 330% in Changed's boss fight in the emulator); settings "Buttons" has the old layout.
 - The speed display is drawn again after every other console output
   (libctru's scrolling of a console window wiped the line next to it:
   flicker).
