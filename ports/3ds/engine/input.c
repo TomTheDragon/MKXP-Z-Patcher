@@ -36,6 +36,24 @@ static u32 keys_for(int k)
 	}
 }
 
+/* R held for 3 seconds: reset (a bar fills up on the top screen, shown
+ * after the first 0.3 s so ordinary presses don't flash it); R has to be
+ * let go of before it can do it again */
+#define RESET_HOLD_MS 3000
+#define RESET_SHOW_MS 300
+static u64 r_since;
+static bool r_armed = true;
+
+float input_reset_hold(void)
+{
+	if (!r_since)
+		return 0;
+	u64 ms = (svcGetSystemTick() - r_since) / (SYSCLOCK_ARM11 / 1000);
+	if (ms < RESET_SHOW_MS)
+		return 0;
+	return ms >= RESET_HOLD_MS ? 1.0f : (float) ms / RESET_HOLD_MS;
+}
+
 void input_poll(void)
 {
 	hidScanInput();
@@ -43,6 +61,18 @@ void input_poll(void)
 	now = hidKeysHeld();
 	if ((now & KEY_SELECT) && !(before & KEY_SELECT))
 		reset_requested = true;
+	if (!(now & KEY_R)) {
+		r_since = 0;
+		r_armed = true;
+	} else if (r_armed) {
+		if (!r_since)
+			r_since = svcGetSystemTick();
+		else if (svcGetSystemTick() - r_since >= (u64) RESET_HOLD_MS * (SYSCLOCK_ARM11 / 1000)) {
+			reset_requested = true;
+			r_since = 0;
+			r_armed = false;
+		}
+	}
 	if ((now & KEY_START) && !(before & KEY_START)) {
 		if (settings_menu())
 			reset_requested = true;

@@ -348,6 +348,10 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Reset with R held for 3 s (input.c: shown after 0.3 s as "RESET" and a
+  bar, gpu.c draw_reset_hold; R must be let go of before the next one).
+  Graphics.mkxpz_reset draws one frame of the emptied scene (black, the
+  load icon) so the last picture doesn't stay while the scripts reload.
 - Graphics.snap_to_bitmap draws the scene on the GPU into scene texture 0
   in a frame of its own (window text at game size, as for a freeze; the
   top screen untouched), waits for the GPU (the next C3D_FrameBegin) and

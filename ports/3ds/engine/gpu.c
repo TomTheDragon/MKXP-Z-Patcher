@@ -1093,6 +1093,36 @@ static void draw_floppy(Canvas *c, int x0, int y0)
 		}
 }
 
+/* R held for a reset: "RESET" and a bar filling up, at the top in the
+ * middle (a 3x5 pixel font: only these letters) */
+static void draw_reset_hold(void)
+{
+	float f = input_reset_hold();
+	if (f <= 0)
+		return;
+	static const char *const glyphs[4][5] = {
+		{ "##.", "#.#", "##.", "#.#", "#.#" }, /* R */
+		{ "###", "#..", "##.", "#..", "###" }, /* E */
+		{ ".##", "#..", ".#.", "..#", "##." }, /* S */
+		{ "###", ".#.", ".#.", ".#.", ".#." }, /* T */
+	};
+	static const int word[5] = { 0, 1, 2, 1, 3 }; /* R E S E T */
+	Canvas c = { .clip = { 0, 0, 400, 240 } };
+	Color shade = { 0, 0, 0, 255 }, white = { 240, 240, 240, 255 }, back = { 70, 70, 80, 255 };
+	Color bar = { 255, 150, 60, 255 };
+	int bx = 200 - 50, by = 26;
+	gpu_fill(&c, (Rect) { bx - 4, 4, 108, 30 }, &shade, 170);
+	/* the word, 2x size */
+	int wx = 200 - (5 * 4 * 2 - 2) / 2;
+	for (int i = 0; i < 5; i++)
+		for (int y = 0; y < 5; y++)
+			for (int x = 0; x < 3; x++)
+				if (glyphs[word[i]][y][x] == '#')
+					gpu_fill(&c, (Rect) { wx + i * 8 + x * 2, 8 + y * 2, 2, 2 }, &white, 255);
+	gpu_fill(&c, (Rect) { bx, by, 100, 5 }, &back, 255);
+	gpu_fill(&c, (Rect) { bx, by, (int) (100 * f), 5 }, &bar, 255);
+}
+
 static void draw_activity(void)
 {
 	if (!settings.activity_icons)
@@ -1164,6 +1194,7 @@ void gpu_present(int frozen_alpha, int brightness)
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_ui);
 	draw_battery();
 	draw_activity();
+	draw_reset_hold();
 }
 
 void gpu_frame_end(void)

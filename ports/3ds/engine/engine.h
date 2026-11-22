@@ -211,6 +211,7 @@ extern int screen_w, screen_h;
 void init_graphics(void);
 void init_input(void);
 bool input_speedup(void); /* input.c: the speed-up button is held */
+float input_reset_hold(void); /* input.c: R held for a reset: 0 not (yet) shown, up to 1 */
 void init_audio(void);
 bool audio_start(void); /* false: no sound (no DSP firmware) */
 void audio_stop(void);

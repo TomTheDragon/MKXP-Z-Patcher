@@ -384,6 +384,16 @@ static VALUE g_reset(VALUE self)
 		free(frozen);
 		frozen = NULL;
 	}
+	/* one frame of the (now empty) scene: black with the load icon, not
+	 * the last picture while the scripts load again (seconds in games that
+	 * read many script files) */
+	if (gpu_on && !gpu_in_frame()) {
+		gpu_activity_load();
+		gpu_frame_begin_sync(false);
+		gpu_draw_scene(0);
+		gpu_present(-1, brightness);
+		gpu_frame_end();
+	}
 	return Qnil;
 }
 
