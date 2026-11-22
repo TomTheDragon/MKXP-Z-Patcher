@@ -5,7 +5,7 @@
 
 The output folder (made new; copy it into sdmc:/3ds/) gets:
   <Title>.3dsx   the engine with the game's title and icon (make-package.py)
-  Game.mkxpz     the game's files in one pack, read by the engine directly:
+  Game.data     the game's files in one pack, read by the engine directly:
                  Data, Graphics (images as .mkxi, convert-images.py; no
                  PNGs), Audio, Movies... and, if the game has an RGSS archive
                  (Game.rgssad / .rgss2a / .rgss3a), its contents
@@ -110,7 +110,7 @@ def main():
         for n, size in zip(names, sizes):
             index += struct.pack("<IIH", at, size, len(n)) + n
             at += size
-        with open(os.path.join(out, "Game.mkxpz"), "wb") as f:
+        with open(os.path.join(out, "Game.data"), "wb") as f:
             f.write(b"MKXPZPK1" + struct.pack("<II", len(files), ilen) + index)
             for _, src in files:
                 with open(src, "rb") as s:
@@ -118,7 +118,7 @@ def main():
         # 4. the .3dsx (title and icon from the original folder: Game.exe)
         sys.argv = ["make-package.py"] + icon + [game, engine, out]
         tool("make-package").main()
-        print(f"{out}: Game.mkxpz with {len(files)} files ({at // 1024 // 1024} MB)")
+        print(f"{out}: Game.data with {len(files)} files ({at // 1024 // 1024} MB)")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

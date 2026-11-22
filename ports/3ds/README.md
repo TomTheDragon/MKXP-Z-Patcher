@@ -445,7 +445,7 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   unpacked Data/Graphics, then convert-images.py and make-package.py.
 - Pack (engine/pack.c): `tools/make-3ds-package.py [--icon <picture>]
   <game> <mkxpz.3dsx> <out>` makes the whole SD card folder: <Title>.3dsx,
-  Game.ini, Fonts/, text files, and Game.mkxpz with everything else
+  Game.ini, Fonts/, text files, and Game.data with everything else
   (archive unpacked, images only as .mkxi, no PNGs; no exe/dll/archive/
   project files/saves). Format: "MKXPZPK1", u32 count, u32 index length,
   index sorted by lowercase name (u32 offset, u32 size, u16 length, name),

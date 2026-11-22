@@ -1,4 +1,4 @@
-/* The game's files in one pack (Game.mkxpz, made by
+/* The game's files in one pack (Game.data, made by
  * ports/3ds/tools/make-3ds-package.py): Data, Graphics (.mkxi), Audio...
  * in a single file instead of thousands on the SD card. Served through
  * the SD card's own file functions (main.c hooks them): a file that isn't
@@ -126,7 +126,7 @@ void pack_init(const void *sd_devoptab)
 	dev = sd;
 	void *fs = calloc(1, sd->structSize ? sd->structSize : 64);
 	struct _reent r = { 0 };
-	if (!fs || sd->open_r(&r, fs, "Game.mkxpz", O_RDONLY, 0) == -1) {
+	if (!fs || sd->open_r(&r, fs, "Game.data", O_RDONLY, 0) == -1) {
 		free(fs);
 		return;
 	}
@@ -142,7 +142,7 @@ void pack_init(const void *sd_devoptab)
 	entries = idx ? calloc(count, sizeof *entries) : NULL;
 	names = idx ? malloc(ilen) : NULL;
 	if (!idx || !entries || !names || !pack_read_at(16, idx, ilen)) {
-		log_only("pack: Game.mkxpz unreadable\n");
+		log_only("pack: Game.data unreadable\n");
 		free(idx);
 		free(entries);
 		free(names);
@@ -167,7 +167,7 @@ void pack_init(const void *sd_devoptab)
 		p += nl;
 	}
 	free(idx);
-	log_only("pack: Game.mkxpz, %d files\n", nentries);
+	log_only("pack: Game.data, %d files\n", nentries);
 }
 
 static int slot_of(void *fd)

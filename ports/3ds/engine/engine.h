@@ -91,7 +91,7 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
  * possible for this image: then bitmap_stream_file) */
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
-/* pack.c: the game's files in Game.mkxpz */
+/* pack.c: the game's files in Game.data */
 struct _reent;
 struct stat;
 void pack_init(const void *sd_devoptab);

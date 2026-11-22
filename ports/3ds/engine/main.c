@@ -379,7 +379,7 @@ static int sd_open(struct _reent *r, void *fileStruct, const char *path, int fla
 {
 	int rc = sd_orig->open_r(r, fileStruct, path, flags, mode);
 	if (rc == -1 && pack_open(r, fileStruct, path, flags) == 0)
-		return 0; /* (from Game.mkxpz) */
+		return 0; /* (from Game.data) */
 	if (rc != -1) {
 		for (int i = 0; i < 32; i++)
 			if (!sd_paths[i].fd) {
