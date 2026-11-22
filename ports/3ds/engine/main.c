@@ -3,6 +3,7 @@
  * The bottom screen shows messages (and errors). */
 #include "engine.h"
 #include <3ds.h>
+#include <dirent.h>
 #include <errno.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -337,6 +338,67 @@ static ssize_t sd_write_checked(struct _reent *r, void *fd, const char *ptr, siz
 	return -1;
 }
 
+/* File times: libctru's stat / fstat on sdmc: leave st_mtime at 0 (1970
+ * for every file), so a save screen's "most recent save" (Changed: by
+ * file.mtime) always picked the first slot. Filled in here from
+ * archive_getmtime; for fstat the path is noted when the file is opened. */
+static struct { void *fd; char path[256]; } sd_paths[32];
+
+static void sd_set_mtime(const char *path, struct stat *st)
+{
+	u64 t = 0;
+	if (!path || R_FAILED(archive_getmtime(path, &t)) || !t)
+		return;
+	static bool told;
+	if (!told) {
+		told = true;
+		log_only("file times: archive_getmtime(%s) = %llu\n", path, (unsigned long long) t);
+	}
+	st->st_mtime = (time_t) t;
+}
+
+static int sd_open(struct _reent *r, void *fileStruct, const char *path, int flags, int mode)
+{
+	int rc = sd_orig->open_r(r, fileStruct, path, flags, mode);
+	if (rc != -1) {
+		for (int i = 0; i < 32; i++)
+			if (!sd_paths[i].fd) {
+				sd_paths[i].fd = fileStruct;
+				snprintf(sd_paths[i].path, sizeof sd_paths[i].path, "%s", path);
+				break;
+			}
+	}
+	return rc;
+}
+
+static int sd_close(struct _reent *r, void *fd)
+{
+	for (int i = 0; i < 32; i++)
+		if (sd_paths[i].fd == fd)
+			sd_paths[i].fd = NULL;
+	return sd_orig->close_r(r, fd);
+}
+
+static int sd_stat(struct _reent *r, const char *file, struct stat *st)
+{
+	int rc = sd_orig->stat_r(r, file, st);
+	if (rc == 0 && !st->st_mtime)
+		sd_set_mtime(file, st);
+	return rc;
+}
+
+static int sd_fstat(struct _reent *r, void *fd, struct stat *st)
+{
+	int rc = sd_orig->fstat_r(r, fd, st);
+	if (rc == 0 && !st->st_mtime)
+		for (int i = 0; i < 32; i++)
+			if (sd_paths[i].fd == fd) {
+				sd_set_mtime(sd_paths[i].path, st);
+				break;
+			}
+	return rc;
+}
+
 static void guard_sd_writes(void)
 {
 	int i = FindDevice("sdmc:");
@@ -345,6 +407,14 @@ static void guard_sd_writes(void)
 	sd_orig = devoptab_list[i];
 	sd_tab = *sd_orig;
 	sd_tab.write_r = sd_write;
+	if (sd_orig->open_r && sd_orig->close_r) {
+		sd_tab.open_r = sd_open;
+		sd_tab.close_r = sd_close;
+	}
+	if (sd_orig->stat_r)
+		sd_tab.stat_r = sd_stat;
+	if (sd_orig->fstat_r)
+		sd_tab.fstat_r = sd_fstat;
 	devoptab_list[i] = &sd_tab;
 	if (log_file) {
 		__handle *h = __get_handle(fileno(log_file));
@@ -483,6 +553,87 @@ static void status_draw(void)
 	in_status = false;
 }
 
+/* --- the game's icon in the background of the bottom screen: the 48x48
+ * icon of the .3dsx's SMDH (make-package.py puts the game's there), 4x,
+ * dimmed to 30%, below the speed display. Drawn only into pixels that are
+ * dark (the console's background; its text is brighter), again after each
+ * output: so it comes back where text scrolled away or was cleared. */
+#define BG_SCALE 4
+#define BG_X ((320 - 48 * BG_SCALE) / 2)
+#define BG_Y (STATUS_H + (240 - STATUS_H - 48 * BG_SCALE) / 2)
+static u16 *bg_icon; /* 48x48 RGB565, dimmed; NULL: none */
+static char self_path[512];
+
+static void bg_icon_load(void)
+{
+	if (!self_path[0]) {
+		/* (no argv, e.g. in an emulator: a .3dsx in the game folder) */
+		DIR *d = opendir(".");
+		struct dirent *e;
+		while (d && (e = readdir(d))) {
+			size_t l = strlen(e->d_name);
+			if (l > 5 && !strcasecmp(e->d_name + l - 5, ".3dsx")) {
+				snprintf(self_path, sizeof self_path, "%s", e->d_name);
+				break;
+			}
+		}
+		if (d)
+			closedir(d);
+	}
+	FILE *f = self_path[0] ? fopen(self_path, "rb") : NULL;
+	if (!f)
+		return;
+	unsigned char head[44];
+	u16 *icon = NULL;
+	if (fread(head, 1, 44, f) == 44 && !memcmp(head, "3DSX", 4) && (head[4] | head[5] << 8) >= 44) {
+		u32 at = head[32] | head[33] << 8 | head[34] << 16 | (u32) head[35] << 24;
+		u32 size = head[36] | head[37] << 8 | head[38] << 16 | (u32) head[39] << 24;
+		static u16 tiled[48 * 48];
+		if (size >= 0x24C0 + sizeof tiled && !fseek(f, (long) at + 0x24C0, SEEK_SET) &&
+		    fread(tiled, 2, 48 * 48, f) == 48 * 48 && (icon = malloc(48 * 48 * 2))) {
+			for (int y = 0; y < 48; y++)
+				for (int x = 0; x < 48; x++) {
+					/* 8x8 tiles, Morton order inside */
+					int m = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+					u16 p = tiled[((y >> 3) * 6 + (x >> 3)) * 64 + m];
+					int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+					r = r * 3 / 10, g = g * 3 / 10, b = b * 3 / 10;
+					icon[y * 48 + x] = (u16) (r << 11 | g << 5 | b);
+				}
+		}
+	}
+	fclose(f);
+	bg_icon = icon;
+	log_only("bottom screen icon: %s\n", icon ? "from the .3dsx" : "none");
+}
+
+/* dark enough to be background (the dimmed icon is at most 30%) */
+static bool bg_dark(u16 p)
+{
+	return ((p >> 11) & 31) <= 10 && ((p >> 5) & 63) <= 20 && (p & 31) <= 10;
+}
+
+static void bg_icon_draw(void)
+{
+	if (!bg_icon)
+		return;
+	u16 *fb = (u16 *) gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+	if (!fb)
+		return;
+	for (int sx = 0; sx < 48 * BG_SCALE; sx++) {
+		int x = BG_X + sx;
+		u16 *col = fb + x * 240;
+		const u16 *src = bg_icon + sx / BG_SCALE;
+		for (int sy = 0; sy < 48 * BG_SCALE; sy++) {
+			int y = BG_Y + sy;
+			u16 *d = col + (239 - y);
+			u16 want = src[(sy / BG_SCALE) * 48];
+			if (*d != want && bg_dark(*d))
+				*d = want;
+		}
+	}
+}
+
 void status_line(const char *text)
 {
 	if (!strcmp(status_text, text ? text : "")) {
@@ -506,6 +657,8 @@ static ssize_t out_write(struct _reent *r, void *fd, const char *ptr, size_t len
 	ssize_t n = out_orig->write_r ? out_orig->write_r(r, fd, ptr, len) : (ssize_t) len;
 	if (!in_status && status_text[0])
 		status_draw();
+	if (!in_status)
+		bg_icon_draw();
 	return n;
 }
 
@@ -532,6 +685,7 @@ int main(int argc, char **argv)
 	/* the game: next to the .3dsx, else sdmc:/mkxpz */
 	char dir[512] = "sdmc:/mkxpz";
 	if (argc > 0 && argv[0]) {
+		snprintf(self_path, sizeof self_path, "%s", argv[0]);
 		snprintf(dir, sizeof dir, "%s", argv[0]);
 		char *slash = strrchr(dir, '/');
 		if (slash)
@@ -555,6 +709,9 @@ int main(int argc, char **argv)
 		log_file = fopen("mkxpz-3ds.log", "w");
 	tee_stderr();
 	guard_sd_writes();
+	log_only("started as %s\n", self_path[0] ? self_path : "(no path)");
+	bg_icon_load();
+	bg_icon_draw();
 	char scripts[256];
 	read_ini(scripts, sizeof scripts);
 	const char *ext = strrchr(scripts, '.');

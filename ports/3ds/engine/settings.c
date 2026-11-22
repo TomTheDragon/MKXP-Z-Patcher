@@ -55,13 +55,27 @@ void settings_load(void)
 
 static void settings_save(void)
 {
-	FILE *f = fopen(FILE_NAME, "w");
-	if (!f)
-		return;
-	fprintf(f, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
+	/* written only when something changed (a write shows the floppy icon) */
+	char text[1024];
+	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
 	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
 	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen);
+	if (n <= 0 || n >= (int) sizeof text)
+		return;
+	char old[1024];
+	FILE *f = fopen(FILE_NAME, "r");
+	if (f) {
+		size_t m = fread(old, 1, sizeof old - 1, f);
+		fclose(f);
+		old[m] = 0;
+		if (!strcmp(old, text))
+			return;
+	}
+	f = fopen(FILE_NAME, "w");
+	if (!f)
+		return;
+	fputs(text, f);
 	fclose(f);
 }
 

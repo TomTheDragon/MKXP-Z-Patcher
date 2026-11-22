@@ -348,6 +348,16 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Last used save: boot.rb notes loads and saves through the standard
+  routines (Scene_File / Scene_Load / Scene_Save read_save_data /
+  write_save_data, DataManager.load_game / save_game_without_rescue) and
+  File.mtime / File#mtime report that time for the file when later, so
+  the games' "latest save" picks it. File times: stat / fstat on sdmc:
+  get st_mtime from archive_getmtime (libctru leaves 0; Azahar answers
+  2000-01-01 for every file).
+- Bottom screen background: the .3dsx's SMDH icon (argv[0], or a .3dsx in
+  the game folder), 4x, dimmed to 30%, drawn into dark pixels only after
+  each console output. Settings are written only when they changed.
 - Reset with R held for 3 s (input.c: shown after 0.3 s as "RESET" and a
   bar, gpu.c draw_reset_hold; R must be let go of before the next one).
   Graphics.mkxpz_reset draws one frame of the emptied scene (black, the

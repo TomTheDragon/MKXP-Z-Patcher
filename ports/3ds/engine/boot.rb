@@ -805,7 +805,78 @@ def mkxpz_run_scripts
   end
 end
 
+# "Load the most recent save": games pick it by File.mtime (Changed's save
+# screen, VX Ace's DataManager.latest_savefile_index). The 3DS's file times
+# are unreliable (emulators: one time for all files), and loading a save
+# doesn't change them anyway. So the engine notes when a save file is
+# loaded or saved (the standard routines below), and File.mtime /
+# File#mtime report that time for it when it's later: after a reset the
+# cursor is on the save last used. (In memory: until the app is closed.)
+$mkxpz_used ||= {}
+
+class File
+  alias_method :mkxpz_real_mtime, :mtime
+  def mtime
+    t = mkxpz_real_mtime
+    u = $mkxpz_used[File.basename(path.to_s)]
+    u && u > t ? u : t
+  end
+
+  class << self
+    alias_method :mkxpz_real_mtime, :mtime
+    def mtime(name)
+      t = mkxpz_real_mtime(name)
+      u = $mkxpz_used[File.basename(name.to_s)]
+      u && u > t ? u : t
+    end
+  end
+end
+
+def mkxpz_used_save(name)
+  $mkxpz_used[File.basename(name.to_s)] = Time.now if name
+rescue StandardError
+  nil
+end
+
+# wraps the standard save / load routines (again after a reset that ran
+# the scripts again: they're the game's fresh methods then)
+def mkxpz_used_saves_setup
+  if defined?(DataManager) && DataManager.respond_to?(:load_game_without_rescue)
+    class << DataManager
+      unless method_defined?(:mkxpz_used_load) && instance_method(:load_game_without_rescue).source_location&.first == 'boot.rb'
+        alias_method :mkxpz_used_load, :load_game_without_rescue
+        def load_game_without_rescue(index)
+          r = mkxpz_used_load(index)
+          mkxpz_used_save(make_filename(index))
+          r
+        end
+        alias_method :mkxpz_used_save_game, :save_game_without_rescue
+        def save_game_without_rescue(index)
+          r = mkxpz_used_save_game(index)
+          mkxpz_used_save(make_filename(index))
+          r
+        end
+      end
+    end
+  end
+  [[defined?(Scene_File) && Scene_File, :read_save_data], [defined?(Scene_File) && Scene_File, :write_save_data],
+   [defined?(Scene_Load) && Scene_Load, :read_save_data], [defined?(Scene_Save) && Scene_Save, :write_save_data]].each do |klass, name|
+    next unless klass && klass.method_defined?(name) || (klass && klass.private_method_defined?(name))
+    next if mkxpz_ours?(klass, name)
+    slow = :"mkxpz_used_#{name}"
+    klass.send(:alias_method, slow, name)
+    klass.send(:define_method, name) do |file, *rest|
+      r = send(slow, file, *rest)
+      mkxpz_used_save(file.respond_to?(:path) ? file.path : nil)
+      r
+    end
+  end
+rescue StandardError => e
+  mkxpz_log("last used save: not followed (#{e.class}: #{e.message})")
+end
+
 def mkxpz_prepare
+  mkxpz_used_saves_setup
   mkxpz_save_screen_setup
   mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
   mkxpz_fast_setup_events unless File.exist?('mkxpz-no-fast') || File.exist?('mkxpz-no-fast-events')
