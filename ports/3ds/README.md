@@ -348,6 +348,10 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- "Top screen": auto (default; settings key top_screen=2), on, off. Auto:
+  wide unless the original 2DS (CFGU_GetSystemModel) or an emulator:
+  Citra-family emulators answer svcGetSystemInfo type 0x20000 (Azahar
+  returns 2), a real 3DS returns an error there.
 - Logging is off by default: mkxpz-3ds.log only with the setting "Log
   file" (or a file mkxpz-log in the game folder, for tests), the bottom
   screen's messages and speed lines only with "Bottom log" (settings key

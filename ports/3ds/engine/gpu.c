@@ -211,10 +211,34 @@ bool gpu_wide_possible(void)
 	return possible;
 }
 
+/* an emulator of the Citra family (Citra, Lime3DS, Azahar): it answers
+ * svcGetSystemInfo's type 0x20000 ("Citra information", 0: which emulator;
+ * Citra 1, Azahar 2); a real 3DS (and Luma3DS) has no such type and
+ * returns an error */
+bool system_is_emulator(void)
+{
+	static int emu = -1;
+	if (emu < 0) {
+		s64 out = 0;
+		Result rc = svcGetSystemInfo(&out, 0x20000, 0);
+		emu = R_SUCCEEDED(rc) && out != 0;
+		log_only("system: %s (svcGetSystemInfo 0x20000: %08lx, %lld)\n", emu ? "emulator" : "3DS",
+		         (unsigned long) rc, (long long) out);
+	}
+	return emu;
+}
+
+/* "auto": wide where it shows (not the original 2DS, not an emulator,
+ * which displays only the left half of the 800 columns) */
+bool gpu_wide_auto(void)
+{
+	return gpu_wide_possible() && !system_is_emulator();
+}
+
 /* the top screen's render target, for the setting (between frames) */
 static void top_target(void)
 {
-	bool wide = settings.wide_screen && gpu_wide_possible();
+	bool wide = settings.wide_screen == 2 ? gpu_wide_auto() : settings.wide_screen == 1 && gpu_wide_possible();
 	if (top) {
 		C3D_FrameSync();
 		C3D_RenderTargetDelete(top);

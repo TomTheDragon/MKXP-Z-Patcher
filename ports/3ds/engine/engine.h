@@ -153,6 +153,8 @@ void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity);
 void gpu_text_forget(Bitmap *b);
 extern int gpu_top_xs; /* 2: the top screen in wide mode (800 across) */
 bool gpu_wide_possible(void);
+bool gpu_wide_auto(void);    /* what "auto" chooses */
+bool system_is_emulator(void); /* gpu.c: Citra / Azahar */
 void gpu_set_wide(void); /* bitmap.c: disposed or freed */
 /* loading bar: an extra frame (the last picture and a bar at the top) while
  * something loads for a long time between frames */
@@ -239,7 +241,8 @@ typedef struct {
 	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
 	int battery;    /* battery icon at the top screen's top left */
 	int activity_icons; /* CD while loading, floppy after writing (top right) */
-	int wide_screen; /* the top screen's 800 columns (not on the original 2DS) */
+	int wide_screen; /* the top screen's 800 columns: 0 off, 1 on, 2 auto (on, but not on
+	                  * the original 2DS, which can't, or in an emulator, which shows half) */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;
 extern Settings settings;
