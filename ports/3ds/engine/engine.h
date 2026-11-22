@@ -160,6 +160,9 @@ void gpu_loading_frame(int frozen_alpha, int brightness, float frac);
 bool gpu_in_frame(void);
 unsigned long long gpu_last_frame_end(void);
 void loading_tick(float frac); /* graphics.c; frac < 0: progress unknown */
+void writing_tick(void);       /* graphics.c: something was written to the SD card */
+void gpu_activity_load(void);
+void gpu_activity_write(void);
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity);
 bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int opacity, int blend,
                const Color *color, const Tone *tone);
@@ -234,6 +237,7 @@ typedef struct {
 	int sharp_text; /* window text drawn at the top screen's resolution */
 	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
 	int battery;    /* battery icon at the top screen's top left */
+	int activity_icons; /* CD while loading, floppy after writing (top right) */
 	int wide_screen; /* the top screen's 800 columns (not on the original 2DS) */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */
 } Settings;

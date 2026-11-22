@@ -342,10 +342,11 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (bitmap_stream_file), outside of drawing (queued during a frame, read
   after it); the pixels are only loaded whole when a script needs them.
   No 6 MB block is needed for a 1536x1024 sheet any more.
-- Loading bar: loading_tick(progress) from image loading, streaming,
-  sound decoding and load_data draws an extra frame (the last picture,
-  its window text, a 4 px bar on the right edge filling from the bottom)
-  after 150 ms without a frame, every 50 ms at most.
+- Load/save icons (gpu.c draw_activity): loading_tick (image loading,
+  streaming, sound decoding, load_data) shows a spinning 12x12 CD at the
+  top right for 400 ms, writing_tick (every write to sdmc: except the
+  log, main.c sd_write) a floppy disk for 1 s; after 150 ms without a
+  frame an extra frame (the last picture with the icons) every 50 ms.
 - Deferred texture uploads (big images during a frame): the texture is
   created only after the frame, together with its upload. Created during
   the frame and filled after it, textures came out empty after resets and

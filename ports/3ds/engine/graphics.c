@@ -345,7 +345,21 @@ static VALUE g_update(VALUE self)
 /* the loading bar: called while something loads; after 150 ms without a
  * frame, an extra frame with the bar every 50 ms at most */
 static u64 last_bar;
+static void activity_frame(float frac);
 void loading_tick(float frac)
+{
+	gpu_activity_load();
+	activity_frame(frac);
+}
+
+void writing_tick(void)
+{
+	gpu_activity_write();
+	activity_frame(-1);
+}
+
+/* after 150 ms without a frame: an extra one (the icons), every 50 ms */
+static void activity_frame(float frac)
 {
 	if (!gpu_on || gpu_in_frame())
 		return;

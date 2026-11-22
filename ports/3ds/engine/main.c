@@ -293,6 +293,7 @@ static ssize_t sd_write(struct _reent *r, void *fd, const char *ptr, size_t len)
 	in_sd_write = true;
 	ssize_t n = sd_write_checked(r, fd, ptr, len);
 	in_sd_write = false;
+	writing_tick(); /* (the floppy icon) */
 	return n;
 }
 

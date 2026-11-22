@@ -997,6 +997,94 @@ static void present_tex(int which, float alpha)
 
 /* frozen_alpha: -1 just the picture; 0..254 the frozen picture over it
  * (transition); 255 just the frozen picture */
+/* --- activity icons at the top right (settings: "Load/save icons"): a
+ * spinning CD while something loads (and a moment after), a floppy disk
+ * after something was written to the SD card */
+static u64 act_load, act_write;
+void gpu_activity_load(void) { act_load = svcGetSystemTick(); }
+void gpu_activity_write(void) { act_write = svcGetSystemTick(); }
+
+static void icon_px(Canvas *c, int x, int y, Color col)
+{
+	gpu_fill(c, (Rect) { x, y, 1, 1 }, &col, 255);
+}
+
+/* a 12x12 CD at (x0, y0), its shine turned by angle a */
+static void draw_cd(Canvas *c, int x0, int y0, float a)
+{
+	float ca = cosf(a), sa = sinf(a);
+	for (int y = 0; y < 12; y++)
+		for (int x = 0; x < 12; x++) {
+			float dx = x - 5.5f, dy = y - 5.5f, r = sqrtf(dx * dx + dy * dy);
+			if (r > 6.0f || r < 1.5f)
+				continue;
+			Color col;
+			if (r > 5.2f)
+				col = (Color) { 90, 90, 100, 255 }; /* rim */
+			else if (r < 2.5f)
+				col = (Color) { 150, 150, 160, 255 }; /* around the hole */
+			else {
+				/* silver, with two shine sectors turning (cos of twice the angle) */
+				float k = (dx * ca + dy * sa) / r, l = (dy * ca - dx * sa) / r;
+				float shine = k * k - l * l; /* cos(2 * (angle - a)) */
+				int v = shine > 0.6f ? 245 : shine > 0.0f ? 210 : 180;
+				col = shine > 0.6f ? (Color) { 230, 240, 255, 255 } : (Color) { v, v, v + 10 > 255 ? 255 : v + 10, 255 };
+			}
+			icon_px(c, x0 + x, y0 + y, col);
+		}
+}
+
+/* a 12x12 floppy disk at (x0, y0) */
+static void draw_floppy(Canvas *c, int x0, int y0)
+{
+	static const char *const art[12] = {
+		"BBBBBBBBBBB.",
+		"BBMMMMMMBBBB",
+		"BBMMMMDMBBBB",
+		"BBMMMMDMBBBB",
+		"BBMMMMMMBBBB",
+		"BBBBBBBBBBBB",
+		"BWWWWWWWWWWB",
+		"BWkkkkkkkkWB",
+		"BWWWWWWWWWWB",
+		"BWkkkkkkkkWB",
+		"BWWWWWWWWWWB",
+		"BBBBBBBBBBBB",
+	};
+	for (int y = 0; y < 12; y++)
+		for (int x = 0; x < 12; x++) {
+			Color col;
+			switch (art[y][x]) {
+			case 'B': col = (Color) { 40, 70, 150, 255 }; break;  /* body */
+			case 'M': col = (Color) { 190, 195, 205, 255 }; break; /* metal shutter */
+			case 'D': col = (Color) { 60, 60, 70, 255 }; break;    /* its slot */
+			case 'W': col = (Color) { 245, 245, 240, 255 }; break; /* label */
+			case 'k': col = (Color) { 150, 150, 160, 255 }; break; /* label lines */
+			default: continue;
+			}
+			icon_px(c, x0 + x, y0 + y, col);
+		}
+}
+
+static void draw_activity(void)
+{
+	if (!settings.activity_icons)
+		return;
+	u64 now = svcGetSystemTick(), ms = SYSCLOCK_ARM11 / 1000;
+	Canvas c = { .clip = { 0, 0, 400, 240 } };
+	Color shade = { 0, 0, 0, 255 };
+	int x = 400 - 3 - 12;
+	if (act_load && now - act_load < 400 * ms) {
+		gpu_fill(&c, (Rect) { x - 1, 2, 14, 14 }, &shade, 110);
+		draw_cd(&c, x, 3, (float) (now / ms % 1000) * 6.2832f / 1000.0f * 2);
+		x -= 16;
+	}
+	if (act_write && now - act_write < 1000 * ms) {
+		gpu_fill(&c, (Rect) { x - 1, 2, 14, 14 }, &shade, 110);
+		draw_floppy(&c, x, 3);
+	}
+}
+
 /* the battery icon at the top left (settings: "Battery icon"): a 15x8
  * outline with a nub, filled by the charge; light blue while charging,
  * yellow below 30%, red below 15% */
@@ -1048,6 +1136,7 @@ void gpu_present(int frozen_alpha, int brightness)
 	/* (the engine's own things at 400 pixels across) */
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_ui);
 	draw_battery();
+	draw_activity();
 }
 
 void gpu_frame_end(void)
@@ -1081,19 +1170,8 @@ void gpu_loading_frame(int frozen_alpha, int brightness, float frac)
 	gpu_loading_frames++;
 	C3D_FrameBegin(0);
 	in_frame = true;
-	gpu_present(frozen_alpha, brightness);
-	/* on the right edge, filling from the bottom up */
-	Canvas c = { .w = 400, .h = 240, .clip = { 0, 0, 400, 240 }, .gpu = true };
-	Color back = { 0, 0, 0, 255 }, bar = { 120, 200, 255, 255 };
-	gpu_fill(&c, (Rect) { 396, 0, 4, 240 }, &back, 160);
-	if (frac >= 0) {
-		int h = (int) (240 * (frac > 1 ? 1 : frac));
-		if (h > 0)
-			gpu_fill(&c, (Rect) { 396, 240 - h, 4, h }, &bar, 255);
-	} else {
-		int y = 240 - (int) ((svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)) / 4 % 300);
-		gpu_fill(&c, (Rect) { 396, y, 4, 60 }, &bar, 255);
-	}
+	(void) frac;
+	gpu_present(frozen_alpha, brightness); /* (with the CD / floppy icon) */
 	C3D_FrameEnd(0);
 	in_frame = false;
 }
