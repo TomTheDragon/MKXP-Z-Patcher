@@ -348,6 +348,11 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Logging is off by default: mkxpz-3ds.log only with the setting "Log
+  file" (or a file mkxpz-log in the game folder, for tests), the bottom
+  screen's messages and speed lines only with "Bottom log" (settings key
+  bottom_log; errors, "Press START" and the menu show anyway:
+  console_force).
 - Load/save icons (gpu.c draw_activity): loading_tick (image loading,
   streaming, sound decoding, load_data) shows a spinning 12x12 CD at the
   top right for 400 ms, writing_tick (every write to sdmc: except the

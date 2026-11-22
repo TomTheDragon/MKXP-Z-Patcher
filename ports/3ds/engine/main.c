@@ -37,6 +37,10 @@ u32 __ctru_linear_heap_size = 20 * 1024 * 1024;
 u32 __stacksize__ = 512 * 1024;
 
 static FILE *log_file;
+/* the bottom screen shows messages only with "Bottom log" on, or while
+ * console_force is set (errors, the settings menu) */
+bool console_force;
+static bool console_visible(void) { return settings.show_speed || console_force; }
 
 void say(const char *fmt, ...)
 {
@@ -188,6 +192,7 @@ static void show_error(void)
 	for (long i = 0; i < RSTRING_LEN(text); i++)
 		if (!p[i])
 			p[i] = '?';
+	console_force = true; /* (errors show also with the bottom log off) */
 	say("\n%.*s\n", (int) RSTRING_LEN(text), p);
 }
 
@@ -198,6 +203,7 @@ static void hold_on_exit(void)
 {
 	if (finished)
 		return;
+	console_force = true;
 	say("\n*** unexpected exit ***\n");
 	for (int i = 0; i < 60 * 30 && aptMainLoop(); i++)
 		gspWaitForVBlank();
@@ -205,6 +211,7 @@ static void hold_on_exit(void)
 
 static void wait_start(void)
 {
+	console_force = true;
 	say("\nPress START to quit.\n");
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -264,6 +271,8 @@ static ssize_t err_write(struct _reent *r, void *fd, const char *ptr, size_t len
 		fwrite(ptr, 1, len, log_file);
 		fflush(log_file);
 	}
+	if (!console_visible())
+		return (ssize_t) len;
 	return err_orig && err_orig->write_r ? err_orig->write_r(r, fd, ptr, len) : (ssize_t) len;
 }
 
@@ -345,6 +354,25 @@ static void guard_sd_writes(void)
 	if (f) {
 		fclose(f);
 		sd_log = true;
+	}
+}
+
+bool log_enabled(void) { return log_file != NULL; }
+
+/* the settings' "Log file" switched while the game runs */
+void log_set_enabled(bool on)
+{
+	if (on && !log_file) {
+		log_file = fopen("mkxpz-3ds.log", "a");
+		if (log_file) {
+			__handle *h = __get_handle(fileno(log_file));
+			log_fd = h ? h->fileStruct : NULL;
+		}
+	} else if (!on && log_file) {
+		FILE *f = log_file;
+		log_file = NULL;
+		log_fd = NULL;
+		fclose(f);
 	}
 }
 
@@ -473,6 +501,8 @@ static devoptab_t out_tab;
 
 static ssize_t out_write(struct _reent *r, void *fd, const char *ptr, size_t len)
 {
+	if (!in_status && !console_visible())
+		return (ssize_t) len; /* (bottom log off) */
 	ssize_t n = out_orig->write_r ? out_orig->write_r(r, fd, ptr, len) : (ssize_t) len;
 	if (!in_status && status_text[0])
 		status_draw();
@@ -510,15 +540,21 @@ int main(int argc, char **argv)
 			snprintf(dir, sizeof dir, "sdmc:/mkxpz");
 	}
 	if (chdir(dir) != 0 || !has_game(".")) {
+		console_force = true;
 		printf("No game found: put it into sdmc:/mkxpz\n(with its Game.ini), or next to the .3dsx.\n");
 		wait_start();
 		gfxExit();
 		return 1;
 	}
-	log_file = fopen("mkxpz-3ds.log", "w");
+	settings_load();
+	/* the log file: settings "Log file", or a file mkxpz-log (tests) */
+	FILE *force_log = fopen("mkxpz-log", "r");
+	if (force_log)
+		fclose(force_log);
+	if (settings.log_file || force_log)
+		log_file = fopen("mkxpz-3ds.log", "w");
 	tee_stderr();
 	guard_sd_writes();
-	settings_load();
 	char scripts[256];
 	read_ini(scripts, sizeof scripts);
 	const char *ext = strrchr(scripts, '.');

@@ -232,7 +232,8 @@ typedef struct {
 	int screen;     /* 0 fit, 1 stretch */
 	int wide_text;  /* fit: message boxes over the screen's whole width */
 	int frame_skip; /* 0 off, 1 auto */
-	int show_speed;
+	int show_speed; /* "Bottom log": messages and speed lines on the bottom screen (off) */
+	int log_file;   /* mkxpz-3ds.log in the game folder (off; also on with a file mkxpz-log) */
 	int overlay;    /* game speed and memory on the bottom screen */
 	int sharp_text; /* window text drawn at the top screen's resolution */
 	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
@@ -243,6 +244,9 @@ typedef struct {
 } Settings;
 extern Settings settings;
 void settings_load(void);
+extern bool console_force; /* main.c: bottom screen output shown anyway (errors, the menu) */
+void log_set_enabled(bool on); /* main.c: open / close mkxpz-3ds.log */
+bool log_enabled(void);
 void battery_init(void);
 bool battery_get(int *percent, bool *charging); /* battery.c; false: unknown */
 bool settings_menu(void); /* true: reset the game */

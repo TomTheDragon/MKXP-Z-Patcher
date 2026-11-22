@@ -303,7 +303,7 @@ static VALUE g_update(VALUE self)
 	static size_t gc_last, gc_runs_last;
 	static unsigned bitmaps_last;
 	size_t gc_now = gc_ms(), gc_runs = rb_gc_count();
-	if (++t_frames == 60 && !settings.show_speed) {
+	if (++t_frames == 60 && !settings.show_speed && !log_enabled()) {
 		gc_last = gc_now;
 		gc_runs_last = gc_runs;
 		bitmaps_last = bitmaps_created;

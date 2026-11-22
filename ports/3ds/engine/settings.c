@@ -11,7 +11,8 @@ Settings settings = {
 	.buttons = 0,      /* A: confirm, B: cancel, Y: run, L: speed-up */
 	.screen = 0,       /* fit */
 	.frame_skip = 1,   /* auto, at most 1 picture in a row (0 off, up to 5) */
-	.show_speed = 1,
+	.show_speed = 0,
+	.log_file = 0,
 	.overlay = 1,
 	.sharp_text = 1,
 	.smooth = 1,
@@ -37,7 +38,8 @@ void settings_load(void)
 		else if (sscanf(line, "buttons=%d", &v) == 1) settings.buttons = CLAMP(v, 0, 1);
 		else if (sscanf(line, "screen=%d", &v) == 1) settings.screen = v == 1 ? 1 : 0; /* (the old 1:1 mode: fit) */
 		else if (sscanf(line, "frame_skip=%d", &v) == 1) settings.frame_skip = CLAMP(v, 0, 5);
-		else if (sscanf(line, "show_speed=%d", &v) == 1) settings.show_speed = CLAMP(v, 0, 1);
+		else if (sscanf(line, "bottom_log=%d", &v) == 1) settings.show_speed = CLAMP(v, 0, 1);
+		else if (sscanf(line, "log_file=%d", &v) == 1) settings.log_file = CLAMP(v, 0, 1);
 		else if (sscanf(line, "overlay=%d", &v) == 1) settings.overlay = CLAMP(v, 0, 1);
 		else if (sscanf(line, "sharp_text=%d", &v) == 1) settings.sharp_text = CLAMP(v, 0, 1);
 		else if (sscanf(line, "smooth=%d", &v) == 1) settings.smooth = CLAMP(v, 0, 1);
@@ -56,13 +58,13 @@ static void settings_save(void)
 	if (!f)
 		return;
 	fprintf(f, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
-	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nshow_speed=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\nwide_screen=%d\n", settings.music_volume,
+	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\nwide_screen=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
-	        settings.show_speed, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen);
+	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen);
 	fclose(f);
 }
 
-enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_RESET, I_BACK, I_COUNT };
+enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
 
 static void show(int sel)
 {
@@ -88,23 +90,25 @@ static void show(int sel)
 		snprintf(v[I_SKIP], 40, "off");
 	snprintf(v[I_OVERLAY], 40, "%s", settings.overlay ? "on (at the top)" : "off");
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
+	snprintf(v[I_LOG], 40, "%s", settings.log_file ? "on (mkxpz-3ds.log)" : "off");
 	v[I_RESET][0] = v[I_BACK][0] = 0;
 	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
-	                                            "Speed display", "Bottom numbers", "Reset game (title)", "Back to the game" };
+	                                            "Speed display", "Bottom log", "Log file", "Reset game (title)", "Back to the game" };
 	printf("\x1b[2J\x1b[1;1H\x1b[1m MKXP-Z settings\x1b[0m   (START: back)\n\n");
 	for (int i = 0; i < I_COUNT; i++) {
 		printf("%s %-14s %s\n", i == sel ? "\x1b[33m>" : " ", names[i], v[i]);
 		if (i == sel)
 			printf("\x1b[0m");
-		if (i == I_SPEED)
+		if (i == I_LOG)
 			printf("\n");
 	}
-	printf("\n\n Up/Down: choose\n Left/Right: change\n A or B: reset / back\n");
+	printf("\n Up/Down: choose, Left/Right: change\n A or B: reset / back");
 }
 
 /* the menu; returns once it's closed (true: reset the game) */
 bool settings_menu(void)
 {
+	console_force = true; /* (the menu shows also with the bottom log off) */
 	int sel = 0;
 	bool reset = false;
 	hidSetRepeatParameters(20, 6);
@@ -142,6 +146,7 @@ bool settings_menu(void)
 			case I_SKIP: settings.frame_skip = CLAMP(settings.frame_skip + dir, 0, 5); break;
 			case I_OVERLAY: settings.overlay ^= 1; break;
 			case I_SPEED: settings.show_speed ^= 1; break;
+			case I_LOG: settings.log_file ^= 1; log_set_enabled(settings.log_file); break;
 			}
 		}
 		if (k & (KEY_A | KEY_B)) {
@@ -158,6 +163,7 @@ bool settings_menu(void)
 	}
 	settings_save();
 	printf("\x1b[2J\x1b[1;1H");
+	console_force = false;
 	/* the buttons held now don't count as presses in the game */
 	hidScanInput();
 	return reset;
