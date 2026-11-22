@@ -505,10 +505,11 @@ static void upload_rows(UploadCtx *u, int y0, int n, const px_t *px, int stride)
 	u->alpha_or = alpha_or;
 }
 
-static void upload_rows_cb(void *ctx, int y0, int n, const px_t *px)
+static bool upload_rows_cb(void *ctx, int y0, int n, const px_t *px)
 {
 	UploadCtx *u = ctx;
 	upload_rows(u, y0, n, px, u->g->w);
+	return true;
 }
 
 static void queue_pending(Bitmap *b)

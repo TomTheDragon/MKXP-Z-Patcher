@@ -479,7 +479,7 @@ static bool load_mkxi(Bitmap *b, const char *path)
  * of 32 rows: textures are made from them without the whole image in memory
  * (a 1536x1024 character sheet is 6 MB in one piece; the console once had
  * 8 MB free in the arena, but no 6 MB block) */
-bool bitmap_stream_file(Bitmap *b, void (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx)
+bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx)
 {
 	if (!b->file || b->version != b->file_version)
 		return false;
@@ -522,8 +522,12 @@ bool bitmap_stream_file(Bitmap *b, void (*rows)(void *ctx, int y0, int n, const 
 			nrows = b->h - y;
 		if (nrows > 0) {
 			loading_tick((float) y / b->h);
-			rows(ctx, y, nrows, (const px_t *) buf);
+			bool more = rows(ctx, y, nrows, (const px_t *) buf);
 			y += nrows;
+			if (!more) {
+				y = b->h; /* (the caller has what it needs) */
+				break;
+			}
 			memmove(buf, buf + (size_t) nrows * rowbytes, have - (size_t) nrows * rowbytes);
 			have -= (size_t) nrows * rowbytes;
 		}
@@ -761,7 +765,7 @@ static Rect rect_arg(VALUE v) { return *rect_get(v); }
  * its file (Changed's 3072x2048 character sheets, 24 MB as pixels, don't
  * fit into memory; VX's windows blt characters from their sheets) */
 typedef struct { Bitmap *dst; int dx, dy, src_w; Rect sr; int opacity; } BltRows;
-static void blt_rows(void *ctx, int y0, int n, const px_t *rows)
+static bool blt_rows(void *ctx, int y0, int n, const px_t *rows)
 {
 	BltRows *c = ctx;
 	for (int i = 0; i < n; i++) {
@@ -773,6 +777,7 @@ static void blt_rows(void *ctx, int y0, int n, const px_t *rows)
 		for (int x = 0; x < c->sr.w; x++)
 			dp[x] = over(dp[x], sp[x], PX_A(sp[x]) * c->opacity / 255);
 	}
+	return y0 + n < c->sr.y + c->sr.h; /* (stop after the rows it needs) */
 }
 
 #define BIG_SOURCE (4u * 1024 * 1024)
@@ -961,27 +966,62 @@ static VALUE bitmap_hue_change(VALUE self, VALUE vh)
 }
 
 /* simple 3x3 box blur (RGSS2+) */
+/* 3x3 box blur (RGSS2+): the average of each pixel's neighbourhood (fewer
+ * at the edges). Separable: three rows of horizontal 3-sums, rolled; the
+ * same sums and divisions as the plain 3x3 loop, a third of the work
+ * (a save screen blurred its 352x328 window on every selection). */
 static VALUE bitmap_blur(VALUE self)
 {
 	Bitmap *b = bitmap_get(self);
-	px_t *o = malloc((size_t) b->w * b->h * 4);
-	if (!o)
+	int w = b->w, h = b->h;
+	if (w <= 0 || h <= 0)
 		return self;
-	memcpy(o, b->px, (size_t) b->w * b->h * 4);
-	for (int y = 0; y < b->h; y++)
-		for (int x = 0; x < b->w; x++) {
-			int s[4] = {0}, n = 0;
-			for (int j = -1; j <= 1; j++)
-				for (int i = -1; i <= 1; i++) {
-					int xx = x + i, yy = y + j;
-					if (xx < 0 || yy < 0 || xx >= b->w || yy >= b->h)
-						continue;
-					px_t p = o[(size_t) yy * b->w + xx];
-					s[0] += PX_R(p); s[1] += PX_G(p); s[2] += PX_B(p); s[3] += PX_A(p);
-					n++;
-				}
-			b->px[(size_t) y * b->w + x] = PX(s[0] / n, s[1] / n, s[2] / n, s[3] / n);
+	int *hs = malloc(sizeof(int) * 4 * (size_t) w * 3); /* rows y-1, y, y+1 (by y % 3) */
+	px_t *o = malloc((size_t) w * h * 4);
+	if (!hs || !o) {
+		free(hs);
+		free(o);
+		return self;
+	}
+	memcpy(o, b->px, (size_t) w * h * 4);
+	/* horizontal sums of row y into its slot */
+	#define HROW(yy) do { \
+		int *d_ = hs + 4 * (size_t) w * ((yy) % 3); \
+		const px_t *r_ = o + (size_t) (yy) * w; \
+		for (int x_ = 0; x_ < w; x_++) { \
+			int s0 = 0, s1 = 0, s2 = 0, s3 = 0; \
+			for (int i_ = x_ - 1; i_ <= x_ + 1; i_++) { \
+				if (i_ < 0 || i_ >= w) continue; \
+				px_t p_ = r_[i_]; \
+				s0 += PX_R(p_); s1 += PX_G(p_); s2 += PX_B(p_); s3 += PX_A(p_); \
+			} \
+			d_[4 * x_] = s0; d_[4 * x_ + 1] = s1; d_[4 * x_ + 2] = s2; d_[4 * x_ + 3] = s3; \
+		} \
+	} while (0)
+	static const uint32_t recip[10] = { 0, 1048576, 524288, 349526, 262144, 0, 174763, 0, 0, 116509 };
+	HROW(0);
+	if (h > 1)
+		HROW(1);
+	for (int y = 0; y < h; y++) {
+		if (y + 1 < h && y + 1 >= 2)
+			HROW(y + 1);
+		int y0 = y > 0 ? y - 1 : 0, y1 = y + 1 < h ? y + 1 : h - 1, ny = y1 - y0 + 1;
+		px_t *out = b->px + (size_t) y * w;
+		for (int x = 0; x < w; x++) {
+			int nx = (x > 0) + 1 + (x + 1 < w);
+			/* s / n as (s * ceil(2^20 / n)) >> 20: the same for every sum
+			 * up to 9 * 255 (the ARM11 has no division instruction) */
+			uint32_t m = recip[nx * ny];
+			uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+			for (int yy = y0; yy <= y1; yy++) {
+				const int *r = hs + 4 * (size_t) w * (yy % 3) + 4 * x;
+				s0 += (uint32_t) r[0]; s1 += (uint32_t) r[1]; s2 += (uint32_t) r[2]; s3 += (uint32_t) r[3];
+			}
+			out[x] = PX((s0 * m) >> 20, (s1 * m) >> 20, (s2 * m) >> 20, (s3 * m) >> 20);
 		}
+	}
+	#undef HROW
+	free(hs);
 	free(o);
 	b->version++;
 	return self;

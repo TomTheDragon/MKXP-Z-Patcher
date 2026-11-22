@@ -78,7 +78,8 @@ px_t *bitmap_px(Bitmap *b); /* its pixels (read again if dropped); NULL: no memo
 void bitmap_uploaded(Bitmap *b); /* gpu.c: its texture is up to date */
 /* gpu.c: an image that has let go of its pixels, read from its .mkxi file
  * row by row (rows: y0, n rows, their pixels); false: not possible */
-bool bitmap_stream_file(Bitmap *b, void (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
+/* rows: false = enough (the rest isn't read) */
+bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 px_t *bitmap_px_alone(Bitmap *b); /* bitmap_px when no other image's pixels are in use */
 extern unsigned bitmap_released;
 size_t heap_free(void);     /* free normal memory (memory.c) */

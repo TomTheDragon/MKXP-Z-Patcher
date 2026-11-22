@@ -806,10 +806,65 @@ def mkxpz_run_scripts
 end
 
 def mkxpz_prepare
+  mkxpz_save_screen_setup
   mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')
   mkxpz_fast_setup_events unless File.exist?('mkxpz-no-fast') || File.exist?('mkxpz-no-fast-events')
   mkxpz_wide_setup
   mkxpz_save_probe_setup
+end
+
+# Save screens of the "vx新截图存档" script (沉影不器; Changed): each time a
+# save file is selected, Window_SaveFile#load_gamedata loads the whole file
+# twice (all 15 parts: the game's state, its map and events...) only to
+# show the characters, the play time and the screenshot; on the console
+# that took seconds per selection. Replaced (while it's that script's
+# text) by one that loads the first two parts, steps over the game state
+# (Marshal.mkxpz_skip, in C) and loads the screenshot, with the results
+# kept per file until the file changes (its size and the checksum of its
+# first and last 4 KB; the screenshot sits at the end).
+MKXPZ_SAVE_INFO = {}
+
+def mkxpz_save_file_key(path)
+  size = File.size(path)
+  File.open(path, 'rb') do |f|
+    head = f.read(4096).to_s
+    f.seek([size - 4096, 0].max)
+    [size, Zlib.crc32(head), Zlib.crc32(f.read(4096).to_s)]
+  end
+end
+
+def mkxpz_save_screen_setup
+  return unless defined?(Window_SaveFile) && Window_SaveFile.method_defined?(:load_gamedata) &&
+                defined?(SAVE_DIR) && mkxpz_crc_of(Window_SaveFile, :load_gamedata) == 1285622140
+  Window_SaveFile.class_eval do
+    def load_gamedata
+      path = SAVE_DIR + @filename
+      @file_exist = FileTest.exist?(path)
+      return unless @file_exist
+      key = mkxpz_save_file_key(path)
+      info = MKXPZ_SAVE_INFO[path]
+      unless info && info[0] == key && !(info[3] && info[3].disposed?)
+        info = [key]
+        File.open(path, 'r') do |file|
+          begin
+            info << Marshal.load(file) << Marshal.load(file) # characters, frame count
+            12.times { Marshal.mkxpz_skip(file) }            # the game's state
+            info << (begin; Marshal.load(file); rescue StandardError; nil; end) # the screenshot
+            info << true << info[2] / Graphics.frame_rate
+          rescue StandardError
+            info = [key, nil, nil, nil, false, nil]
+          end
+        end
+        MKXPZ_SAVE_INFO[path] = info
+      end
+      @file_exist = info[4]
+      return unless @file_exist
+      @characters, @frame_count, @file_bitmap, @total_sec = info[1], info[2], info[3], info[5]
+    end
+  end
+  mkxpz_log('save screen: quick (screenshot save script)')
+rescue StandardError => e
+  mkxpz_log("save screen: as it is (#{e.class}: #{e.message})")
 end
 
 def mkxpz_late_setup

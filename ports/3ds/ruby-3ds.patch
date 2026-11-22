@@ -80,3 +80,304 @@
      else if (SPECIAL_CONST_P(recv)) {
          //
      }
+--- a/marshal.c	2026-11-22 03:06:41.691633853 +0100
++++ b/marshal.c	2026-11-22 03:06:41.694633878 +0100
+@@ -2204,6 +2204,245 @@
+     }
+ }
+ 
++/* mkxpz 3DS: Marshal.load from a file opened only for reading reads the
++ * rest of the file once (kept with the File object, hidden), loads from
++ * that like from a string and moves the file's position to just after the
++ * object, as reading it would have. From the file itself, Ruby reads in
++ * small pieces through IO#getbyte / IO#read calls: loading a 600 KB save
++ * file took seconds on the console (a save screen reading each save
++ * twice when selected). */
++static VALUE
++mkxpz_file_buffer(VALUE port, long *offset)
++{
++    rb_io_t *fptr;
++    if (!RB_TYPE_P(port, T_FILE) || rb_obj_class(port) != rb_cFile) return Qnil;
++    GetOpenFile(port, fptr);
++    if (!(fptr->mode & FMODE_READABLE) || (fptr->mode & FMODE_WRITABLE)) return Qnil;
++    ID id_buf = rb_intern("mkxpz_marshal_buf"), id_base = rb_intern("mkxpz_marshal_base");
++    long pos = NUM2LONG(rb_funcall(port, rb_intern("pos"), 0));
++    VALUE buf = rb_attr_get(port, id_buf), base = rb_attr_get(port, id_base);
++    if (RB_TYPE_P(buf, T_STRING) && FIXNUM_P(base) && FIX2LONG(base) <= pos &&
++        pos <= FIX2LONG(base) + RSTRING_LEN(buf)) {
++        *offset = pos - FIX2LONG(base);
++        return buf;
++    }
++    buf = rb_funcall(port, s_read, 0);
++    if (!RB_TYPE_P(buf, T_STRING)) return Qnil;
++    rb_str_freeze(buf);
++    rb_funcall(port, rb_intern("seek"), 1, LONG2NUM(pos));
++    rb_ivar_set(port, id_buf, buf);
++    rb_ivar_set(port, id_base, LONG2NUM(pos));
++    *offset = 0;
++    return buf;
++}
++
++/* mkxpz 3DS: Marshal.mkxpz_skip(file): steps over one object in a file
++ * (opened only for reading) without making it: the structure is checked,
++ * and the classes named in it must exist (rb_path_to_class raises like a
++ * real load would). A save screen reading only a save file's first parts
++ * and its screenshot skips the game state in between this way. */
++struct mkxpz_skip {
++    const unsigned char *p, *end;
++    const char **syms;
++    long *sym_lens;
++    char *checked; /* (class names checked once) */
++    long nsyms, cap, last;
++};
++
++static int
++mkxpz_skip_byte(struct mkxpz_skip *k)
++{
++    if (k->p >= k->end) too_short();
++    return *k->p++;
++}
++
++static long
++mkxpz_skip_long(struct mkxpz_skip *k)
++{
++    int c = (signed char)mkxpz_skip_byte(k);
++    long x;
++    if (c == 0) return 0;
++    if (c > 0) {
++	if (4 < c && c < 128) return c - 5;
++	x = 0;
++	for (int i = 0; i < c; i++) x |= (long)mkxpz_skip_byte(k) << (8 * i);
++    }
++    else {
++	if (-129 < c && c < -4) return c + 5;
++	c = -c;
++	x = -1;
++	for (int i = 0; i < c; i++) {
++	    x &= ~((long)0xff << (8 * i));
++	    x |= (long)mkxpz_skip_byte(k) << (8 * i);
++	}
++    }
++    return x;
++}
++
++static const unsigned char *
++mkxpz_skip_bytes(struct mkxpz_skip *k, long *len)
++{
++    long n = mkxpz_skip_long(k);
++    if (n < 0 || n > k->end - k->p) too_short();
++    const unsigned char *s = k->p;
++    k->p += n;
++    if (len) *len = n;
++    return s;
++}
++
++static void mkxpz_skip_obj(struct mkxpz_skip *k, int depth);
++
++/* a symbol; its name (for class names) */
++static const char *
++mkxpz_skip_sym(struct mkxpz_skip *k, long *len)
++{
++    int t = mkxpz_skip_byte(k);
++    if (t == ';') {
++	long i = mkxpz_skip_long(k);
++	if (i < 0 || i >= k->nsyms) rb_raise(rb_eArgError, "bad symbol");
++	*len = k->sym_lens[i];
++	k->last = i;
++	return k->syms[i];
++    }
++    int ivars = 0;
++    if (t == 'I') {
++	ivars = 1;
++	t = mkxpz_skip_byte(k);
++    }
++    if (t != ':') rb_raise(rb_eArgError, "dump format error for symbol(0x%x)", t);
++    long n;
++    const char *name = (const char *)mkxpz_skip_bytes(k, &n);
++    if (k->nsyms == k->cap) {
++	k->cap = k->cap ? k->cap * 2 : 64;
++	REALLOC_N(k->syms, const char *, k->cap);
++	REALLOC_N(k->sym_lens, long, k->cap);
++	REALLOC_N(k->checked, char, k->cap);
++    }
++    long me = k->nsyms;
++    k->checked[k->nsyms] = 0;
++    k->syms[k->nsyms] = name;
++    k->sym_lens[k->nsyms++] = n;
++    if (ivars) {
++	long m = mkxpz_skip_long(k);
++	for (long i = 0; i < m; i++) {
++	    long l;
++	    mkxpz_skip_sym(k, &l);
++	    mkxpz_skip_obj(k, 1);
++	}
++    }
++    k->last = me;
++    *len = n;
++    return name;
++}
++
++static void
++mkxpz_skip_class(struct mkxpz_skip *k)
++{
++    long n;
++    const char *name = mkxpz_skip_sym(k, &n);
++    if (k->checked[k->last]) return;
++    rb_path_to_class(rb_str_new(name, n)); /* (raises if there's no such class) */
++    k->checked[k->last] = 1;
++}
++
++static void
++mkxpz_skip_ivars(struct mkxpz_skip *k, int depth)
++{
++    long n = mkxpz_skip_long(k);
++    for (long i = 0; i < n; i++) {
++	long l;
++	mkxpz_skip_sym(k, &l);
++	mkxpz_skip_obj(k, depth + 1);
++    }
++}
++
++static void
++mkxpz_skip_obj(struct mkxpz_skip *k, int depth)
++{
++    if (depth > 2000) rb_raise(rb_eArgError, "exceed depth limit");
++    int t = mkxpz_skip_byte(k);
++    long n;
++    switch (t) {
++      case '0': case 'T': case 'F': break;
++      case 'i': case '@': mkxpz_skip_long(k); break;
++      case ':': case ';': k->p--; mkxpz_skip_sym(k, &n); break;
++      case '"': case 'f': mkxpz_skip_bytes(k, NULL); break;
++      case '/': mkxpz_skip_bytes(k, NULL); mkxpz_skip_byte(k); break;
++      case 'l':
++	mkxpz_skip_byte(k);
++	n = mkxpz_skip_long(k);
++	if (n < 0 || n * 2 > k->end - k->p) too_short();
++	k->p += n * 2;
++	break;
++      case 'I': mkxpz_skip_obj(k, depth + 1); mkxpz_skip_ivars(k, depth); break;
++      case '[':
++	n = mkxpz_skip_long(k);
++	for (long i = 0; i < n; i++) mkxpz_skip_obj(k, depth + 1);
++	break;
++      case '{': case '}':
++	n = mkxpz_skip_long(k);
++	for (long i = 0; i < n; i++) {
++	    mkxpz_skip_obj(k, depth + 1);
++	    mkxpz_skip_obj(k, depth + 1);
++	}
++	if (t == '}') mkxpz_skip_obj(k, depth + 1);
++	break;
++      case 'o': case 'S': mkxpz_skip_class(k); mkxpz_skip_ivars(k, depth); break;
++      case 'u': mkxpz_skip_class(k); mkxpz_skip_bytes(k, NULL); break;
++      case 'U': case 'd': case 'C': mkxpz_skip_class(k); mkxpz_skip_obj(k, depth + 1); break;
++      case 'e': mkxpz_skip_sym(k, &n); mkxpz_skip_obj(k, depth + 1); break;
++      case 'c': case 'm': case 'M':
++	{
++	    const char *name = (const char *)mkxpz_skip_bytes(k, &n);
++	    rb_path_to_class(rb_str_new(name, n));
++	}
++	break;
++      default:
++	rb_raise(rb_eArgError, "dump format error(0x%x)", t);
++    }
++}
++
++static VALUE mkxpz_file_buffer(VALUE port, long *offset);
++
++struct mkxpz_skip_run { struct mkxpz_skip *k; };
++static VALUE
++mkxpz_skip_body(VALUE p)
++{
++    struct mkxpz_skip *k = ((struct mkxpz_skip_run *)p)->k;
++    int major = mkxpz_skip_byte(k), minor = mkxpz_skip_byte(k);
++    if (major != MARSHAL_MAJOR || minor > MARSHAL_MINOR)
++	rb_raise(rb_eTypeError, "incompatible marshal file format (can't be read)");
++    mkxpz_skip_obj(k, 0);
++    return Qnil;
++}
++static VALUE
++mkxpz_skip_free(VALUE p)
++{
++    struct mkxpz_skip *k = ((struct mkxpz_skip_run *)p)->k;
++    xfree(k->syms);
++    xfree(k->sym_lens);
++    xfree(k->checked);
++    return Qnil;
++}
++
++static VALUE
++marshal_mkxpz_skip(VALUE mod, VALUE file)
++{
++    long offset;
++    VALUE buf = mkxpz_file_buffer(file, &offset);
++    if (NIL_P(buf)) rb_raise(rb_eTypeError, "Marshal.mkxpz_skip: a File opened for reading only");
++    if (offset >= RSTRING_LEN(buf)) rb_eof_error();
++    struct mkxpz_skip k = { (const unsigned char *)RSTRING_PTR(buf) + offset,
++                            (const unsigned char *)RSTRING_END(buf), 0, 0, 0, 0, 0, 0 };
++    struct mkxpz_skip_run run = { &k };
++    rb_ensure(mkxpz_skip_body, (VALUE)&run, mkxpz_skip_free, (VALUE)&run);
++    long used = (long)(k.p - ((const unsigned char *)RSTRING_PTR(buf) + offset));
++    VALUE pos = rb_funcall(file, rb_intern("pos"), 0);
++    rb_funcall(file, rb_intern("seek"), 1, LONG2NUM(NUM2LONG(pos) + used));
++    RB_GC_GUARD(buf);
++    return Qnil;
++}
++
+ VALUE
+ rb_marshal_load_with_proc(VALUE port, VALUE proc, bool freeze)
+ {
+@@ -2211,11 +2450,19 @@
+     VALUE v;
+     VALUE wrapper; /* used to avoid memory leak in case of exception */
+     struct load_arg *arg;
++    VALUE file = Qnil;
++    long file_offset = 0;
+ 
+     v = rb_check_string_type(port);
+     if (!NIL_P(v)) {
+ 	port = v;
+     }
++    else if (!NIL_P(v = mkxpz_file_buffer(port, &file_offset))) {
++	file = port;
++	port = v;
++	if (file_offset >= RSTRING_LEN(v))
++	    rb_eof_error(); /* (nothing left: as reading the file says) */
++    }
+     else if (rb_respond_to(port, s_getbyte) && rb_respond_to(port, s_read)) {
+ 	rb_check_funcall(port, s_binmode, 0, 0);
+     }
+@@ -2224,7 +2471,7 @@
+     }
+     wrapper = TypedData_Make_Struct(0, struct load_arg, &load_arg_data, arg);
+     arg->src = port;
+-    arg->offset = 0;
++    arg->offset = file_offset;
+     arg->symbols = st_init_numtable();
+     arg->data    = rb_init_identtable();
+     arg->partial_objects = rb_init_identtable();
+@@ -2254,8 +2501,15 @@
+ 
+     if (!NIL_P(proc)) arg->proc = proc;
+     v = r_object(arg);
++    if (!NIL_P(file)) {
++	/* (the file's position: just after the object) */
++	long end = arg->offset - file_offset;
++	VALUE pos = rb_funcall(file, rb_intern("pos"), 0);
++	rb_funcall(file, rb_intern("seek"), 1, LONG2NUM(NUM2LONG(pos) + end));
++    }
+     clear_load_arg(arg);
+     RB_GC_GUARD(wrapper);
++    RB_GC_GUARD(file);
+ 
+     return v;
+ }
+@@ -2382,6 +2636,7 @@
+ Init_marshal(void)
+ {
+     VALUE rb_mMarshal = rb_define_module("Marshal");
++    rb_define_module_function(rb_mMarshal, "mkxpz_skip", marshal_mkxpz_skip, 1);
+ #define set_id(sym) sym = rb_intern_const(name_##sym)
+     set_id(s_dump);
+     set_id(s_load);

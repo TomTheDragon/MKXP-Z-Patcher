@@ -348,6 +348,16 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Save screens: Ruby patch (marshal.c): Marshal.load from a File opened
+  only for reading loads from the rest of the file read once (kept with
+  the File, hidden), then seeks to just after the object; EOFError at the
+  end as before. Marshal.mkxpz_skip(file) steps over an object without
+  making it (structure and class names checked). boot.rb replaces the
+  "vx新截图存档" script's Window_SaveFile#load_gamedata (checksum) with one
+  that loads parts 1-2, skips 12, loads the screenshot, cached per file
+  (size + CRC of the first/last 4 KB). Bitmap#blur separable with exact
+  reciprocal divisions; blt from a big file image stops reading after its
+  rows. Changed, Save10 (670 KB): ~3.1 s -> 0.9 s, 0.22 s cached.
 - "Top screen": auto (default; settings key top_screen=2), on, off. Auto:
   wide unless the original 2DS (CFGU_GetSystemModel) or an emulator:
   Citra-family emulators answer svcGetSystemInfo type 0x20000 (Azahar
