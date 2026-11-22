@@ -67,6 +67,71 @@ class Win32API
   alias Call call
 end
 
+# Screenshots in save files ("快速存储Bitmap的Marshal" by 柳之一, e.g. in
+# Changed): the script's Bitmap#_dump / Bitmap._load copy the original
+# engine's pixel memory with RtlMoveMemory, which doesn't exist here (the
+# screenshot came out empty). Replaced, when a script defines them with its
+# RtlMoveMemory constants, by versions with the real pixels in the original
+# format (BGRA, bottom row first, zlib): saves stay compatible with the PC
+# (Game.exe and the patcher's mkxp-z: its compat/bitmap_marshal.rb).
+module MkxpzBitmapMarshal
+  def self.dump(bmp)
+    [bmp.width, bmp.height, Zlib::Deflate.deflate(bmp.mkxpz_bgra_bottom_up)].pack('LLa*')
+  end
+
+  def self.load(klass, str)
+    w, h, zdata = str.unpack('LLa*')
+    b = klass.new([w, 1].max, [h, 1].max)
+    begin
+      b.mkxpz_load_bgra_bottom_up(Zlib::Inflate.inflate(zdata))
+    rescue StandardError => e
+      mkxpz_log("save file image unreadable: #{e.message}")
+    end
+    b
+  end
+
+  def self.memory_script?
+    Bitmap.constants.any? { |c| c.to_s =~ /RtlMoveMemory/i }
+  rescue StandardError
+    false
+  end
+
+  module Impl
+    def _dump(limit)
+      MkxpzBitmapMarshal.dump(self)
+    end
+  end
+
+  module ClassImpl
+    def _load(str)
+      MkxpzBitmapMarshal.load(self, str)
+    end
+  end
+
+  def self.install(target, name, impl)
+    return if @installing || !memory_script?
+    @installing = true
+    begin
+      target.send(:define_method, name, impl.instance_method(name))
+      mkxpz_log("screenshots in saves: Bitmap.#{name} with real pixels")
+    ensure
+      @installing = false
+    end
+  end
+end
+
+class Bitmap
+  def self.method_added(name)
+    super
+    MkxpzBitmapMarshal.install(self, :_dump, MkxpzBitmapMarshal::Impl) if name == :_dump && self == Bitmap
+  end
+
+  def self.singleton_method_added(name)
+    super
+    MkxpzBitmapMarshal.install(singleton_class, :_load, MkxpzBitmapMarshal::ClassImpl) if name == :_load && self == Bitmap
+  end
+end
+
 # XP: not drawn yet; maps are empty (VX / VX Ace: tilemap.c)
 unless defined?(Tilemap)
 class Tilemap

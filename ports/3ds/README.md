@@ -342,6 +342,12 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (bitmap_stream_file), outside of drawing (queued during a frame, read
   after it); the pixels are only loaded whole when a script needs them.
   No 6 MB block is needed for a 1536x1024 sheet any more.
+- Screenshots in save files ("快速存储Bitmap的Marshal", e.g. Changed): the
+  script's Bitmap#_dump / _load copy RGSS's memory with RtlMoveMemory;
+  boot.rb replaces them (when the script defines them with its
+  RtlMoveMemory constants) with the real pixels in the original format
+  (BGRA, bottom row first, zlib), like the patcher's
+  compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
 - Load/save icons (gpu.c draw_activity): loading_tick (image loading,
   streaming, sound decoding, load_data) shows a spinning 12x12 CD at the
   top right for 400 ms, writing_tick (every write to sdmc: except the

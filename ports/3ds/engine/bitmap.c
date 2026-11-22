@@ -1027,6 +1027,71 @@ static VALUE bitmap_tex_info(VALUE self)
 	return rb_str_new_cstr(s);
 }
 
+/* mkxp-z's Bitmap#raw_data / raw_data=: the pixels as RGBA bytes */
+static VALUE bitmap_raw_data(VALUE self)
+{
+	Bitmap *b = bitmap_get(self);
+	return rb_str_new((const char *) b->px, (long) b->w * b->h * 4);
+}
+
+static VALUE bitmap_set_raw_data(VALUE self, VALUE str)
+{
+	Bitmap *b = bitmap_get(self);
+	StringValue(str);
+	long n = (long) b->w * b->h * 4;
+	if (RSTRING_LEN(str) < n)
+		rb_raise(rb_eArgError, "not enough data for a %dx%d bitmap", b->w, b->h);
+	ops_clear(b);
+	memcpy(b->px, RSTRING_PTR(str), (size_t) n);
+	b->version++;
+	return str;
+}
+
+/* the original engine's memory layout (what screenshot save scripts copied
+ * with RtlMoveMemory): BGRA, the bottom row first */
+static VALUE bitmap_bgra_bottom_up(VALUE self)
+{
+	Bitmap *b = bitmap_get(self);
+	VALUE s = rb_str_new(NULL, (long) b->w * b->h * 4);
+	uint8_t *d = (uint8_t *) RSTRING_PTR(s);
+	for (int y = b->h - 1; y >= 0; y--) {
+		const px_t *row = b->px + (size_t) y * b->w;
+		for (int x = 0; x < b->w; x++, d += 4) {
+			px_t p = row[x];
+			d[0] = (uint8_t) PX_B(p);
+			d[1] = (uint8_t) PX_G(p);
+			d[2] = (uint8_t) PX_R(p);
+			d[3] = (uint8_t) PX_A(p);
+		}
+	}
+	return s;
+}
+
+/* back; false: not this bitmap's size, or the "rgba" placeholder that
+ * saves made without real pixel access hold (left empty) */
+static VALUE bitmap_set_bgra_bottom_up(VALUE self, VALUE str)
+{
+	Bitmap *b = bitmap_get(self);
+	StringValue(str);
+	long n = (long) b->w * b->h * 4;
+	const uint8_t *s = (const uint8_t *) RSTRING_PTR(str);
+	if (RSTRING_LEN(str) != n)
+		return Qfalse;
+	bool placeholder = true;
+	for (long i = 0; i < n && placeholder; i += 4)
+		placeholder = !memcmp(s + i, "rgba", 4);
+	if (placeholder)
+		return Qfalse;
+	ops_clear(b);
+	for (int y = b->h - 1; y >= 0; y--) {
+		px_t *row = b->px + (size_t) y * b->w;
+		for (int x = 0; x < b->w; x++, s += 4)
+			row[x] = PX(s[2], s[1], s[0], s[3]);
+	}
+	b->version++;
+	return Qtrue;
+}
+
 void init_bitmap(void)
 {
 	cBitmap = rb_define_class("Bitmap", rb_cObject);
@@ -1036,6 +1101,10 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "dispose", bitmap_dispose, 0);
 	rb_define_method(cBitmap, "disposed?", bitmap_disposed, 0);
 	rb_define_method(cBitmap, "mkxpz_tex_info", bitmap_tex_info, 0);
+	rb_define_method(cBitmap, "raw_data", bitmap_raw_data, 0);
+	rb_define_method(cBitmap, "raw_data=", bitmap_set_raw_data, 1);
+	rb_define_method(cBitmap, "mkxpz_bgra_bottom_up", bitmap_bgra_bottom_up, 0);
+	rb_define_method(cBitmap, "mkxpz_load_bgra_bottom_up", bitmap_set_bgra_bottom_up, 1);
 	rb_define_method(cBitmap, "width", bitmap_width, 0);
 	rb_define_method(cBitmap, "height", bitmap_height, 0);
 	rb_define_method(cBitmap, "rect", bitmap_rect, 0);
