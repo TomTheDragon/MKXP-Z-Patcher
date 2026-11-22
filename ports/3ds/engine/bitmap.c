@@ -226,13 +226,84 @@ static bool drop_one_keeping(bool in_arena, int keep)
 unsigned bitmap_released;
 void bitmap_uploaded(Bitmap *b)
 {
-	if (!b->file || !b->px || b->version != b->file_version || (size_t) b->w * b->h * 4 < 256 * 1024)
+	if (!b->file || !b->px || b->version != b->file_version || (size_t) b->w * b->h * 4 < 256 * 1024 || b->keep_px)
 		return;
 	lru_remove(b);
 	px_free(b->px, (size_t) b->w * b->h * 4);
 	b->px = NULL;
 	b->dropped = true;
 	bitmap_released++;
+}
+
+/* --- pixels of gone images (disposed, unchanged, from a file, up to 1 MB;
+ * 3 MB in all): the next Bitmap.new of the file takes them over instead of
+ * reading the file (a game that disposes the face after every text box) */
+typedef struct { char *path; int w, h; px_t *px; } PxKept;
+#define PX_KEPT_MAX 8
+static PxKept px_kept[PX_KEPT_MAX];
+static int npx_kept;
+static size_t px_kept_bytes;
+unsigned px_kept_hits;
+
+static void px_kept_free(int i)
+{
+	px_free(px_kept[i].px, (size_t) px_kept[i].w * px_kept[i].h * 4);
+	px_kept_bytes -= (size_t) px_kept[i].w * px_kept[i].h * 4;
+	free(px_kept[i].path);
+	for (int j = i; j + 1 < npx_kept; j++) /* (oldest first: in order) */
+		px_kept[j] = px_kept[j + 1];
+	npx_kept--;
+}
+
+/* (memory short: the oldest kept pixels go first) */
+static bool px_kept_release(bool in_arena)
+{
+	for (int i = 0; i < npx_kept; i++)
+		if (px_in_arena(px_kept[i].px) == in_arena) {
+			px_kept_free(i);
+			return true;
+		}
+	return false;
+}
+
+/* a bitmap goes: its pixels kept if worth it; true if taken */
+static bool px_keep(Bitmap *b)
+{
+	size_t n = (size_t) b->w * b->h * 4;
+	if (!b->file || !b->px || b->version != b->file_version || n > 1024 * 1024 ||
+	    heap_free() < HEAP_RESERVE + 2 * 1024 * 1024)
+		return false;
+	char *path = strdup(b->file);
+	if (!path)
+		return false;
+	while (npx_kept && (npx_kept == PX_KEPT_MAX || px_kept_bytes + n > 3u * 1024 * 1024))
+		px_kept_free(0);
+	/* (oldest first: in order) */
+	px_kept[npx_kept++] = (PxKept) { path, b->w, b->h, b->px };
+	px_kept_bytes += n;
+	lru_remove(b);
+	b->px = NULL;
+	return true;
+}
+
+/* Bitmap.new of a file whose pixels were kept: taken over */
+static bool px_adopt(Bitmap *b, const char *path)
+{
+	for (int i = 0; i < npx_kept; i++)
+		if (!strcmp(px_kept[i].path, path)) {
+			b->w = px_kept[i].w;
+			b->h = px_kept[i].h;
+			b->px = px_kept[i].px;
+			b->keep_px = true;
+			px_kept_bytes -= (size_t) b->w * b->h * 4;
+			free(px_kept[i].path);
+			for (int j = i; j + 1 < npx_kept; j++)
+				px_kept[j] = px_kept[j + 1];
+			npx_kept--;
+			px_kept_hits++;
+			return true;
+		}
+	return false;
 }
 
 static bool drop_one(bool in_arena)
@@ -247,7 +318,7 @@ static bool drop_one(bool in_arena)
 static int keep_at_least = 1; /* 0 while Bitmap.new loads a file */
 bool mem_release(size_t need, bool in_arena)
 {
-	return drop_one_keeping(in_arena, 4) || drop_one_keeping(in_arena, keep_at_least);
+	return px_kept_release(in_arena) || drop_one_keeping(in_arena, 4) || drop_one_keeping(in_arena, keep_at_least);
 }
 
 /* keeps the normal heap's reserve free (for Ruby); need: a pixel buffer
@@ -256,7 +327,7 @@ static void make_room(size_t need)
 {
 	if (need >= PX_MAP_MIN)
 		need = 0;
-	while (heap_free() < need + HEAP_RESERVE && drop_one(false))
+	while (heap_free() < need + HEAP_RESERVE && (px_kept_release(false) || drop_one(false)))
 		;
 }
 
@@ -287,6 +358,9 @@ px_t *bitmap_px(Bitmap *b)
 		if (!state && ok == Qtrue && t.w == w && t.h == h) {
 			b->px = t.px;
 			b->dropped = false;
+			/* (needed again, e.g. a face copied into every text box: kept
+			 * now, unless memory runs short; up to 1 MB) */
+			b->keep_px = (size_t) w * h * 4 <= 1024 * 1024;
 			bitmap_reloads++;
 		} else {
 			px_free(t.px, (size_t) t.w * t.h * 4);
@@ -875,10 +949,12 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 		 * every other file image may let go of its pixels to make room) */
 		keep_at_least = 0;
 		bool found = find_image(name, path, sizeof path), loaded = false;
+		if (found && px_adopt(b, path))
+			loaded = true;
 		/* a big .mkxi: only its size now; the pixels when needed (textures
 		 * straight from the file: bitmap_stream_file) */
 		size_t pl = found ? strlen(path) : 0;
-		if (pl > 5 && !strcasecmp(path + pl - 5, ".mkxi")) {
+		if (!loaded && pl > 5 && !strcasecmp(path + pl - 5, ".mkxi")) {
 			FILE *hf = fopen(path, "rb");
 			uint32_t head[4];
 			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && (head[1] == 1 || head[1] == 2) && head[2] &&
@@ -970,8 +1046,10 @@ static VALUE bitmap_dispose(VALUE self)
 	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
 	b->disposed = true;
 	gpu_forget(b);
+	/* (before the file name goes) */
+	if (!px_keep(b))
+		px_free(b->px, (size_t) b->w * b->h * 4);
 	bitmap_forget_file(b);
-	px_free(b->px, (size_t) b->w * b->h * 4);
 	b->px = NULL;
 	drop_from_full(b);
 	gpu_text_forget(b);
@@ -1342,6 +1420,18 @@ static VALUE bitmap_text_size(VALUE self, VALUE str)
 }
 
 /* (boot.rb: a map's characters loaded ahead) */
+/* (the map's preload: a face's pixels now, kept: it's copied into text
+ * boxes) */
+static VALUE bitmap_load_pixels(VALUE self)
+{
+	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
+	if (b->disposed || (size_t) b->w * b->h * 4 > 1024 * 1024)
+		return Qnil;
+	if (bitmap_px(b))
+		b->keep_px = true;
+	return Qnil;
+}
+
 static VALUE bitmap_preload(VALUE self, VALUE x, VALUE y, VALUE w, VALUE h)
 {
 	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
@@ -1433,6 +1523,7 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "disposed?", bitmap_disposed, 0);
 	rb_define_method(cBitmap, "mkxpz_tex_info", bitmap_tex_info, 0);
 	rb_define_method(cBitmap, "mkxpz_preload", bitmap_preload, 4);
+	rb_define_method(cBitmap, "mkxpz_load_pixels", bitmap_load_pixels, 0);
 	rb_define_method(cBitmap, "raw_data", bitmap_raw_data, 0);
 	rb_define_method(cBitmap, "raw_data=", bitmap_set_raw_data, 1);
 	rb_define_method(cBitmap, "mkxpz_bgra_bottom_up", bitmap_bgra_bottom_up, 0);

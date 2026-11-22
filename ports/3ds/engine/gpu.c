@@ -145,26 +145,126 @@ static void live_touch(GpuTex *g)
 }
 
 /* free the least recently used texture not used in this frame */
+/* (VRAM: 0x1F000000..0x1F600000) */
+static bool in_vram(const C3D_Tex *t) { return t->data && (u32) t->data - 0x1F000000u < 0x600000u; }
+
+/* frees the texture, or the piece of a big sheet, used longest ago (not in
+ * this frame; only ones in linear memory, which is what's short): pieces of
+ * Changed's huge character sheets one by one (a sheet drawn long ago held
+ * up to 4 MB), and kept textures of gone images by their age too (freeing
+ * those first threw out the picture an animation showed next) */
 static bool evict_one(void)
 {
-	/* kept textures of gone images first (the oldest), then the least
-	 * recently used */
-	GpuTex *g = NULL;
-	for (GpuTex *r = live_last; r; r = r->prev)
-		if (r->recycle && r->last_used != frame_no) {
-			g = r;
-			break;
+	GpuTex *best = NULL;
+	int best_k = -1;
+	unsigned best_frame = frame_no;
+	for (GpuTex *g = live_first; g; g = g->next) {
+		if (g->sparse) {
+			for (int k = 0; k < g->nx * g->ny; k++)
+				if (PBIT(g->have, k) && g->tex[k].data && !in_vram(&g->tex[k]) && g->piece_used[k] < best_frame) {
+					best = g;
+					best_k = k;
+					best_frame = g->piece_used[k];
+				}
+		} else if (g->last_used < best_frame && g->nx * g->ny > 0 && g->tex[0].data && !in_vram(&g->tex[0])) {
+			best = g;
+			best_k = -1;
+			best_frame = g->last_used;
 		}
-	if (!g)
-		g = live_last;
-	if (!g || g->last_used == frame_no)
+	}
+	if (!best)
 		return false;
-	live_remove(g);
-	if (g->owner)
-		g->owner->gpu = NULL;
-	tex_delete(g); /* (the GPU finished the frames that used it) */
-	gputex_free(g);
+	if (best_k >= 0) {
+		best->bytes -= best->tex[best_k].size;
+		C3D_TexDelete(&best->tex[best_k]);
+		memset(&best->tex[best_k], 0, sizeof best->tex[best_k]);
+		PCLR(best->have, best_k);
+		return true;
+	}
+	live_remove(best);
+	if (best->owner)
+		best->owner->gpu = NULL;
+	tex_delete(best); /* (the GPU finished the frames that used it) */
+	gputex_free(best);
 	return true;
+}
+
+/* --- VRAM (6 MB, mostly the screens and the scene): finished textures of
+ * unchanged file images move there from linear memory (a GPU copy at the
+ * start of a frame, when the GPU is done with the last one), so linear
+ * memory holds more. Kept free: VRAM_RESERVE (the screens are made again
+ * when 3D or wide mode change). */
+#define VRAM_RESERVE (512 * 1024)
+static bool to_vram(C3D_Tex *t)
+{
+	if (!t->data || in_vram(t) || vramSpaceFree() < t->size + VRAM_RESERVE)
+		return false;
+	C3D_Tex v;
+	if (!C3D_TexInitVRAM(&v, t->width, t->height, t->fmt))
+		return false;
+	GSPGPU_FlushDataCache(t->data, t->size);
+	C3D_SyncTextureCopy((u32 *) t->data, 0, (u32 *) v.data, 0, t->size, 8);
+	v.param = t->param;
+	v.border = t->border;
+	v.lodParam = t->lodParam;
+	C3D_TexDelete(t);
+	*t = v;
+	return true;
+}
+
+/* a texture that stays as it is: its image is from a file and unchanged
+ * (or it's kept after the image went) */
+static bool tex_stable(GpuTex *g)
+{
+	Bitmap *b = g->owner;
+	return g->recycle || (b && b->file && b->version == b->file_version && b->gpu_version == b->version + 1);
+}
+
+unsigned gpu_vram_moved;
+static void vram_migrate(void)
+{
+	if (vramSpaceFree() < 64 * 1024 + VRAM_RESERVE)
+		return;
+	/* most recently used first; at most 2 MB a frame */
+	size_t moved = 0;
+	for (GpuTex *g = live_first; g && moved < 2u * 1024 * 1024; g = g->next) {
+		if (!tex_stable(g) || g->repeat)
+			continue;
+		for (int k = 0; k < g->nx * g->ny; k++)
+			if (g->tex[k].data && !in_vram(&g->tex[k]) && (!g->sparse || PBIT(g->have, k)) && to_vram(&g->tex[k])) {
+				moved += g->tex[k].size;
+				gpu_vram_moved++;
+			}
+	}
+}
+
+/* (the screens need VRAM again: everything moved there goes; drawn again
+ * from linear memory when needed) */
+static void vram_evict_all(void)
+{
+	for (GpuTex *g = live_first, *next; g; g = next) {
+		next = g->next;
+		bool any = false;
+		for (int k = 0; k < g->nx * g->ny; k++)
+			any |= in_vram(&g->tex[k]);
+		if (!any)
+			continue;
+		if (g->sparse) {
+			for (int k = 0; k < g->nx * g->ny; k++)
+				if (in_vram(&g->tex[k])) {
+					g->bytes -= g->tex[k].size;
+					C3D_TexDelete(&g->tex[k]);
+					memset(&g->tex[k], 0, sizeof g->tex[k]);
+					PCLR(g->have, k);
+				}
+			continue;
+		}
+		live_remove(g);
+		if (g->owner)
+			g->owner->gpu = NULL;
+		tex_delete(g);
+		gputex_free(g);
+	}
 }
 
 unsigned gpu_evictions;
@@ -282,17 +382,28 @@ static void top_target(void)
 		C3D_RenderTargetDelete(top_right);
 		top_right = NULL;
 	}
-	/* (one display mode in libctru: 3D first, then the width; the other way
-	 * round gfxSet3D(false) turned wide mode off again, and the 800-column
-	 * picture showed only its left half) */
-	gfxSet3D(stereo_on);
-	gfxSetWide(wide);
+	/* (libctru keeps one display mode, which both calls set: 0 normal, 1
+	 * 3D, 2 wide; the last call wins. So only the one wanted: gfxSet3D(false)
+	 * after wide turned wide off, gfxSetWide(false) after 3D turned 3D off) */
+	if (stereo_on)
+		gfxSet3D(true);
+	else
+		gfxSetWide(wide);
 	top_w = wide ? 800 : 400;
 	gpu_top_xs = wide ? 2 : 1;
-	top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	/* (no depth buffer: nothing uses it; 768 KB of VRAM in wide mode) */
+	top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, -1);
+	if (!top) {
+		vram_evict_all();
+		top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, -1);
+	}
 	C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 	if (stereo_on) {
-		top_right = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+		top_right = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, -1);
+		if (!top_right) {
+			vram_evict_all();
+			top_right = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, -1);
+		}
 		C3D_RenderTargetSetOutput(top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
 	}
 	present_target = top;
@@ -612,6 +723,7 @@ static bool piece_init(GpuTex *g, int k)
 	C3D_TexSetFilter(t, GPU_LINEAR, GPU_LINEAR);
 	C3D_TexSetWrap(t, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 	g->bytes += t->size;
+	g->piece_used[k] = frame_no; /* (by age, like the drawn ones) */
 	return true;
 }
 
@@ -736,9 +848,25 @@ static GpuTex *recycled_for(Bitmap *b);
  * big image's pieces for r, now instead of when first drawn; only while
  * there's room (5 MB of linear memory left: some for what loads while
  * playing) */
+/* a map's preload starts: a new "frame" (between frames), so what it loads
+ * counts as used now and what the last map used is older: making room
+ * frees that (oldest first), not what was just preloaded */
+void gpu_preload_begin(void)
+{
+	if (gpu_on && !in_frame)
+		frame_no++;
+}
+
 void gpu_preload(Bitmap *b, Rect r)
 {
-	if (!gpu_on || in_frame || linearSpaceFree() < 5u * 1024 * 1024)
+	/* room: textures and pieces not used since the preload began go
+	 * (texture_of and the pieces free the oldest when short); 3 MB stay
+	 * free for what loads while playing */
+	if (!gpu_on || in_frame)
+		return;
+	while (linearSpaceFree() < 4u * 1024 * 1024 && evict_one())
+		gpu_evictions++;
+	if (linearSpaceFree() < 3u * 1024 * 1024)
 		return;
 	GpuTex *g = texture_of(b);
 	if (!g || !g->sparse)
@@ -764,6 +892,13 @@ static GpuTex *texture_of(Bitmap *b)
 			if (b->gpu_version != b->version + 1) {
 				/* drawn into (it has its pixels then): the pieces there
 				 * filled again now, the others when they're drawn */
+				for (int k = 0; k < g->nx * g->ny; k++)
+					if (in_vram(&g->tex[k])) { /* (made again in linear memory when drawn) */
+						g->bytes -= g->tex[k].size;
+						C3D_TexDelete(&g->tex[k]);
+						memset(&g->tex[k], 0, sizeof g->tex[k]);
+						PCLR(g->have, k);
+					}
 				if (b->px && bits_any(g->have)) {
 					/* (empty pieces: read again when drawn) */
 					for (int w = 0; w < 4; w++) {
@@ -826,7 +961,10 @@ static GpuTex *texture_of(Bitmap *b)
 	/* (an image without its pixels is read from its file right away, also
 	 * during drawing: waiting for the end of the frame left it out of that
 	 * frame, and picture animations flickered) */
-	if (!g || g->w != b->w || g->h != b->h) {
+	bool vram = false;
+	for (int k = 0; g && !g->sparse && k < g->nx * g->ny; k++)
+		vram |= in_vram(&g->tex[k]);
+	if (!g || g->w != b->w || g->h != b->h || vram) {
 		if (g) {
 			live_remove(g);
 			to_trash(g);
@@ -1127,6 +1265,7 @@ void gpu_frame_begin_sync(bool sync)
 		gputex_free(trash[i]);
 	}
 	ntrash = 0;
+	vram_migrate();
 }
 
 /* draw the scene into texture 0 (the picture) or 1 (the frozen one) */
@@ -1594,4 +1733,27 @@ bool gpu_plane(Canvas *c, Bitmap *b, int bx, int by, double zx, double zy, int o
 	float v0 = 1 - (y0 - by) / th, v1 = 1 - (y1 - by) / th;
 	quad(x0, y0, x1, y1, u0, v0, u1, v1, opacity / 255.0f, 0, 0, 0);
 	return true;
+}
+
+/* the log: what's in graphics memory (Graphics.mkxpz_tex_dump, tests) */
+void gpu_tex_dump(void)
+{
+	size_t total = 0;
+	int n = 0;
+	for (GpuTex *g = live_first; g; g = g->next) {
+		size_t bytes = 0;
+		int pieces = 0;
+		for (int k = 0; k < g->nx * g->ny; k++)
+			if (g->tex[k].data) {
+				bytes += g->tex[k].size;
+				pieces++;
+			}
+		total += bytes;
+		n++;
+		const char *name = g->owner && g->owner->file ? g->owner->file : g->recycle ? g->recycle : "(drawn into)";
+		log_only("  tex %5u KB %4dx%-4d %2d/%-3d pieces%s%s, used %u frames ago: %s\n", (unsigned) (bytes / 1024), g->w, g->h,
+		         pieces, g->nx * g->ny, g->sparse ? " sparse" : "", g->recycle ? " kept" : "", frame_no - g->last_used, name);
+	}
+	log_only("textures: %d, %u KB; linear free %lu KB, VRAM free %lu KB\n", n, (unsigned) (total / 1024),
+	         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (vramSpaceFree() / 1024));
 }

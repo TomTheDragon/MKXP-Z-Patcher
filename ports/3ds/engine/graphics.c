@@ -183,9 +183,13 @@ static void overlay_text(void)
 	overlay_since = now;
 	extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 	char text[80];
-	snprintf(text, sizeof text, "Speed %3d%%|RAM %.1f/%lu MB|GFX %.1f/%lu MB", pct,
-	         (heap_free() + mem_arena_free()) / 1048576.0, (unsigned long) (__ctru_heap_size >> 20),
-	         linearSpaceFree() / 1048576.0, (unsigned long) (__ctru_linear_heap_size >> 20));
+	/* memory in use (not free: "GFX 1.5/20" read as almost empty); GFX:
+	 * linear memory (textures, sound) and VRAM (screens, textures) */
+	double heap_used = (double) __ctru_heap_size - (heap_free() + mem_arena_free());
+	double gfx_total = (double) __ctru_linear_heap_size + 6 * 1048576.0;
+	double gfx_used = gfx_total - linearSpaceFree() - vramSpaceFree();
+	snprintf(text, sizeof text, "Speed %3d%%|RAM %.1f/%lu MB|GFX %.1f/%.0f MB", pct, heap_used / 1048576.0,
+	         (unsigned long) (__ctru_heap_size >> 20), gfx_used / 1048576.0, gfx_total / 1048576.0);
 	status_line(text);
 	overlay_shown = true;
 }
@@ -583,6 +587,10 @@ static VALUE g_brightness(VALUE self) { return INT2NUM(brightness); }
 static VALUE g_set_brightness(VALUE self, VALUE v) { brightness = CLAMP(num2int(v), 0, 255); return v; }
 static VALUE g_nothing(int argc, VALUE *argv, VALUE self) { return Qnil; }
 
+void gpu_tex_dump(void);
+static VALUE g_tex_dump(VALUE self) { gpu_tex_dump(); return Qnil; }
+static VALUE g_preload_begin(VALUE self) { gpu_preload_begin(); return Qnil; }
+
 void init_graphics(void)
 {
 	alloc_screen(rgss_version >= 2 ? 544 : 640, rgss_version >= 2 ? 416 : 480);
@@ -590,6 +598,8 @@ void init_graphics(void)
 	rb_define_module_function(mGraphics, "update", g_update, 0);
 	rb_define_module_function(mGraphics, "mkxpz_setup_later", g_setup_later, 0);
 	rb_define_module_function(mGraphics, "mkxpz_margin", g_margin, 0);
+	rb_define_module_function(mGraphics, "mkxpz_tex_dump", g_tex_dump, 0);
+	rb_define_module_function(mGraphics, "mkxpz_preload_begin", g_preload_begin, 0);
 	rb_define_module_function(mGraphics, "mkxpz_reset", g_reset, 0);
 	rb_define_module_function(mGraphics, "mkxpz_loading", g_loading, -1);
 	rb_define_module_function(mGraphics, "wait", g_wait, 1);

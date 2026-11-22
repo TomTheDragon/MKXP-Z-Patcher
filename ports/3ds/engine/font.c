@@ -109,8 +109,10 @@ static FT_Face face_for(VALUE font)
 	FontFile *f = NULL;
 	if (RB_TYPE_P(name, T_ARRAY)) {
 		for (long i = 0; i < RARRAY_LEN(name) && !f; i++)
-			if (RB_TYPE_P(RARRAY_AREF(name, i), T_STRING))
-				f = find_family(StringValueCStr(RARRAY_AREF(name, i)));
+			if (RB_TYPE_P(RARRAY_AREF(name, i), T_STRING)) {
+				VALUE one = RARRAY_AREF(name, i);
+				f = find_family(StringValueCStr(one));
+			}
 	} else if (RB_TYPE_P(name, T_STRING)) {
 		f = find_family(StringValueCStr(name));
 	}
@@ -213,8 +215,39 @@ static void glyphs_clear(void)
 	nglyphs = 0;
 }
 
+/* a letter the font doesn't have (e.g. Chinese text, a game asking for
+ * "SimHei" that isn't there): from another font that has it, the game's
+ * own fonts first (as Windows takes missing letters from other fonts).
+ * Remembered per block of 256 letters. */
+static FT_Face fallback_face(FT_Face face, uint32_t cp)
+{
+	if (cp < 0x80 || FT_Get_Char_Index(face, cp))
+		return face;
+	static struct { FT_Face face, use; uint32_t block; } memo[32];
+	static int next;
+	for (int i = 0; i < 32; i++)
+		if (memo[i].face == face && memo[i].block == cp >> 8 && memo[i].use && FT_Get_Char_Index(memo[i].use, cp))
+			return memo[i].use;
+	for (int i = nfiles - 1; i >= 0; i--) { /* (the game's fonts come last) */
+		FontFile *f = &files[i];
+		if (!f->face && FT_New_Face(ft, f->path, 0, &f->face)) {
+			f->face = NULL;
+			continue;
+		}
+		if (f->face != face && FT_Get_Char_Index(f->face, cp)) {
+			memo[next].face = face;
+			memo[next].use = f->face;
+			memo[next].block = cp >> 8;
+			next = (next + 1) % 32;
+			return f->face;
+		}
+	}
+	return face;
+}
+
 static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uint32_t cp)
 {
+	face = fallback_face(face, cp);
 	uint32_t h = (cp * 2654435761u) ^ ((uint32_t) (uintptr_t) face >> 4) ^ (uint32_t) (size << 3 | bold << 1 | italic) ^ (uint32_t) text_xs << 12;
 	for (int n = 0, i = h % GLYPHS; n < 16; n++, i = (i + 1) % GLYPHS) {
 		Glyph *g = &glyphs[i];

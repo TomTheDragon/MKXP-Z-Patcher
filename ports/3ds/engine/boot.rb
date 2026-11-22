@@ -561,7 +561,17 @@ def mkxpz_fast_setup_event_update_vx
   return unless defined?(Game_Event) && Game_Event.superclass == Game_Character
   names = (Game_Event.instance_methods(false) + Game_Event.private_instance_methods(false)).select do |n|
     m = Game_Event.instance_method(n)
-    m.original_name == :update && m.owner == Game_Event && mkxpz_stock?(Game_Event, n)
+    # (not the engine's own copies: after a reset, mkxpz_slow_event_update
+    # is still there and looks like the standard update; taking it made the
+    # native update call itself until the stack ran out)
+    !n.to_s.start_with?('mkxpz_') && m.original_name == :update && m.owner == Game_Event &&
+      mkxpz_stock?(Game_Event, n)
+  end
+  if names.empty? && $mkxpz_event_update_names &&
+     $mkxpz_event_update_names.all? { |n| Game_Event.method_defined?(n, false) && Game_Event.instance_method(n).source_location.nil? }
+    # after a reset: the scripts kept their aliases ("unless $@"), and so
+    # the native methods installed before
+    return mkxpz_log("events: native update (VX: #{$mkxpz_event_update_names.join(', ')}, kept after the reset)")
   end
   return mkxpz_log('events: Ruby update (not the standard VX method)') if names.empty?
   return mkxpz_log('events: Ruby update (methods changed)') unless mkxpz_fast_ok?(Game_Event, :event_update) &&
@@ -575,6 +585,7 @@ def mkxpz_fast_setup_event_update_vx
     end
   end
   names.each { |n| mkxpz_fast_install_event_update_vx(Game_Event, n.to_s) }
+  $mkxpz_event_update_names = names
   $mkxpz_event_update_native = 2 if names.include?(:update)
   mkxpz_log("events: native update (VX: #{names.join(', ')})")
 rescue StandardError => e
@@ -886,9 +897,12 @@ end
 def mkxpz_preload_map
   return unless $game_map && $game_map.respond_to?(:events) && defined?(Cache) && Cache.respond_to?(:character)
   t = Time.now
+  # (what the last map used is older from now on: room is made from that)
+  Graphics.mkxpz_preload_begin if Graphics.respond_to?(:mkxpz_preload_begin)
   seen = {}
   graphics = []
   pictures = []
+  faces = []
   # graphics changed by move routes (command 41) and "Change Actor Graphic"
   # (322) in a list of event commands
   sounds = []
@@ -904,6 +918,7 @@ def mkxpz_preload_map
       when 205 then from_route.call(c.parameters[1])
       when 322 then graphics << [c.parameters[1], c.parameters[2]]
       when 231 then pictures << c.parameters[1] # Show Picture
+      when 101 then faces << c.parameters[0]    # Show Text (its face)
       when 250 then sounds << c.parameters[0]   # Play SE
       end
     end
@@ -958,7 +973,16 @@ def mkxpz_preload_map
     b.mkxpz_preload(0, 0, b.width, b.height)
     np += 1
   end
-  mkxpz_log("preloaded #{n} character graphics, #{np} pictures and #{ns} sounds of map #{$game_map.map_id} in %.2f s" % (Time.now - t))
+  # faces of the map's text boxes: their pixels (copied into the box)
+  nf = 0
+  faces.uniq.each do |name|
+    next if !name.is_a?(String) || name.empty? || !Cache.respond_to?(:face)
+    b = (Cache.face(name) rescue nil) or next
+    next if b.disposed?
+    b.mkxpz_load_pixels if b.respond_to?(:mkxpz_load_pixels)
+    nf += 1
+  end
+  mkxpz_log("preloaded #{n} character graphics, #{np} pictures, #{nf} faces and #{ns} sounds of map #{$game_map.map_id} in %.2f s" % (Time.now - t))
 rescue StandardError => e
   mkxpz_log("preload: #{e.class}: #{e.message}")
 end

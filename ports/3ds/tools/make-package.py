@@ -7,7 +7,7 @@ Writes <output folder>/<Title>.3dsx (default output: the game folder): the
 engine with the game's title (Game.ini) and icon (Game.exe's, 48x48) in its
 SMDH, which the Homebrew Launcher shows. The engine runs the game next to
 the .3dsx, so each game gets its own folder on the SD card, e.g.
-sdmc:/3ds/Dazed/Dazed.3dsx with the game's files beside it.
+sdmc:/3ds/mkxpz/Dazed/Dazed.3dsx with the game's files beside it.
 
 Needs smdhtool (devkitPro; or set SMDHTOOL) and ImageMagick ("magick", or
 set MAGICK) for the icon. Without an icon in Game.exe the 3DS's default

@@ -381,3 +381,26 @@
  #define set_id(sym) sym = rb_intern_const(name_##sym)
      set_id(s_dump);
      set_id(s_load);
+--- a/marshal.c
++++ b/marshal.c
+@@ -1720,6 +1720,8 @@
+ 		 (str)); \
+     } while (0)
+ 
++/* mkxpz 3DS: plain strings as UTF-8 (set for XP / VX games) */
++int mkxpz_marshal_utf8;
+ static VALUE r_object_for(struct load_arg *arg, bool partial, int *ivp, VALUE extmod, int type);
+ 
+ static VALUE
+@@ -1892,6 +1894,11 @@
+ 
+       case TYPE_STRING:
+ 	v = r_entry(r_string(arg), arg);
++	/* mkxpz 3DS: RPG Maker XP / VX data (Ruby 1.8) has no encodings; its
++	 * texts are UTF-8 (as in MKXP-Z). Binary they were cut into single
++	 * bytes by the message window's /./m. (A string with its encoding
++	 * stored comes as TYPE_IVAR: set from that.) */
++	if (mkxpz_marshal_utf8) rb_enc_associate(v, rb_utf8_encoding());
+ 	v = r_leave(v, arg, partial);
+ 	break;
+ 

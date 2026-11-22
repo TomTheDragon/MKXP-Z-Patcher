@@ -453,6 +453,23 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   serve a read-only file from the pack when it isn't a plain file (plain
   files first: the game's own writes); files.c listings add the pack's
   names. The pack is read through sdmc's own functions under a lock.
+- Memory: evict_one frees the oldest unit in linear memory: a whole
+  texture or one sparse piece (piece_used), kept textures by age too.
+  vram_migrate (frame start) moves stable textures (unchanged file images,
+  kept ones) into VRAM with a GPU copy (VRAM_RESERVE kept free; the render
+  targets have no depth buffer; vram_evict_all if a render target doesn't
+  fit). Bitmaps whose texture is in VRAM get a new texture when changed.
+  The map preload (gpu_preload_begin: a new frame number) makes room from
+  textures older than it. Pixels needed again (bitmap_px reload) stay
+  (keep_px); pixels of disposed unchanged file images up to 1 MB are kept
+  (3 MB) and taken over by Bitmap.new. Pack: files read from Game.data
+  without a failed SD open first (pack_first), except in folders that are
+  plain too or written to.
+- Text: ruby-3ds.patch loads plain Marshal strings as UTF-8 for XP / VX
+  games (mkxpz_marshal_utf8; their data has no encodings). font.c takes a
+  letter the font lacks from another font that has it (fallback_face).
+- Display mode: libctru's gfxSet3D/gfxSetWide set one mode byte; only the
+  wanted call is made.
 - Tilemap bitmaps need one texture: gpu_tiles_begin remakes a split
   texture whole (Bitmap.whole; 512x384 A1/A2 were split 256+128 and the
   map stayed black).

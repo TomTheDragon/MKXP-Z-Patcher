@@ -2,6 +2,7 @@
  * game's scripts. The game's folder: next to the .3dsx, else sdmc:/mkxpz.
  * The bottom screen shows messages (and errors). */
 #include "engine.h"
+#include <fcntl.h>
 #include <3ds.h>
 #include <dirent.h>
 #include <errno.h>
@@ -377,6 +378,10 @@ static void sd_set_mtime(const char *path, struct stat *st)
 
 static int sd_open(struct _reent *r, void *fileStruct, const char *path, int flags, int mode)
 {
+	if ((flags & O_ACCMODE) != O_RDONLY)
+		pack_note_write(path);
+	if ((flags & O_ACCMODE) == O_RDONLY && pack_first(path) && pack_open(r, fileStruct, path, flags) == 0)
+		return 0; /* (from Game.data, without asking the SD card) */
 	int rc = sd_orig->open_r(r, fileStruct, path, flags, mode);
 	if (rc == -1 && pack_open(r, fileStruct, path, flags) == 0)
 		return 0; /* (from Game.data) */
@@ -403,6 +408,10 @@ static int sd_close(struct _reent *r, void *fd)
 
 static int sd_stat(struct _reent *r, const char *file, struct stat *st)
 {
+	if (pack_first(file) && pack_stat(file, st) == 0) {
+		r->_errno = 0;
+		return 0;
+	}
 	int rc = sd_orig->stat_r(r, file, st);
 	if (rc != 0 && pack_stat(file, st) == 0) {
 		r->_errno = 0;
@@ -749,6 +758,9 @@ int main(int argc, char **argv)
 	read_ini(scripts, sizeof scripts);
 	const char *ext = strrchr(scripts, '.');
 	rgss_version = ext && !strcasecmp(ext, ".rvdata2") ? 3 : ext && !strcasecmp(ext, ".rvdata") ? 2 : 1;
+	/* (ruby-3ds.patch: XP / VX data's strings loaded as UTF-8) */
+	extern int mkxpz_marshal_utf8;
+	mkxpz_marshal_utf8 = rgss_version <= 2;
 	say("MKXP-Z 3DS: %s (RGSS%d)\n", dir, rgss_version);
 
 	/* Ruby's garbage collector: by default it lets 16 MB be allocated before

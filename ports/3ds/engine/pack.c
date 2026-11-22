@@ -31,6 +31,13 @@ static char *names;                 /* the index's names */
 static char game_dir[256];          /* without "sdmc:", e.g. /3ds/Changed */
 static LightLock lock;
 
+/* the pack's folders that exist as plain folders too (e.g. Changed's
+ * Audio, with the lang.txt the game writes): there a plain file comes
+ * first; elsewhere the pack is asked first (a failed open on the SD card
+ * costs several ms) */
+static char **plain_dirs;
+static int nplain_dirs;
+
 /* files opened from the pack (newlib's fileStruct of each -> its state) */
 #define PACK_OPEN 48
 static struct { void *fd; int entry; u32 pos; } open_files[PACK_OPEN];
@@ -167,7 +174,30 @@ void pack_init(const void *sd_devoptab)
 		p += nl;
 	}
 	free(idx);
-	log_only("pack: Game.data, %d files\n", nentries);
+	/* its folders: which exist as plain folders */
+	char last[512] = "";
+	for (int i = 0; i < nentries; i++) {
+		const char *slash = strrchr(entries[i].name, '/');
+		if (!slash)
+			continue;
+		size_t dl = (size_t) (slash - entries[i].name);
+		if (dl >= sizeof last || (strlen(last) == dl && !strncmp(last, entries[i].name, dl)))
+			continue;
+		memcpy(last, entries[i].name, dl);
+		last[dl] = 0;
+		struct stat st;
+		struct _reent r2 = { 0 };
+		if (sd->stat_r && sd->stat_r(&r2, last, &st) == 0) {
+			char **nd = realloc(plain_dirs, sizeof *nd * (nplain_dirs + 1));
+			if (nd && (nd[nplain_dirs] = strdup(last))) {
+				plain_dirs = nd;
+				nplain_dirs++;
+			} else if (nd) {
+				plain_dirs = nd;
+			}
+		}
+	}
+	log_only("pack: Game.data, %d files (%d folders also plain)\n", nentries, nplain_dirs);
 }
 
 static int slot_of(void *fd)
@@ -179,6 +209,45 @@ static int slot_of(void *fd)
 }
 
 bool pack_is(void *fd) { return pack_fs && slot_of(fd) >= 0; }
+
+/* the game writes a file: its folder is a plain one from now on (a file
+ * of the pack written over is read from the SD card then) */
+void pack_note_write(const char *path)
+{
+	char name[512];
+	if (!pack_fs || !pack_name(path, name, sizeof name))
+		return;
+	char *slash = strrchr(name, '/');
+	if (!slash)
+		return;
+	*slash = 0;
+	for (int i = 0; i < nplain_dirs; i++)
+		if (!strcmp(plain_dirs[i], name))
+			return;
+	char **nd = realloc(plain_dirs, sizeof *nd * (nplain_dirs + 1));
+	if (!nd)
+		return;
+	plain_dirs = nd;
+	if ((nd[nplain_dirs] = strdup(name)))
+		nplain_dirs++;
+}
+
+/* a path to read from the pack without asking the SD card first: in the
+ * pack, and its folder isn't a plain one too */
+bool pack_first(const char *path)
+{
+	char name[512];
+	if (!pack_fs || !pack_name(path, name, sizeof name) || find(name) < 0)
+		return false;
+	const char *slash = strrchr(name, '/');
+	if (!slash)
+		return false; /* (the game folder itself: plain) */
+	size_t dl = (size_t) (slash - name);
+	for (int i = 0; i < nplain_dirs; i++)
+		if (strlen(plain_dirs[i]) == dl && !strncmp(plain_dirs[i], name, dl))
+			return false;
+	return true;
+}
 
 /* opening for reading a file that isn't there as a plain file; 0: from
  * the pack, -1: not in it either (r->_errno as it was) */

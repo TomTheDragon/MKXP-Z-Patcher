@@ -53,6 +53,7 @@ typedef struct Bitmap_ {
 	char *file;
 	unsigned file_version;
 	bool dropped;
+	bool keep_px;    /* its pixels were needed again (a blt source): not let go of right after the upload */
 	struct Bitmap_ *lru_prev, *lru_next;
 	/* window contents with sharp text (settings: "Window text"): draw_text
 	 * only records the text; it's drawn at the top screen's resolution on
@@ -91,6 +92,7 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
 /* rows y0 .. y1-1 of a big .mkxi without reading the rest (false: not
  * possible for this image: then bitmap_stream_file) */
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
+void gpu_preload_begin(void);
 void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
 /* pack.c: the game's files in Game.data */
 struct _reent;
@@ -98,6 +100,8 @@ struct stat;
 void pack_init(const void *sd_devoptab);
 bool pack_active(void);
 bool pack_is(void *fd);
+bool pack_first(const char *path);
+void pack_note_write(const char *path);
 int pack_open(struct _reent *r, void *fileStruct, const char *path, int flags);
 int pack_close(void *fd);
 long pack_read(struct _reent *r, void *fd, char *ptr, size_t len);

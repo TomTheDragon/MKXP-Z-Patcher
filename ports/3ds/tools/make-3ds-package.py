@@ -3,7 +3,7 @@
 
     make-3ds-package.py [--icon <picture>] <game folder> <mkxpz.3dsx> <output folder>
 
-The output folder (made new; copy it into sdmc:/3ds/) gets:
+The output folder (made new; copy it into sdmc:/3ds/mkxpz/) gets:
   <Title>.3dsx   the engine with the game's title and icon (make-package.py)
   Game.data     the game's files in one pack, read by the engine directly:
                  Data, Graphics (images as .mkxi, convert-images.py; no
