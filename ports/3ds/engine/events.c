@@ -190,6 +190,195 @@ static VALUE fast_on_screen(VALUE self)
 	return xin && yin ? Qtrue : Qfalse;
 }
 
+/* "Anti Lag VX"'s per-frame loops: Game_Event#update (with update?) and
+ * Spriteset_Map#update_characters, calling the native on_screen, event and
+ * sprite updates directly (each ~2 us less than a Ruby call, 3-4 calls per
+ * event every frame). Only for classes boot.rb confirms (mkxpz_antilag_ok?):
+ * that their methods resolve to exactly these native ones, and that
+ * on_old / on_new / character are plain accessors; else a Ruby call. */
+VALUE mkxpz_sprite_update_vx(VALUE sprite); /* scene.c */
+VALUE mkxpz_event_update_vx(VALUE event);
+static ID id_antilag_ok, id_slow_antilag_update, id_slow_update_characters, id_on_screen, id_update_q,
+	id_pre_antilag_update, id_update, id_on_old_set, iv_ignore_update, iv_allow_screen_ignore, iv_force_update,
+	iv_move_route_forcing, iv_character_sprites, iv_character, iv_on_old, iv_on_new;
+enum { A_EVENT, A_ATTRS, A_SPRITE, A_COUNT };
+static const char *const antilag_kinds[A_COUNT] = { "event", "attrs", "sprite" };
+static struct { VALUE klass; int kind; bool ok; } acache[48];
+static int nacache;
+
+static bool antilag_ok(VALUE obj, int kind)
+{
+	if (RB_SPECIAL_CONST_P(obj))
+		return false;
+	VALUE klass = CLASS_OF(obj);
+	if (FL_TEST(klass, FL_SINGLETON))
+		return false;
+	for (int i = 0; i < nacache; i++)
+		if (acache[i].klass == klass && acache[i].kind == kind)
+			return acache[i].ok;
+	bool ok = RTEST(rb_funcall(Qnil, id_antilag_ok, 2, klass, ID2SYM(rb_intern(antilag_kinds[kind]))));
+	if (nacache < (int) (sizeof acache / sizeof *acache)) {
+		rb_gc_register_mark_object(klass);
+		acache[nacache].klass = klass;
+		acache[nacache].kind = kind;
+		acache[nacache++].ok = ok;
+	}
+	return ok;
+}
+
+static VALUE on_screen_of(VALUE chr)
+{
+	return antilag_ok(chr, A_EVENT) ? fast_on_screen(chr) : rb_funcall(chr, id_on_screen, 0);
+}
+
+/* def update; if update?; pre_antilag_update; end; end */
+static VALUE fast_antilag_update(VALUE self)
+{
+	if (!antilag_ok(self, A_EVENT))
+		return rb_funcall(self, id_slow_antilag_update, 0);
+	/* update?: ignore = ((not @ignore_update) and (on_screen and @allow_screen_ignore))
+	 *          @force_update or ignore or @move_route_forcing */
+	bool ignore = false;
+	if (!RTEST(IV(self, iv_ignore_update))) {
+		VALUE on = fast_on_screen(self);
+		ignore = RTEST(on) && RTEST(IV(self, iv_allow_screen_ignore));
+	}
+	if (RTEST(IV(self, iv_force_update)) || ignore || RTEST(IV(self, iv_move_route_forcing)))
+		return mkxpz_event_update_vx(self);
+	return Qnil;
+}
+
+/* for sprite in @character_sprites
+ *   on = sprite.character.on_screen
+ *   sprite.update if on || sprite.character.on_old = true
+ *   sprite.character.on_old = sprite.character.on_new
+ * end */
+static VALUE fast_update_characters(VALUE self)
+{
+	VALUE list = IV(self, iv_character_sprites);
+	if (!RB_TYPE_P(list, T_ARRAY))
+		return rb_funcall(self, id_slow_update_characters, 0);
+	for (long i = 0; i < RARRAY_LEN(list); i++) {
+		VALUE sprite = RARRAY_AREF(list, i);
+		bool direct = antilag_ok(sprite, A_SPRITE);
+		VALUE chr = direct ? IV(sprite, iv_character) : rb_funcall(sprite, rb_intern("character"), 0);
+		bool attrs = antilag_ok(chr, A_ATTRS);
+		VALUE on = on_screen_of(chr);
+		if (!RTEST(on)) {
+			if (attrs)
+				rb_ivar_set(chr, iv_on_old, Qtrue);
+			else
+				rb_funcall(chr, id_on_old_set, 1, Qtrue);
+		}
+		if (direct)
+			mkxpz_sprite_update_vx(sprite);
+		else
+			rb_funcall(sprite, id_update, 0);
+		if (!direct)
+			chr = rb_funcall(sprite, rb_intern("character"), 0);
+		else
+			chr = IV(sprite, iv_character);
+		if (antilag_ok(chr, A_ATTRS))
+			rb_ivar_set(chr, iv_on_old, IV(chr, iv_on_new));
+		else
+			rb_funcall(chr, id_on_old_set, 1, rb_funcall(chr, rb_intern("on_new"), 0));
+	}
+	return list;
+}
+
+/* Game_Map#update_events (VX's standard): each event's update called
+ * directly when it is one of the engine's (event_update_kind: which one
+ * Game_Event#update is), the common events in Ruby */
+VALUE rb_hash_values(VALUE hash); /* (Ruby's hash.c; only in its internal headers) */
+static int event_update_kind; /* 0 Ruby, 1 "Anti Lag VX"'s (events.c), 2 VX's (scene.c) */
+static ID id_slow_update_events, iv_events, iv_common_events, id_events_direct_ok;
+static VALUE event_update_class;
+
+static VALUE update_event(VALUE e)
+{
+	if (event_update_kind && !RB_SPECIAL_CONST_P(e) && CLASS_OF(e) == event_update_class)
+		return event_update_kind == 1 ? fast_antilag_update(e) : mkxpz_event_update_vx(e);
+	return rb_funcall(e, id_update, 0);
+}
+
+static VALUE fast_update_events(VALUE self)
+{
+	VALUE ev = IV(self, iv_events), ce = IV(self, iv_common_events);
+	if (!RB_TYPE_P(ev, T_HASH) || !RB_TYPE_P(ce, T_HASH))
+		return rb_funcall(self, id_slow_update_events, 0);
+	VALUE list = rb_hash_values(ev); /* (a snapshot, as @events.values) */
+	for (long i = 0; i < RARRAY_LEN(list); i++)
+		update_event(RARRAY_AREF(list, i));
+	list = rb_hash_values(ce);
+	for (long i = 0; i < RARRAY_LEN(list); i++)
+		rb_funcall(RARRAY_AREF(list, i), id_update, 0);
+	RB_GC_GUARD(list);
+	return Qnil;
+}
+
+/* Game_Interpreter#setup_starting_event (VX's standard): the event loop
+ * (each event's @starting) in C; refresh, a reserved common event and
+ * the autorun common events in Ruby (mkxpz_setup_starting_rest) */
+static ID id_slow_setup_starting, id_setup_starting_rest, id_start_event, iv_need_refresh, iv_starting,
+	gv_game_temp, iv_common_event_id, id_refresh;
+static VALUE starting_map_class, starting_temp_class, starting_event_class;
+
+static VALUE fast_setup_starting_event(VALUE self)
+{
+	VALUE gm = mkxpz_gvar(gv_game_map), gt = mkxpz_gvar(gv_game_temp);
+	if (RB_SPECIAL_CONST_P(gm) || CLASS_OF(gm) != starting_map_class || RB_SPECIAL_CONST_P(gt) ||
+	    CLASS_OF(gt) != starting_temp_class)
+		return rb_funcall(self, id_slow_setup_starting, 0);
+	if (RTEST(IV(gm, iv_need_refresh)))
+		rb_funcall(gm, id_refresh, 0);
+	VALUE ce = IV(gt, iv_common_event_id);
+	if (!FIXNUM_P(ce) || FIX2LONG(ce) > 0)
+		return rb_funcall(self, id_slow_setup_starting, 0); /* (a reserved common event: all in Ruby) */
+	VALUE ev = IV(gm, iv_events);
+	if (!RB_TYPE_P(ev, T_HASH))
+		return rb_funcall(self, id_slow_setup_starting, 0);
+	VALUE list = rb_hash_values(ev);
+	for (long i = 0; i < RARRAY_LEN(list); i++) {
+		VALUE e = RARRAY_AREF(list, i);
+		VALUE st = !RB_SPECIAL_CONST_P(e) && CLASS_OF(e) == starting_event_class ? IV(e, iv_starting)
+		                                                                       : rb_funcall(e, rb_intern("starting"), 0);
+		if (RTEST(st))
+			return rb_funcall(self, id_start_event, 1, e); /* clear_starting; setup(event.list, event.id) */
+	}
+	RB_GC_GUARD(list);
+	return rb_funcall(self, id_setup_starting_rest, 0);
+}
+
+static VALUE fast_install_vx_map_loops(VALUE self, VALUE map_class, VALUE interp_class, VALUE temp_class,
+                                       VALUE event_class, VALUE kind)
+{
+	(void) self;
+	event_update_kind = NUM2INT(kind);
+	event_update_class = event_class;
+	rb_gc_register_mark_object(event_class);
+	if (RTEST(map_class))
+		rb_define_method(map_class, "update_events", fast_update_events, 0);
+	if (RTEST(interp_class)) {
+		starting_map_class = rb_obj_class(mkxpz_gvar(gv_game_map)) == rb_cNilClass ? map_class
+		                                                                         : CLASS_OF(mkxpz_gvar(gv_game_map));
+		starting_temp_class = temp_class;
+		starting_event_class = event_class;
+		rb_gc_register_mark_object(temp_class);
+		rb_define_method(interp_class, "setup_starting_event", fast_setup_starting_event, 0);
+	}
+	return Qtrue;
+}
+
+static VALUE fast_install_antilag_loops(VALUE self, VALUE event_class, VALUE spriteset_class)
+{
+	(void) self;
+	if (RTEST(event_class))
+		rb_define_method(event_class, "update", fast_antilag_update, 0);
+	if (RTEST(spriteset_class))
+		rb_define_method(spriteset_class, "update_characters", fast_update_characters, 0);
+	return Qtrue;
+}
+
 static VALUE fast_install_antilag(VALUE self, VALUE event_class, VALUE map_class)
 {
 	(void) self;
@@ -218,5 +407,19 @@ void init_events(void)
 	I(iv_yov, "@y_offscreen_value"); I(iv_xos, "@x_offscreen_squares"); I(iv_yos, "@y_offscreen_squares");
 	I(iv_display_x, "@display_x"); I(iv_display_y, "@display_y"); I(gv_game_map, "$game_map");
 	rb_define_global_function("mkxpz_fast_install_antilag", fast_install_antilag, 2);
+	I(id_antilag_ok, "mkxpz_antilag_ok?"); I(id_slow_antilag_update, "mkxpz_slow_antilag_update");
+	I(id_slow_update_characters, "mkxpz_slow_update_characters"); I(id_on_screen, "on_screen");
+	I(id_update_q, "update?"); I(id_pre_antilag_update, "pre_antilag_update"); I(id_update, "update");
+	I(id_on_old_set, "on_old="); I(iv_ignore_update, "@ignore_update"); I(iv_allow_screen_ignore, "@allow_screen_ignore");
+	I(iv_force_update, "@force_update"); I(iv_move_route_forcing, "@move_route_forcing");
+	I(iv_character_sprites, "@character_sprites"); I(iv_character, "@character"); I(iv_on_old, "@on_old");
+	I(iv_on_new, "@on_new");
+	rb_define_global_function("mkxpz_fast_install_antilag_loops", fast_install_antilag_loops, 2);
+	I(id_slow_update_events, "mkxpz_slow_update_events"); I(iv_events, "@events"); I(iv_common_events, "@common_events");
+	I(id_events_direct_ok, "mkxpz_events_direct_ok?"); I(id_slow_setup_starting, "mkxpz_slow_setup_starting_event");
+	I(id_setup_starting_rest, "mkxpz_setup_starting_rest"); I(id_start_event, "mkxpz_start_event");
+	I(iv_need_refresh, "@need_refresh"); I(iv_starting, "@starting"); I(gv_game_temp, "$game_temp");
+	I(iv_common_event_id, "@common_event_id"); I(id_refresh, "refresh");
+	rb_define_global_function("mkxpz_fast_install_vx_map_loops", fast_install_vx_map_loops, 5);
 #undef I
 }

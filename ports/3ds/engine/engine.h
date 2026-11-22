@@ -253,6 +253,9 @@ VALUE mkxpz_ivar(VALUE obj, ID id, IvCache *c);
 VALUE mkxpz_gvar(ID id);
 VALUE mkxpz_frame_class_name(VALUE frame, bool *singleton);
 #define IV(obj, id) ({ static IvCache iv_c_; mkxpz_ivar((obj), (id), &iv_c_); })
+/* setting one the same way (the slot cached; else rb_ivar_set) */
+void mkxpz_ivar_set(VALUE obj, ID id, VALUE val, IvCache *c);
+#define IVSET(obj, id, val) ({ static IvCache iv_s_; mkxpz_ivar_set((obj), (id), (val), &iv_s_); })
 int graphics_frame(void);
 unsigned stack_used_kb(void); /* main.c: most of the main stack ever used */ /* graphics.c: Graphics.frame_count */
 /* profile.c (file mkxpz-profile) */

@@ -402,6 +402,16 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (num_equal and the VM's opt_eq/opt_neq) instead of going through the
   recursion guard. Changed's lab map (269 events, Azahar): 24.5 -> 9.8 ms
   of Ruby per frame; the console was about 110 ms before.
+- More VX in C: Game_Event#update for standing events (scene.c
+  fast_event_update_vx, installed under each name holding VX's standard
+  method, e.g. "Anti Lag VX"'s pre_antilag_update), "Anti Lag VX"'s
+  Game_Event#update / update? and Spriteset_Map#update_characters, VX's
+  Game_Map#update_events and Game_Interpreter#setup_starting_event
+  (events.c; the native updates called directly for classes boot.rb
+  confirms). IVSET: instance variables set in their cached slot.
+  Checked with seeded runs (native against mkxpz-no-fast: the events'
+  state, variables and switches every 60 frames identical over 1800
+  frames). Changed's boss room (457 events): 7.8-11.1 -> 3.7-4.9 ms.
 - Games without a "Main" section (scripts from files through a loader,
   e.g. Changed with the RGSS Script Editor loader): boot.rb's preparations
   (and mkxpz-test.rb) run at the first Graphics.update / freeze /

@@ -355,7 +355,26 @@ MKXPZ_STOCK_VX = {
   'Game_Character#transparent' => :attr,
   'Game_Character#animation_id' => :attr,
   'Game_Character#balloon_id' => :attr,
+  'Game_Event#update' => 1817010945,
+  'Game_Event#check_event_trigger_auto' => 1741691701,
+  'Game_Character#update' => 4099721432,
+  'Game_Character#update_stop' => 2946147759,
+  'Game_Character#update_self_movement' => 792687214,
+  'Game_Character#update_animation' => 1040953005,
+  'Game_Character#jumping?' => 1865662889,
+  'Game_Character#moving?' => 3734878286,
+  'Game_Character#dash?' => 1832952089,
   'Game_Event#on_screen' => 1066362925, # ("Anti Lag VX" by Anaryu)
+  'Game_Map#update_events' => 2215309251,
+  'Game_Interpreter#setup_starting_event' => 796049156,
+  'Game_Map#events' => :attr,
+  'Game_Map#need_refresh' => :attr,
+  'Game_Temp#common_event_id' => :attr,
+  'Game_Event#starting' => :attr,
+  'Game_Event#update?' => 4171932450, # ("Anti Lag VX")
+  'Game_Character#on_old=' => :attr,
+  'Game_Character#on_new' => :attr,
+  'Sprite_Character#character' => :attr,
   'Game_Map#display_x' => :attr,
   'Game_Map#display_y' => :attr,
   'RPG::Map#scroll_type' => :rpg,
@@ -376,6 +395,9 @@ MKXPZ_FAST_NEEDS_VX = {
   character: %w[screen_x screen_y screen_z object? tile_id character_name character_index pattern direction opacity
                 blend_type bush_depth transparent animation_id balloon_id],
   map: %w[adjust_x adjust_y loop_horizontal? loop_vertical?],
+  # (Game_Character#update itself: checked once at setup, Game_Event's own
+  # update may be a script's wrapper around the standard one)
+  event_update: %w[check_event_trigger_auto update_stop update_self_movement update_animation jumping? moving? dash?],
 }
 
 def mkxpz_stock_table
@@ -431,6 +453,132 @@ rescue StandardError => e
   mkxpz_log("character sprites: Ruby (#{e.class}: #{e.message})")
 ensure
   mkxpz_fast_setup_antilag
+  mkxpz_fast_setup_event_update_vx
+  mkxpz_fast_setup_antilag_loops
+  mkxpz_fast_setup_vx_map_loops
+end
+
+# VX's Game_Map#update_events and Game_Interpreter#setup_starting_event in
+# C (events.c): every event's update called directly when it's one of the
+# engine's, the events' @starting read in C
+def mkxpz_fast_setup_vx_map_loops
+  return unless defined?(Game_Map) && defined?(Game_Interpreter) && defined?(Game_Temp) && defined?(Game_Event)
+  kind = 0
+  if mkxpz_native?(Game_Event, :update, Game_Event)
+    kind = $mkxpz_event_update_native || 0
+  end
+  um = mkxpz_stock?(Game_Map, :update_events)
+  ss = mkxpz_stock?(Game_Interpreter, :setup_starting_event) && mkxpz_stock?(Game_Map, :events) &&
+       mkxpz_stock?(Game_Map, :need_refresh) && mkxpz_stock?(Game_Temp, :common_event_id) &&
+       mkxpz_stock?(Game_Event, :starting)
+  return unless um || ss
+  Game_Map.send(:alias_method, :mkxpz_slow_update_events, :update_events) if um
+  if ss
+    Game_Interpreter.class_eval do
+      alias_method :mkxpz_slow_setup_starting_event, :setup_starting_event
+      def mkxpz_start_event(event)
+        event.clear_starting
+        setup(event.list, event.id)
+      end
+      # the end of the standard setup_starting_event: autorun common events
+      def mkxpz_setup_starting_rest
+        for event in $data_common_events.compact
+          if event.trigger == 1 and $game_switches[event.switch_id] == true
+            setup(event.list)
+            return
+          end
+        end
+      end
+    end
+  end
+  temp = $game_temp ? $game_temp.class : Game_Temp
+  mkxpz_fast_install_vx_map_loops(um ? Game_Map : nil, ss ? Game_Interpreter : nil, temp, Game_Event, kind)
+  mkxpz_log("map loops: native#{' update_events' if um}#{' setup_starting_event' if ss} (event update kind #{kind})")
+rescue StandardError => e
+  mkxpz_log("map loops: Ruby (#{e.class}: #{e.message})")
+end
+
+# the checksum of a method's text (nil: no Ruby text to read)
+def mkxpz_crc_of(klass, name)
+  m = klass.instance_method(name)
+  file, line = m.source_location
+  script = mkxpz_script_text(file) or return nil
+  text = mkxpz_method_text(script, line) or return nil
+  Zlib.crc32(mkxpz_norm(text))
+rescue NameError
+  nil
+end
+
+# a method of the engine's (C, no source) defined right in owner
+def mkxpz_native?(klass, name, owner)
+  m = klass.instance_method(name)
+  m.source_location.nil? && m.owner == owner
+rescue NameError
+  false
+end
+
+# (asked by events.c for each class its "Anti Lag VX" loops meet)
+def mkxpz_antilag_ok?(klass, kind)
+  case kind
+  when :event
+    klass <= Game_Event && mkxpz_native?(klass, :on_screen, Game_Event) &&
+      mkxpz_native?(klass, :pre_antilag_update, Game_Event) && mkxpz_stock?(klass, :update?)
+  when :attrs
+    klass <= Game_Character && mkxpz_stock?(klass, :on_old=) && mkxpz_stock?(klass, :on_new)
+  when :sprite
+    klass <= Sprite_Character && mkxpz_native?(klass, :update, Sprite_Character) && mkxpz_stock?(klass, :character)
+  else
+    false
+  end
+rescue StandardError
+  false
+end
+
+# "Anti Lag VX"'s Game_Event#update and Spriteset_Map#update_characters in C
+# (events.c), with its own checksums (Game_Event#update in the table is
+# VX's standard one, which the script keeps as pre_antilag_update)
+def mkxpz_fast_setup_antilag_loops
+  return unless defined?(Game_Event) && defined?(Spriteset_Map)
+  ev = mkxpz_native?(Game_Event, :pre_antilag_update, Game_Event) &&
+       mkxpz_native?(Game_Event, :on_screen, Game_Event) &&
+       mkxpz_crc_of(Game_Event, :update) == 3260872479 && mkxpz_stock?(Game_Event, :update?)
+  ss = Spriteset_Map.method_defined?(:update_characters) &&
+       mkxpz_crc_of(Spriteset_Map, :update_characters) == 2370451155
+  return unless ev || ss
+  Game_Event.send(:alias_method, :mkxpz_slow_antilag_update, :update) if ev
+  Spriteset_Map.send(:alias_method, :mkxpz_slow_update_characters, :update_characters) if ss
+  mkxpz_fast_install_antilag_loops(ev ? Game_Event : nil, ss ? Spriteset_Map : nil)
+  $mkxpz_event_update_native = 1 if ev
+  mkxpz_log("anti lag: native#{' event update' if ev}#{' sprite loop' if ss}")
+rescue StandardError => e
+  mkxpz_log("anti lag loops: Ruby (#{e.class}: #{e.message})")
+end
+
+# Game_Event#update for standing events in C (scene.c fast_event_update_vx),
+# under every name holding VX's standard Game_Event#update ("Anti Lag VX"
+# keeps it as pre_antilag_update and calls it from its own update)
+def mkxpz_fast_setup_event_update_vx
+  return unless defined?(Game_Event) && Game_Event.superclass == Game_Character
+  names = (Game_Event.instance_methods(false) + Game_Event.private_instance_methods(false)).select do |n|
+    m = Game_Event.instance_method(n)
+    m.original_name == :update && m.owner == Game_Event && mkxpz_stock?(Game_Event, n)
+  end
+  return mkxpz_log('events: Ruby update (not the standard VX method)') if names.empty?
+  return mkxpz_log('events: Ruby update (methods changed)') unless mkxpz_fast_ok?(Game_Event, :event_update) &&
+                                                                     mkxpz_stock?(Game_Character, :update)
+  Game_Event.class_eval do
+    alias_method :mkxpz_slow_event_update, names.first
+    # the end of the standard Game_Event#update (its event script)
+    def mkxpz_update_interpreter
+      @interpreter.setup(@list, @event.id) unless @interpreter.running?
+      @interpreter.update
+    end
+  end
+  names.each { |n| mkxpz_fast_install_event_update_vx(Game_Event, n.to_s) }
+  $mkxpz_event_update_native = 2 if names.include?(:update)
+  mkxpz_log("events: native update (VX: #{names.join(', ')})")
+rescue StandardError => e
+  mkxpz_log("events: Ruby update (#{e.class}: #{e.message})")
 end
 
 # "Anti Lag VX": Game_Event#on_screen in C (events.c)

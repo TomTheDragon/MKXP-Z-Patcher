@@ -43,6 +43,32 @@ VALUE mkxpz_ivar(VALUE obj, ID id, IvCache *c)
 	return v == Qundef ? Qnil : v;
 }
 
+/* setting a plain object's instance variable in its slot (with the write
+ * barrier); anything else (a new variable, frozen, C objects): rb_ivar_set */
+void mkxpz_ivar_set(VALUE obj, ID id, VALUE val, IvCache *c)
+{
+	if (RB_SPECIAL_CONST_P(obj) || RB_BUILTIN_TYPE(obj) != T_OBJECT || RB_OBJ_FROZEN_RAW(obj)) {
+		rb_ivar_set(obj, id, val);
+		return;
+	}
+	VALUE klass = RBASIC(obj)->klass;
+	if (c->klass != klass) {
+		st_table *t = RCLASS_IV_INDEX_TBL(rb_obj_class(obj));
+		st_data_t ent;
+		if (!t || !st_lookup(t, (st_data_t) id, &ent)) {
+			rb_ivar_set(obj, id, val);
+			return;
+		}
+		c->klass = klass;
+		c->index = ((struct rb_iv_index_tbl_entry *) ent)->index;
+	}
+	if (c->index >= ROBJECT_NUMIV(obj)) {
+		rb_ivar_set(obj, id, val);
+		return;
+	}
+	RB_OBJ_WRITE(obj, &ROBJECT_IVPTR(obj)[c->index], val);
+}
+
 /* the class a profiler frame (from rb_profile_frames) belongs to, without
  * allocating anything (rb_profile_frame_classpath copies the name, and the
  * profiler's job must not make Ruby objects: see profile.c): its name

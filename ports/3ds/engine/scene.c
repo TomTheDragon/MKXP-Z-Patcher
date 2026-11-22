@@ -1035,6 +1035,9 @@ static VALUE fast_update_vx(VALUE self)
 	return Qnil;
 }
 
+/* (events.c: "Anti Lag VX"'s loops call these directly) */
+VALUE mkxpz_sprite_update_vx(VALUE sprite) { return fast_update_vx(sprite); }
+
 static VALUE fast_install_vx(VALUE self, VALUE klass)
 {
 	(void) self;
@@ -1139,6 +1142,80 @@ static VALUE fast_event_update(VALUE self)
 	return Qnil;
 }
 
+/* --- the same for RPG Maker VX (RGSS2): Game_Event#update with
+ * Game_Character#update, update_stop, update_self_movement and
+ * update_animation, for an event standing still (not jumping, @real_x ==
+ * @x * 256 ...). A step (move_type_*), a custom route and the event's
+ * script run in Ruby. Installed under each name that holds VX's standard
+ * Game_Event#update (Changed's "Anti Lag VX" calls it as
+ * pre_antilag_update). */
+static ID iv_wait_count;
+
+static VALUE fast_event_update_vx(VALUE self)
+{
+	VALUE gm = mkxpz_gvar(id_game_map);
+	if (!fast_ok(CLASS_OF(self), 3) || RB_SPECIAL_CONST_P(gm))
+		return rb_funcall(self, id_slow_event_update, 0);
+	VALUE jc = IV(self, iv_jump_count), rx = IV(self, iv_real_x), ry = IV(self, iv_real_y);
+	VALUE x = IV(self, iv_x), y = IV(self, iv_y), pat = IV(self, iv_pattern), opat = IV(self, iv_original_pattern);
+	VALUE ms = IV(self, iv_move_speed), sc = IV(self, iv_stop_count), wc = IV(self, iv_wait_count);
+	Num ac;
+	if (!FIXNUM_P(jc) || FIX2LONG(jc) > 0 || !FIXNUM_P(rx) || !FIXNUM_P(ry) || !FIXNUM_P(x) || !FIXNUM_P(y) ||
+	    FIX2LONG(rx) != FIX2LONG(x) * 256 || FIX2LONG(ry) != FIX2LONG(y) * 256 || !FIXNUM_P(pat) ||
+	    !FIXNUM_P(opat) || !FIXNUM_P(ms) || !FIXNUM_P(sc) || !FIXNUM_P(wc) || !num_of(IV(self, iv_anime_count), &ac))
+		return rb_funcall(self, id_slow_event_update, 0);
+	/* update_stop */
+	if (RTEST(IV(self, iv_step_anime)))
+		IVSET(self, iv_anime_count, num_value(num_addi(ac, 1)));
+	else if (FIX2LONG(pat) != FIX2LONG(opat))
+		IVSET(self, iv_anime_count, DBL2NUM(num_d(ac) + 1.5));
+	if (!RTEST(IV(self, iv_locked)))
+		IVSET(self, iv_stop_count, LONG2NUM(FIX2LONG(sc) + 1));
+	/* wait, custom route, or update_self_movement */
+	if (FIX2LONG(wc) > 0) {
+		IVSET(self, iv_wait_count, LONG2NUM(FIX2LONG(wc) - 1));
+	} else if (RTEST(IV(self, iv_move_route_forcing))) {
+		rb_funcall(self, id_move_type[3], 0);
+	} else if (!RTEST(IV(self, iv_locked))) {
+		VALUE sc2 = IV(self, iv_stop_count), mf = IV(self, iv_move_frequency), mt = IV(self, iv_move_type);
+		if (!FIXNUM_P(sc2) || !FIXNUM_P(mf) || !FIXNUM_P(mt))
+			rb_funcall(self, rb_intern("update_self_movement"), 0);
+		else if (FIX2LONG(sc2) > 30 * (5 - FIX2LONG(mf)) && FIX2LONG(mt) >= 1 && FIX2LONG(mt) <= 3)
+			rb_funcall(self, id_move_type[FIX2LONG(mt)], 0);
+	}
+	/* update_animation (dash? is false for events): values read again, a
+	 * step above may have changed them */
+	VALUE ms2 = IV(self, iv_move_speed), pat2 = IV(self, iv_pattern), opat2 = IV(self, iv_original_pattern);
+	VALUE sc3 = IV(self, iv_stop_count);
+	Num ac2;
+	if (!FIXNUM_P(ms2) || !FIXNUM_P(pat2) || !FIXNUM_P(sc3) || !num_of(IV(self, iv_anime_count), &ac2)) {
+		rb_funcall(self, rb_intern("update_animation"), 0);
+	} else if (num_lt((Num) { false, 18 - FIX2LONG(ms2) * 2, 0 }, ac2)) {
+		if (!RTEST(IV(self, iv_step_anime)) && FIX2LONG(sc3) > 0)
+			IVSET(self, iv_pattern, opat2);
+		else
+			IVSET(self, iv_pattern, LONG2NUM(floor_mod(FIX2LONG(pat2) + 1, 4)));
+		IVSET(self, iv_anime_count, INT2FIX(0));
+	}
+	/* check_event_trigger_auto */
+	VALUE tr = IV(self, iv_trigger);
+	if (FIXNUM_P(tr) ? tr == INT2FIX(3) : rb_equal(tr, INT2FIX(3)))
+		rb_funcall(self, id_start, 0);
+	/* the event's script (parallel) */
+	if (!NIL_P(IV(self, iv_interpreter)))
+		return rb_funcall(self, id_update_interpreter, 0);
+	return Qnil;
+}
+
+VALUE mkxpz_event_update_vx(VALUE event) { return fast_event_update_vx(event); }
+
+static VALUE fast_install_event_update_vx(VALUE self, VALUE klass, VALUE name)
+{
+	(void) self;
+	rb_define_method(klass, StringValueCStr(name), fast_event_update_vx, 0);
+	return Qtrue;
+}
+
 static VALUE fast_install_event_update(VALUE self, VALUE klass)
 {
 	(void) self;
@@ -1190,5 +1267,7 @@ void init_fast(void)
 #undef I
 	rb_define_global_function("mkxpz_fast_install", fast_install, 1);
 	rb_define_global_function("mkxpz_fast_install_vx", fast_install_vx, 1);
+	rb_define_global_function("mkxpz_fast_install_event_update_vx", fast_install_event_update_vx, 2);
+	iv_wait_count = rb_intern("@wait_count");
 	rb_define_global_function("mkxpz_fast_install_event_update", fast_install_event_update, 1);
 }
