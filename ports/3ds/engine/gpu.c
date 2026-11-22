@@ -833,8 +833,14 @@ static GpuTex *texture_of(Bitmap *b)
 			b->gpu = NULL;
 		}
 		GpuTex t = { 0 };
-		t.nx = split_axis(b->w, t.xs, b->w > 512 * MAXP ? 1024 : 512, MAXP);
-		t.ny = split_axis(b->h, t.ys, b->h > 512 * MAXP ? 1024 : 512, MAXP);
+		if (b->whole && b->w <= 1024 && b->h <= 1024) {
+			t.nx = t.ny = 1;
+			t.xs[1] = b->w;
+			t.ys[1] = b->h;
+		} else {
+			t.nx = split_axis(b->w, t.xs, b->w > 512 * MAXP ? 1024 : 512, MAXP);
+			t.ny = split_axis(b->h, t.ys, b->h > 512 * MAXP ? 1024 : 512, MAXP);
+		}
 		if (!t.nx || !t.ny)
 			return NULL; /* (over 4096 pixels) */
 		size_t need = 0;
@@ -1492,6 +1498,15 @@ static float tile_tw, tile_th, tile_alpha;
 bool gpu_tiles_begin(Canvas *c, Bitmap *b, int opacity)
 {
 	GpuTex *g = texture_of(b);
+	if (g && g->nx * g->ny != 1 && !g->sparse && !b->whole && b->w <= 1024 && b->h <= 1024) {
+		/* a tilemap draws from one texture: made again in one piece (e.g.
+		 * 512x384 was split into 512x256 and 512x128) */
+		b->whole = true;
+		live_remove(g);
+		to_trash(g);
+		b->gpu = NULL;
+		g = texture_of(b);
+	}
 	if (!g || g->nx * g->ny != 1)
 		return false;
 	if (g->repeat) {

@@ -12,7 +12,8 @@ The output folder (made new; copy it into sdmc:/3ds/) gets:
                  (extract-archive.py): nothing is decrypted on the 3DS
   Game.ini, Fonts/ and text files (.txt, .ini: games write some) as they are
 Left out: Game.exe and other programs, DLLs, the archive itself, editor
-project files, saves, the PC patcher's mkxp-z folder.
+project files, saves, zip files, hidden files, the PC patcher's mkxp-z
+folder.
 
 Pack format (engine/pack.c): "MKXPZPK1", u32 count, u32 index length;
 per file (sorted by name) u32 offset, u32 size, u16 name length, the name
@@ -38,7 +39,8 @@ def tool(name):
     return mod
 
 
-SKIP_EXT = {".exe", ".dll", ".rgssad", ".rgss2a", ".rgss3a", ".rxproj", ".rvproj", ".rvproj2", ".lnk", ".url"}
+SKIP_EXT = {".exe", ".dll", ".rgssad", ".rgss2a", ".rgss3a", ".rxproj", ".rvproj", ".rvproj2", ".lnk", ".url",
+            ".ppdb", ".zip", ".7z", ".rar"}
 PLAIN_EXT = {".txt", ".ini", ".cfg", ".json"}
 SKIP_DIRS = {"mkxp-z"}
 
@@ -68,6 +70,8 @@ def main():
         for name in sorted(os.listdir(game)):
             src = os.path.join(game, name)
             low = name.lower()
+            if name.startswith("."):
+                continue
             if os.path.isdir(src):
                 if low not in SKIP_DIRS:
                     shutil.copytree(src, os.path.join(stage, name))

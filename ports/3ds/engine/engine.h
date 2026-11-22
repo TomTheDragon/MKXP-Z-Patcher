@@ -71,6 +71,7 @@ typedef struct Bitmap_ {
 	uint32_t *blk;
 	int nblk, blk_max;
 	bool lz_tried;
+	bool whole;      /* texture in one piece (a tilemap uses it) */
 	int mkxi_version; /* (of the kept data: 1 rows, 2 tiles of blk_max; blk: offset, length pairs) */
 } Bitmap;
 typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;

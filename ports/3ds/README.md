@@ -453,6 +453,12 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   serve a read-only file from the pack when it isn't a plain file (plain
   files first: the game's own writes); files.c listings add the pack's
   names. The pack is read through sdmc's own functions under a lock.
+- Tilemap bitmaps need one texture: gpu_tiles_begin remakes a split
+  texture whole (Bitmap.whole; 512x384 A1/A2 were split 256+128 and the
+  map stayed black).
+- Fonts are found by FreeType's family, "family style", and the name
+  table's Windows family (1) and full name (4) (RGSS games ask for the
+  Windows names, e.g. "Noto Sans S Chinese Medium").
 - Packaging: `tools/make-package.py [--icon <picture>] <game> <mkxpz.3dsx>
   [<out>]` writes `<Title>.3dsx` with the game's title (Game.ini) and
   Game.exe's icon (48x48) in the SMDH (replaced in place: the 3DSX

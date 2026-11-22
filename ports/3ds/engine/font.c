@@ -5,6 +5,8 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_SYNTHESIS_H
+#include FT_SFNT_NAMES_H
+#include FT_TRUETYPE_IDS_H
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,10 @@ VALUE cFont;
 
 typedef struct {
 	char family[64];
+	/* other names it's asked for by (Windows: the legacy family and full
+	 * name, e.g. "Noto Sans S Chinese Medium" for the family "Noto Sans S
+	 * Chinese" in the style "Medium") */
+	char other[3][64];
 	char path[256];
 	FT_Face face; /* opened when first used */
 } FontFile;
@@ -38,6 +44,32 @@ static void scan_dir(const char *dir)
 		if (FT_New_Face(ft, f->path, 0, &face))
 			continue;
 		snprintf(f->family, sizeof f->family, "%s", face->family_name ? face->family_name : "");
+		memset(f->other, 0, sizeof f->other);
+		if (face->style_name && strcasecmp(face->style_name, "Regular"))
+			snprintf(f->other[0], sizeof f->other[0], "%s %s", f->family, face->style_name);
+		/* the name table: family (1) and full name (4), Windows entries
+		 * (UTF-16BE, only plain ASCII names) */
+		FT_UInt nn = FT_Get_Sfnt_Name_Count(face);
+		for (FT_UInt k = 0; k < nn; k++) {
+			FT_SfntName sn;
+			if (FT_Get_Sfnt_Name(face, k, &sn) || sn.platform_id != TT_PLATFORM_MICROSOFT ||
+			    (sn.name_id != TT_NAME_ID_FONT_FAMILY && sn.name_id != TT_NAME_ID_FULL_NAME))
+				continue;
+			char buf[64];
+			size_t o = 0;
+			bool ascii = true;
+			for (FT_UInt b = 0; b + 1 < sn.string_len && o + 1 < sizeof buf; b += 2) {
+				if (sn.string[b] || sn.string[b + 1] >= 0x80)
+					ascii = false;
+				buf[o++] = (char) sn.string[b + 1];
+			}
+			buf[o] = 0;
+			if (!ascii || !o)
+				continue;
+			char *slot = f->other[sn.name_id == TT_NAME_ID_FONT_FAMILY ? 1 : 2];
+			if (!*slot)
+				snprintf(slot, 64, "%s", buf);
+		}
 		FT_Done_Face(face);
 		nfiles++;
 	}
@@ -58,6 +90,10 @@ static FontFile *find_family(const char *name)
 	for (int i = 0; i < nfiles; i++)
 		if (!strcasecmp(files[i].family, name))
 			return &files[i];
+	for (int i = 0; i < nfiles; i++)
+		for (int k = 0; k < 3; k++)
+			if (files[i].other[k][0] && !strcasecmp(files[i].other[k], name))
+				return &files[i];
 	return NULL;
 }
 
