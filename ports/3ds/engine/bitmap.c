@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <png.h>
 #include <lz4frame.h>
+#include <lz4.h>
 #include <3ds.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -278,7 +279,9 @@ px_t *bitmap_px(Bitmap *b)
 		/* (no Ruby error from here: it may be in the middle of drawing) */
 		int state = 0;
 		reload_target = &t;
+		u64 t_load = svcGetSystemTick();
 		VALUE ok = rb_protect(reload_protected, (VALUE) b->file, &state);
+		log_slow_load("pixels again", b->file, t_load);
 		if (state)
 			rb_set_errinfo(Qnil);
 		if (!state && ok == Qtrue && t.w == w && t.h == h) {
@@ -301,6 +304,247 @@ static void bitmap_forget_file(Bitmap *b)
 	free(b->file);
 	b->file = NULL;
 	b->dropped = false;
+	free(b->lz);
+	free(b->blk);
+	b->lz = NULL;
+	b->blk = NULL;
+	b->nblk = 0;
+	b->lz_tried = false;
+}
+
+/* --- random access to a big .mkxi: its LZ4 frame has independent blocks
+ * (lz4 -B4: 64 KB each), so block k holds bytes k * 64 KB on of the pixels
+ * and can be unpacked alone. The compressed data (Changed's 3072x2048
+ * character sheets: ~130 KB for 24 MB of pixels) is kept with the image
+ * and its blocks found once; a texture piece or a blt then unpacks only
+ * the blocks with its rows instead of the whole image. */
+#define LZ_KEEP_MAX (2u * 1024 * 1024)
+
+static uint32_t le32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t) p[3] << 24; }
+
+static bool mkxi_index(Bitmap *b)
+{
+	if (b->blk)
+		return true;
+	if (b->lz_tried || !b->file || b->version != b->file_version)
+		return false;
+	b->lz_tried = true;
+	size_t l = strlen(b->file);
+	if (l < 5 || strcasecmp(b->file + l - 5, ".mkxi"))
+		return false;
+	FILE *f = fopen(b->file, "rb");
+	if (!f)
+		return false;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	unsigned char *d = size > 32 && (size_t) size <= LZ_KEEP_MAX ? malloc((size_t) size) : NULL;
+	bool ok = d && fread(d, 1, (size_t) size, f) == (size_t) size;
+	fclose(f);
+	if (ok && !memcmp(d, "MKXI", 4) && le32(d + 4) == 2 && (int) le32(d + 8) == b->w && (int) le32(d + 12) == b->h) {
+		/* version 2: tiles (convert-images.py); their table */
+		int tile = (int) le32(d + 16), n = (int) le32(d + 20);
+		int tx = tile > 0 ? (b->w + tile - 1) / tile : 0, ty = tile > 0 ? (b->h + tile - 1) / tile : 0;
+		uint32_t *blk = tile > 0 && n == tx * ty && (size_t) 24 + 8u * n <= (size_t) size ? malloc(8u * n) : NULL;
+		for (int i = 0; blk && i < n; i++) {
+			blk[2 * i] = le32(d + 24 + 8 * i);
+			blk[2 * i + 1] = le32(d + 28 + 8 * i);
+			if ((size_t) blk[2 * i] + blk[2 * i + 1] > (size_t) size) {
+				free(blk);
+				blk = NULL;
+			}
+		}
+		if (!blk) {
+			free(d);
+			return false;
+		}
+		b->lz = d;
+		b->blk = blk;
+		b->nblk = n;
+		b->blk_max = tile;
+		b->mkxi_version = 2;
+		return true;
+	}
+	if (!ok || memcmp(d, "MKXI", 4) || le32(d + 4) != 1 || (int) le32(d + 8) != b->w || (int) le32(d + 12) != b->h ||
+	    le32(d + 16) != 0x184D2204) {
+		free(d);
+		return false;
+	}
+	const unsigned char *fr = d + 16;
+	int flg = fr[4], bd = fr[5];
+	bool independent = flg & 0x20, bchk = flg & 0x10, csize = flg & 0x08, dict = flg & 0x01;
+	static const int maxes[8] = { 0, 0, 0, 0, 64 << 10, 256 << 10, 1 << 20, 4 << 20 };
+	int bmax = maxes[(bd >> 4) & 7];
+	if ((flg >> 6) != 1 || !independent || !bmax) {
+		free(d);
+		return false;
+	}
+	size_t pos = 16 + 7 + (csize ? 8 : 0) + (dict ? 4 : 0);
+	size_t total = (size_t) b->w * b->h * 4;
+	int want = (int) ((total + bmax - 1) / bmax);
+	uint32_t *blk = malloc(sizeof *blk * (size_t) (want + 1));
+	int n = 0;
+	while (blk && pos + 4 <= (size_t) size) {
+		uint32_t bs = le32(d + pos);
+		if (!bs)
+			break; /* (the end mark) */
+		if (n == want)
+			break;
+		blk[n++] = (uint32_t) pos; /* (its size word) */
+		pos += 4 + (bs & 0x7fffffff) + (bchk ? 4 : 0);
+	}
+	if (!blk || n != want || pos > (size_t) size) {
+		free(blk);
+		free(d);
+		return false;
+	}
+	b->lz = d;
+	b->blk = blk;
+	b->nblk = n;
+	b->blk_max = bmax;
+	b->mkxi_version = 1;
+	return true;
+}
+
+/* one LZ4 frame (a tile) unpacked into out (exactly want bytes) */
+static bool lz4_frame(const unsigned char *src, size_t len, unsigned char *out, size_t want)
+{
+	LZ4F_dctx *dctx;
+	if (LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION)))
+		return false;
+	size_t done = 0, pos = 0;
+	bool ok = true;
+	while (done < want && pos < len) {
+		size_t dst = want - done, sz = len - pos;
+		size_t r = LZ4F_decompress(dctx, out + done, &dst, src + pos, &sz, NULL);
+		if (LZ4F_isError(r)) {
+			ok = false;
+			break;
+		}
+		done += dst;
+		pos += sz;
+		if (r == 0)
+			break;
+	}
+	LZ4F_freeDecompressionContext(dctx);
+	return ok && done == want;
+}
+
+const px_t *bitmap_tile(Bitmap *b, int i, int j, int *tw, int *th, int *tile)
+{
+	if (!mkxi_index(b) || b->mkxi_version != 2)
+		return NULL;
+	int t = b->blk_max, tx = (b->w + t - 1) / t;
+	if (i < 0 || j < 0 || i >= tx || j * t >= b->h)
+		return NULL;
+	static px_t *buf;
+	static int buf_t;
+	if (buf_t != t) {
+		free(buf);
+		buf = malloc((size_t) t * t * 4);
+		buf_t = buf ? t : 0;
+	}
+	if (!buf)
+		return NULL;
+	*tw = b->w - i * t < t ? b->w - i * t : t;
+	*th = b->h - j * t < t ? b->h - j * t : t;
+	*tile = t;
+	int k = j * tx + i;
+	size_t want = (size_t) *tw * *th * 4;
+	if (!b->blk[2 * k + 1]) {
+		memset(buf, 0, want); /* (fully transparent: not stored) */
+		return buf;
+	}
+	if (!lz4_frame(b->lz + b->blk[2 * k], b->blk[2 * k + 1], (unsigned char *) buf, want))
+		return NULL;
+	return buf;
+}
+
+/* rows y0 .. y1-1 of a tiled image: its tile rows unpacked into a band */
+static bool tiled_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx)
+{
+	int t = b->blk_max, tx = (b->w + t - 1) / t;
+	px_t *band = malloc((size_t) b->w * t * 4);
+	if (!band)
+		return false;
+	bool ok = true;
+	for (int j = y0 / t; j * t < y1 && ok; j++) {
+		int bh = b->h - j * t < t ? b->h - j * t : t;
+		for (int i = 0; i < tx; i++) {
+			int tw, th, tt;
+			const px_t *p = bitmap_tile(b, i, j, &tw, &th, &tt);
+			if (!p) {
+				ok = false;
+				break;
+			}
+			for (int y = 0; y < th; y++)
+				memcpy(band + (size_t) y * b->w + i * t, p + (size_t) y * tw, (size_t) tw * 4);
+		}
+		if (!ok)
+			break;
+		int from = y0 > j * t ? y0 - j * t : 0, to = y1 < j * t + bh ? y1 - j * t : bh;
+		loading_tick((float) (j * t - y0) / (y1 - y0));
+		if (to > from && !rows(ctx, j * t + from, to - from, band + (size_t) from * b->w))
+			break;
+	}
+	free(band);
+	return ok;
+}
+
+bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx)
+{
+	if (y0 < 0)
+		y0 = 0;
+	if (y1 > b->h)
+		y1 = b->h;
+	if (y0 >= y1)
+		return true;
+	if (!mkxi_index(b))
+		return false;
+	if (b->mkxi_version == 2)
+		return tiled_rows(b, y0, y1, rows, ctx);
+	size_t rb = (size_t) b->w * 4, start = (size_t) y0 * rb, end = (size_t) y1 * rb, bmax = (size_t) b->blk_max;
+	unsigned char *block = malloc(bmax), *acc = malloc(bmax + rb);
+	if (!block || !acc) {
+		free(block);
+		free(acc);
+		return false;
+	}
+	size_t have = 0;
+	int y = y0;
+	bool ok = true;
+	for (size_t k = start / bmax; k < (size_t) b->nblk && k * bmax < end; k++) {
+		const unsigned char *h = b->lz + b->blk[k];
+		uint32_t bs = le32(h);
+		int n;
+		if (bs & 0x80000000u) {
+			n = (int) (bs & 0x7fffffff);
+			if ((size_t) n > bmax) { ok = false; break; }
+			memcpy(block, h + 4, (size_t) n);
+		} else {
+			n = LZ4_decompress_safe((const char *) h + 4, (char *) block, (int) bs, (int) bmax);
+			if (n < 0) { ok = false; break; }
+		}
+		size_t bstart = k * bmax, from = start > bstart ? start - bstart : 0;
+		size_t to = end < bstart + (size_t) n ? end - bstart : (size_t) n;
+		if (to > from) {
+			memcpy(acc + have, block + from, to - from);
+			have += to - from;
+		}
+		int nrows = (int) (have / rb);
+		if (nrows > 0) {
+			loading_tick((float) (y - y0) / (y1 - y0));
+			bool more = rows(ctx, y, nrows, (const px_t *) acc);
+			y += nrows;
+			memmove(acc, acc + (size_t) nrows * rb, have - (size_t) nrows * rb);
+			have -= (size_t) nrows * rb;
+			if (!more)
+				break;
+		}
+	}
+	free(block);
+	free(acc);
+	return ok;
 }
 
 static void bitmap_free(void *p)
@@ -437,6 +681,40 @@ static bool load_mkxi(Bitmap *b, const char *path)
 	uint32_t head[4];
 	if (ok)
 		memcpy(head, data, 16);
+	if (ok && !memcmp(head, "MKXI", 4) && head[1] == 2 && head[2] && head[3] && head[2] <= 8192 && head[3] <= 8192 &&
+	    size >= 24) {
+		/* tiled (version 2): each tile into its place */
+		int t = (int) le32(data + 16), n = (int) le32(data + 20);
+		int tx = t > 0 ? ((int) head[2] + t - 1) / t : 0, ty = t > 0 ? ((int) head[3] + t - 1) / t : 0;
+		bool good = t > 0 && n == tx * ty && (size_t) 24 + 8u * n <= (size_t) size;
+		px_t *tb = good ? malloc((size_t) t * t * 4) : NULL;
+		if (tb)
+			bitmap_set_size(b, head[2], head[3]);
+		for (int k = 0; tb && b->px && k < n && good; k++) {
+			int i = k % tx, j = k / tx, w = (int) head[2], h = (int) head[3];
+			int tw = w - i * t < t ? w - i * t : t, th = h - j * t < t ? h - j * t : t;
+			uint32_t off = le32(data + 24 + 8 * k), len = le32(data + 28 + 8 * k);
+			if (!len) {
+				for (int y = 0; y < th; y++)
+					memset(b->px + (size_t) (j * t + y) * w + i * t, 0, (size_t) tw * 4);
+				continue;
+			}
+			good = (size_t) off + len <= (size_t) size &&
+			       lz4_frame(data + off, len, (unsigned char *) tb, (size_t) tw * th * 4);
+			for (int y = 0; good && y < th; y++)
+				memcpy(b->px + (size_t) (j * t + y) * w + i * t, tb + (size_t) y * tw, (size_t) tw * 4);
+			loading_tick((float) k / n);
+		}
+		free(tb);
+		px_free(data, size);
+		if (!good || !b->px) {
+			if (b->px)
+				px_free(b->px, (size_t) b->w * b->h * 4);
+			b->px = NULL;
+			return false;
+		}
+		return true;
+	}
 	if (!ok || memcmp(head, "MKXI", 4) || head[1] != 1 || !head[2] || !head[3] || head[2] > 8192 || head[3] > 8192) {
 		px_free(data, size > 16 ? size : 0);
 		return false;
@@ -486,6 +764,8 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
 	size_t l = strlen(b->file);
 	if (l < 5 || strcasecmp(b->file + l - 5, ".mkxi"))
 		return false;
+	if (mkxi_index(b) && b->mkxi_version == 2)
+		return tiled_rows(b, 0, b->h, rows, ctx);
 	FILE *f = fopen(b->file, "rb");
 	if (!f)
 		return false;
@@ -590,6 +870,7 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 	if (argc == 1) {
 		const char *name = StringValueCStr(argv[0]);
 		char path[512];
+		u64 t_load = svcGetSystemTick();
 		/* (nothing else's pixels are in use while Bitmap.new loads a file:
 		 * every other file image may let go of its pixels to make room) */
 		keep_at_least = 0;
@@ -600,7 +881,7 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 		if (pl > 5 && !strcasecmp(path + pl - 5, ".mkxi")) {
 			FILE *hf = fopen(path, "rb");
 			uint32_t head[4];
-			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && head[1] == 1 && head[2] &&
+			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && (head[1] == 1 || head[1] == 2) && head[2] &&
 			    head[3] && head[2] <= 8192 && head[3] <= 8192 && (size_t) head[2] * head[3] * 4 >= 256 * 1024) {
 				b->w = (int) head[2];
 				b->h = (int) head[3];
@@ -630,6 +911,7 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 			b->file = strdup(path);
 			b->file_version = b->version;
 			lru_touch(b);
+			log_slow_load("image", name, t_load);
 		}
 		if (!loaded) {
 			/* missing (e.g. from the RTP, which isn't on the 3DS): an empty
@@ -786,7 +1068,7 @@ static bool blt_from_file(Bitmap *d, int dx, int dy, Bitmap *src, Rect sr, int o
 	if (opacity <= 0 || !clip(d, &dx, &dy, &sr, src->w, src->h))
 		return true;
 	BltRows c = { d, dx, dy, src->w, sr, opacity };
-	if (!bitmap_stream_file(src, blt_rows, &c))
+	if (!bitmap_read_rows(src, sr.y, sr.y + sr.h, blt_rows, &c) && !bitmap_stream_file(src, blt_rows, &c))
 		return false;
 	d->version++;
 	return true;
@@ -1059,6 +1341,15 @@ static VALUE bitmap_text_size(VALUE self, VALUE str)
 	return rect_new(0, 0, w, h);
 }
 
+/* (boot.rb: a map's characters loaded ahead) */
+static VALUE bitmap_preload(VALUE self, VALUE x, VALUE y, VALUE w, VALUE h)
+{
+	Bitmap *b = rb_check_typeddata(self, &bitmap_type);
+	if (!b->disposed)
+		gpu_preload(b, (Rect) { num2int(x), num2int(y), num2int(w), num2int(h) });
+	return Qnil;
+}
+
 static VALUE bitmap_tex_info(VALUE self)
 {
 	char s[200];
@@ -1141,6 +1432,7 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "dispose", bitmap_dispose, 0);
 	rb_define_method(cBitmap, "disposed?", bitmap_disposed, 0);
 	rb_define_method(cBitmap, "mkxpz_tex_info", bitmap_tex_info, 0);
+	rb_define_method(cBitmap, "mkxpz_preload", bitmap_preload, 4);
 	rb_define_method(cBitmap, "raw_data", bitmap_raw_data, 0);
 	rb_define_method(cBitmap, "raw_data=", bitmap_set_raw_data, 1);
 	rb_define_method(cBitmap, "mkxpz_bgra_bottom_up", bitmap_bgra_bottom_up, 0);

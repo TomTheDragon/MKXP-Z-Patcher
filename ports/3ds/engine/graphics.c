@@ -1,6 +1,7 @@
 /* Graphics: the game's screen (in memory, at its own resolution), shown on
  * the 3DS's top screen (400x240), scaled to fit. */
 #include "engine.h"
+#include <math.h>
 extern unsigned gpu_loading_frames, gpu_null_pending, gpu_null_alloc, gpu_null_px, gpu_evictions; /* gpu.c */
 #include <3ds.h>
 #include <stdlib.h>
@@ -189,6 +190,34 @@ static void overlay_text(void)
 	overlay_shown = true;
 }
 
+/* the scene and the top screen: once, or (3D) once per eye with the layers
+ * shifted: behind the screen (parallax), on it, in front (windows,
+ * pictures); left eye: in front to the right, behind to the left */
+static void draw_eyes(int frozen_alpha, bool stereo)
+{
+	if (!stereo) {
+		gpu_present_eye(0, 0);
+		if (frozen_alpha < 255)
+			gpu_draw_scene(0);
+		gpu_present(frozen_alpha, brightness);
+		return;
+	}
+	float slider = osGet3DSliderState();
+	int d = (int) (slider * 4.0f + 0.5f); /* game pixels per eye, at the most 4 */
+	for (int eye = 0; eye < 2; eye++) {
+		int sign = eye == 0 ? 1 : -1;
+		stereo_shift[0] = -sign * d; /* behind */
+		stereo_shift[1] = 0;
+		stereo_shift[2] = sign * d;  /* in front */
+		gpu_present_eye(eye, (int) lroundf(stereo_shift[2] * gpu_scale_x()));
+		if (frozen_alpha < 255)
+			gpu_draw_scene(0);
+		gpu_present(frozen_alpha, brightness);
+	}
+	stereo_shift[0] = stereo_shift[1] = stereo_shift[2] = 0;
+	gpu_present_eye(0, 0);
+}
+
 static void gpu_frame_with(int frozen_alpha)
 {
 	if (!aptMainLoop())
@@ -206,10 +235,9 @@ static void gpu_frame_with(int frozen_alpha)
 			frame_count++;
 			return;
 		}
+		bool stereo = gpu_stereo_update();
 		gpu_frame_begin_sync(false);
-		if (frozen_alpha < 255)
-			gpu_draw_scene(0);
-		gpu_present(frozen_alpha, brightness);
+		draw_eyes(frozen_alpha, stereo);
 		gpu_frame_end();
 		frame_count++;
 		return;
@@ -231,12 +259,11 @@ static void gpu_frame_with(int frozen_alpha)
 		return;
 	}
 	skipped_row = 0;
+	bool stereo = gpu_stereo_update();
 	u64 tb = svcGetSystemTick();
 	gpu_frame_begin_sync(now <= due + period / 4);
 	t_begin += svcGetSystemTick() - tb;
-	if (frozen_alpha < 255)
-		gpu_draw_scene(0);
-	gpu_present(frozen_alpha, brightness);
+	draw_eyes(frozen_alpha, stereo);
 	gpu_frame_end();
 	frame_count++;
 }
@@ -369,6 +396,15 @@ static void activity_frame(float frac)
 	last_bar = now;
 	gpu_loading_frame(gpu_frozen ? 255 : -1, brightness, frac);
 }
+void log_slow_load(const char *what, const char *name, unsigned long long since_tick)
+{
+	if (!log_enabled())
+		return;
+	double ms = (double) (svcGetSystemTick() - since_tick) / (SYSCLOCK_ARM11 / 1000.0);
+	if (ms >= 10)
+		log_only("slow load: %s %s %.0f ms (frame %d)\n", what, name ? name : "?", ms, frame_count);
+}
+
 static VALUE g_loading(int argc, VALUE *argv, VALUE self)
 {
 	loading_tick(argc > 0 && !NIL_P(argv[0]) ? (float) num2dbl(argv[0]) : -1);

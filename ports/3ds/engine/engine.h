@@ -65,6 +65,13 @@ typedef struct Bitmap_ {
 	unsigned layer_gen;
 	int layer_done;          /* ops already in the layer */
 	float layer_sx, layer_sy;
+	/* a big .mkxi's compressed data and its blocks' offsets (random access:
+	 * bitmap_read_rows); lz_tried: not again after a failure */
+	unsigned char *lz;
+	uint32_t *blk;
+	int nblk, blk_max;
+	bool lz_tried;
+	int mkxi_version; /* (of the kept data: 1 rows, 2 tiles of blk_max; blk: offset, length pairs) */
 } Bitmap;
 typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;
 /* the text layer at scale sx, sy (NULL: none); full: also when not native */
@@ -80,6 +87,13 @@ void bitmap_uploaded(Bitmap *b); /* gpu.c: its texture is up to date */
  * row by row (rows: y0, n rows, their pixels); false: not possible */
 /* rows: false = enough (the rest isn't read) */
 bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
+/* rows y0 .. y1-1 of a big .mkxi without reading the rest (false: not
+ * possible for this image: then bitmap_stream_file) */
+bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
+void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
+/* a tiled .mkxi's tile (i, j) unpacked (a buffer reused by the next call;
+ * NULL: not a tiled image); its size in *tw, *th; *tile its edge length */
+const px_t *bitmap_tile(Bitmap *b, int i, int j, int *tw, int *th, int *tile);
 px_t *bitmap_px_alone(Bitmap *b); /* bitmap_px when no other image's pixels are in use */
 extern unsigned bitmap_released;
 size_t heap_free(void);     /* free normal memory (memory.c) */
@@ -157,6 +171,9 @@ bool gpu_wide_possible(void);
 bool gpu_snapshot_begin(void);
 void gpu_snapshot_end(px_t *dst, int w, int h);
 bool gpu_wide_auto(void);    /* what "auto" chooses */
+bool gpu_stereo_update(void);  /* 3D on or off (setting and slider); true: on */
+void gpu_present_eye(int eye, int text_shift);
+float gpu_scale_x(void);
 bool system_is_emulator(void); /* gpu.c: Citra / Azahar */
 void gpu_set_wide(void); /* bitmap.c: disposed or freed */
 /* loading bar: an extra frame (the last picture and a bar at the top) while
@@ -165,6 +182,8 @@ void gpu_loading_frame(int frozen_alpha, int brightness, float frac);
 bool gpu_in_frame(void);
 unsigned long long gpu_last_frame_end(void);
 void loading_tick(float frac); /* graphics.c; frac < 0: progress unknown */
+/* (the log: loads that took a while, with their name) */
+void log_slow_load(const char *what, const char *name, unsigned long long since_tick);
 void writing_tick(void);       /* graphics.c: something was written to the SD card */
 void gpu_activity_load(void);
 void gpu_activity_write(void);
@@ -190,6 +209,7 @@ struct Element {
 	bool is_viewport;
 	int z_offset;     /* tilemap layers above characters */
 	const int *sort_y; /* sprites: their y (same z: the lower one in front, as in RGSS2/3) */
+	signed char layer; /* 3D: -1 behind the screen (planes: parallax), 1 in front (windows), 0 as its viewport */
 	bool wide;        /* mkxpz_wide: may use the screen's sides (gpu_margin) */
 	void (*draw)(Element *e, Canvas *c, int ox, int oy);
 	void (*draw_z)(Element *e, Canvas *c, int ox, int oy, int layer);
@@ -198,6 +218,9 @@ struct Element {
 void element_register(Element *e, VALUE self, VALUE viewport);
 void element_unregister(Element *e);
 void scene_draw(Canvas *c);
+/* 3D: the horizontal shift (game pixels) for things behind the screen, on
+ * it, in front of it, for the eye being drawn (0: no 3D) */
+extern int stereo_shift[3];
 
 extern VALUE cViewport, cSprite, cPlane, cWindow, cTilemap;
 void init_scene(void);
@@ -245,6 +268,7 @@ typedef struct {
 	int smooth;     /* the picture shrunk with 4 samples (smoother edges) */
 	int battery;    /* battery icon at the top screen's top left */
 	int activity_icons; /* CD while loading, floppy after writing (top right) */
+	int stereo;      /* 3D with the slider: parallax behind, windows and pictures in front */
 	int wide_screen; /* the top screen's 800 columns: 0 off, 1 on, 2 auto (on, but not on
 	                  * the original 2DS, which can't, or in an emulator, which shows half) */
 	int colors;     /* 0 normal, 1 vivid (more contrast, for the original 3DS's screen) */

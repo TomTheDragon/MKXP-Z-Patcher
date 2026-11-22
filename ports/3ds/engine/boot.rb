@@ -769,6 +769,9 @@ rescue StandardError => e
 end
 
 def mkxpz_run_scripts
+  # no Ruby warnings, as in RPG Maker's player (after a reset that runs the
+  # scripts again, "already initialized constant" for each of them)
+  $VERBOSE = nil
   $RGSS_SCRIPTS = load_data($MKXPZ_SCRIPTS)
   $RGSS_SCRIPTS.each_with_index do |s, i|
     s[3] = Zlib::Inflate.inflate(s[2]).force_encoding(Encoding::UTF_8)
@@ -875,7 +878,82 @@ rescue StandardError => e
   mkxpz_log("last used save: not followed (#{e.class}: #{e.message})")
 end
 
+# A map's character graphics loaded when it's set up (Spriteset_Map.new:
+# entering a map, loading a save): every page of every event (pages switch
+# during the game, e.g. objects appearing in a boss fight) and the player.
+# Big sheets load only the cells of their character (texture pieces), and
+# only while there's graphics memory left; the rest as before, when drawn.
+def mkxpz_preload_map
+  return unless $game_map && $game_map.respond_to?(:events) && defined?(Cache) && Cache.respond_to?(:character)
+  t = Time.now
+  seen = {}
+  graphics = []
+  # graphics changed by move routes (command 41) and "Change Actor Graphic"
+  # (322) in a list of event commands
+  from_route = lambda do |route|
+    (route.respond_to?(:list) ? route.list : []).each do |mc|
+      graphics << [mc.parameters[0], mc.parameters[1]] if mc.code == 41 && mc.parameters.size >= 2
+    end
+  end
+  from_list = lambda do |list|
+    (list || []).each do |c|
+      case c.code
+      when 205 then from_route.call(c.parameters[1])
+      when 322 then graphics << [c.parameters[1], c.parameters[2]]
+      end
+    end
+  end
+  # first what's on the map now (each event's current graphic, the player):
+  # memory may run out before the rest
+  graphics << [$game_player.character_name, $game_player.character_index] if $game_player
+  $game_map.events.each_value do |ev|
+    graphics << [ev.character_name, ev.character_index] if ev.tile_id.to_i == 0
+  end
+  $game_map.events.each_value do |ev|
+    event = ev.instance_variable_get(:@event)
+    pages = event.respond_to?(:pages) ? event.pages : []
+    pages.each do |pg|
+      g = pg.graphic rescue next
+      graphics << [g.character_name, g.character_index] if g && g.tile_id.to_i == 0
+      from_route.call(pg.move_route) if pg.respond_to?(:move_route)
+      from_list.call(pg.list) if pg.respond_to?(:list)
+    end
+  end
+  ($data_common_events || []).each { |ce| from_list.call(ce.list) if ce }
+  n = 0
+  graphics.each do |name, index|
+    next if !name.is_a?(String) || name.empty? || seen[[name, index]]
+    seen[[name, index]] = true
+    b = (Cache.character(name) rescue nil) or next
+    next if b.disposed?
+    sign = name[/^[\!\$]./]
+    if sign && sign.include?('$')
+      b.mkxpz_preload(0, 0, b.width, b.height)
+    else
+      cw, ch = b.width / 12, b.height / 8
+      b.mkxpz_preload(index % 4 * 3 * cw, index / 4 * 4 * ch, cw * 3, ch * 4)
+    end
+    n += 1
+  end
+  mkxpz_log("preloaded #{n} character graphics of map #{$game_map.map_id} in %.2f s" % (Time.now - t))
+rescue StandardError => e
+  mkxpz_log("preload: #{e.class}: #{e.message}")
+end
+
+def mkxpz_preload_setup
+  return unless defined?(Spriteset_Map) && Spriteset_Map.private_method_defined?(:initialize)
+  return if mkxpz_ours?(Spriteset_Map, :initialize)
+  Spriteset_Map.class_eval do
+    alias_method :mkxpz_preload_initialize, :initialize
+    def initialize(*args)
+      mkxpz_preload_initialize(*args)
+      mkxpz_preload_map
+    end
+  end
+end
+
 def mkxpz_prepare
+  mkxpz_preload_setup
   mkxpz_used_saves_setup
   mkxpz_save_screen_setup
   mkxpz_fast_setup unless File.exist?('mkxpz-no-fast')

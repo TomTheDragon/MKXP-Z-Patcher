@@ -74,6 +74,7 @@ static VALUE window_init(int argc, VALUE *argv, VALUE self)
 	w->openness = 255;
 	w->el.z = rgss_version >= 3 ? 100 : 0;
 	w->el.draw = window_draw;
+	w->el.layer = 1; /* (3D: windows in front of the screen) */
 	element_register(&w->el, self, vp);
 	return self;
 }

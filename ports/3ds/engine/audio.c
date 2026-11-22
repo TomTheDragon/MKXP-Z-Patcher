@@ -349,6 +349,7 @@ static Sound *sound_load(const char *name)
 		}
 	char path[300];
 	Source src;
+	u64 t_load = svcGetSystemTick();
 	if (!find_audio(name, path, sizeof path) || !src_open(&src, path))
 		return NULL;
 	/* decode it all (sound effects are short) */
@@ -398,6 +399,7 @@ static Sound *sound_load(const char *name)
 		slot->rate = src.rate;
 		slot->used = ++use_clock;
 	}
+	log_slow_load("sound", name, t_load);
 	free(tmp);
 	src_close(&src);
 	return pcm ? slot : NULL;

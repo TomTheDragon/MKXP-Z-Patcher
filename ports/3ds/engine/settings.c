@@ -19,6 +19,7 @@ Settings settings = {
 	.battery = 1,
 	.activity_icons = 1,
 	.wide_screen = 2, /* auto */
+	.stereo = 1,
 	.colors = 0,
 	.wide_text = 1,
 };
@@ -46,6 +47,7 @@ void settings_load(void)
 		else if (sscanf(line, "battery=%d", &v) == 1) settings.battery = CLAMP(v, 0, 1);
 		else if (sscanf(line, "activity_icons=%d", &v) == 1) settings.activity_icons = CLAMP(v, 0, 1);
 		else if (sscanf(line, "top_screen=%d", &v) == 1) settings.wide_screen = CLAMP(v, 0, 2);
+		else if (sscanf(line, "stereo=%d", &v) == 1) settings.stereo = CLAMP(v, 0, 1);
 		/* (the older wide_screen=0/1 key: not read, its default was on everywhere) */
 		else if (sscanf(line, "colors=%d", &v) == 1) settings.colors = CLAMP(v, 0, 1);
 		else if (sscanf(line, "wide_text=%d", &v) == 1) settings.wide_text = CLAMP(v, 0, 1);
@@ -58,9 +60,9 @@ static void settings_save(void)
 	/* written only when something changed (a write shows the floppy icon) */
 	char text[1024];
 	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
-	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\n", settings.music_volume,
+	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\nstereo=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
-	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen);
+	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen, settings.stereo);
 	if (n <= 0 || n >= (int) sizeof text)
 		return;
 	char old[1024];
@@ -79,7 +81,7 @@ static void settings_save(void)
 	fclose(f);
 }
 
-enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
+enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_STEREO, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
 
 static void show(int sel)
 {
@@ -97,6 +99,7 @@ static void show(int sel)
 		snprintf(v[I_WIDE], 40, "%s", gpu_wide_possible() ? "on (800 across)" : "on (2DS: no 800)");
 	else
 		snprintf(v[I_WIDE], 40, "off (400 across)");
+	snprintf(v[I_STEREO], 40, "%s", settings.stereo ? "on (with the slider)" : "off");
 	snprintf(v[I_TEXT], 40, "%s", settings.screen != 0 ? "(only with fit)" :
 	         settings.wide_text ? "whole screen width" : "game's width");
 	snprintf(v[I_SHARP], 40, "%s", settings.sharp_text ? "sharp" : "game resolution");
@@ -112,7 +115,7 @@ static void show(int sel)
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
 	snprintf(v[I_LOG], 40, "%s", settings.log_file ? "on (mkxpz-3ds.log)" : "off");
 	v[I_RESET][0] = v[I_BACK][0] = 0;
-	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
+	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "3D", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
 	                                            "Speed display", "Bottom log", "Log file", "Reset game (title)", "Back to the game" };
 	printf("\x1b[2J\x1b[1;1H\x1b[1m MKXP-Z settings\x1b[0m   (START: back)\n\n");
 	for (int i = 0; i < I_COUNT; i++) {
@@ -160,6 +163,7 @@ bool settings_menu(void)
 				settings.wide_screen = settings.wide_screen == 2 ? (dir > 0 ? 1 : 0) : settings.wide_screen == 1 ? (dir > 0 ? 0 : 2) : (dir > 0 ? 2 : 1);
 				gpu_set_wide();
 				break;
+			case I_STEREO: settings.stereo ^= 1; break;
 			case I_TEXT: settings.wide_text ^= 1; gpu_set_screen(screen_w, screen_h); break;
 			case I_SHARP: settings.sharp_text ^= 1; break;
 			case I_SMOOTH: settings.smooth ^= 1; break;

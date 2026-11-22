@@ -348,6 +348,25 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Big images, tiled: convert-images.py writes images of 4 MB and more as
+  .mkxi version 2 (256x256 tiles, each its own LZ4 frame, a table of
+  offsets in front; transparent tiles not stored). Sparse textures use a
+  fixed 256 grid (piece = tile, bitsets for up to 16x16 pieces), a piece
+  comes from its tile alone (bitmap_tile); fully transparent pieces free
+  their memory (empty). Version 1 files get random access through their
+  independent 64 KB LZ4 blocks (bitmap_read_rows). Changed's boss fight:
+  piece loads 30-150 ms -> under 10 ms (Azahar).
+- Preloading: after Spriteset_Map#initialize, the character graphics of
+  the map (current graphics first, then all event pages, move routes and
+  "Set Move Route" / "Change Actor Graphic" in common events) get their
+  texture pieces while 3 MB of linear memory are left.
+- $VERBOSE = nil while the game's scripts run (no "already initialized
+  constant" warnings after a reset).
+- 3D (settings "3D", slider > 0): gfxSet3D, a right-eye render target;
+  the scene is drawn per eye with layers shifted (stereo_shift): planes
+  behind, windows, viewports with z >= 50 and viewport-less sprites with
+  z >= 100 in front (up to 4 game pixels per eye); the sharp window text
+  too. Wide mode is off while 3D is.
 - Last used save: boot.rb notes loads and saves through the standard
   routines (Scene_File / Scene_Load / Scene_Save read_save_data /
   write_save_data, DataManager.load_game / save_game_without_rescue) and

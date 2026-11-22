@@ -52,20 +52,28 @@ static C3D_RenderTarget *scene_rt[2];
  * them, else from its file (a sprite shows one 256x256 cell of such a
  * sheet: one 1 MB piece instead of 24 MB). Pieces not drawn lately make
  * room when memory runs out. An image drawn into refills its pieces. */
-#define MAXP 8
+#define MAXP 8            /* whole textures: up to 8x8 pieces */
+#define MAXSP 16          /* sparse ones: up to 16x16 pieces of SPARSE_PIECE */
+#define SPARSE_PIECE 256  /* (one 256x256 character cell: 256 KB) */
 #define SPARSE_MIN (4u * 1024 * 1024)
+#define PBIT(set, k) (((set)[(k) >> 6] >> ((k) & 63)) & 1)
+#define PSET(set, k) ((set)[(k) >> 6] |= 1ull << ((k) & 63))
+#define PCLR(set, k) ((set)[(k) >> 6] &= ~(1ull << ((k) & 63)))
 typedef struct GpuTex GpuTex;
 struct GpuTex {
-	C3D_Tex tex[MAXP * MAXP]; /* row by row */
+	C3D_Tex *tex;             /* row by row: tex_own, or allocated (sparse) */
+	C3D_Tex tex_own[MAXP * MAXP];
 	int nx, ny;               /* pieces across, down */
-	int xs[MAXP + 1], ys[MAXP + 1]; /* their edges in the bitmap */
+	int xs[MAXSP + 1], ys[MAXSP + 1]; /* their edges in the bitmap */
 	size_t bytes;
 	int w, h; /* bitmap size it was made for */
 	bool transparent; /* nothing visible: not drawn at all */
 	bool repeat;      /* wrap mode set to repeat (Plane) */
 	bool sparse;      /* pieces made when drawn (see above) */
-	u64 have, want;   /* sparse: pieces there, pieces to read after the frame */
-	unsigned piece_used[MAXP * MAXP]; /* sparse: frame each piece was last drawn */
+	/* sparse: pieces there, pieces to read after the frame, pieces there
+	 * but fully transparent (no memory, not drawn) */
+	u64 have[4], want[4], empty[4];
+	unsigned *piece_used; /* sparse: frame each piece was last drawn */
 	Bitmap *owner;
 	unsigned last_used; /* frame */
 	GpuTex *prev, *next; /* the live textures, most recently used first */
@@ -79,6 +87,15 @@ static void tex_delete(GpuTex *g)
 			C3D_TexDelete(&g->tex[k]);
 }
 
+static void gputex_free(GpuTex *g)
+{
+	if (g->sparse) {
+		free(g->tex);
+		free(g->piece_used);
+	}
+	free(g);
+}
+
 static GpuTex **trash;
 static int ntrash, trash_cap;
 
@@ -89,7 +106,7 @@ static void to_trash(GpuTex *g)
 		GpuTex **nt = realloc(trash, sizeof *nt * nc);
 		if (!nt) {
 			tex_delete(g); /* (no memory: free it now) */
-			free(g);
+			gputex_free(g);
 			return;
 		}
 		trash = nt;
@@ -135,7 +152,7 @@ static bool evict_one(void)
 	if (g->owner)
 		g->owner->gpu = NULL;
 	tex_delete(g); /* (the GPU finished the frames that used it) */
-	free(g);
+	gputex_free(g);
 	return true;
 }
 
@@ -236,19 +253,59 @@ bool gpu_wide_auto(void)
 }
 
 /* the top screen's render target, for the setting (between frames) */
+/* 3D (settings "3D", the slider up): a picture per eye; wide mode is off
+ * meanwhile (the two exclude each other) */
+static bool stereo_on;
+static C3D_RenderTarget *top_right, *present_target;
+static int present_eye_shift; /* (window text: screen pixels) */
+
 static void top_target(void)
 {
-	bool wide = settings.wide_screen == 2 ? gpu_wide_auto() : settings.wide_screen == 1 && gpu_wide_possible();
+	bool wide = !stereo_on && (settings.wide_screen == 2 ? gpu_wide_auto() : settings.wide_screen == 1 && gpu_wide_possible());
 	if (top) {
 		C3D_FrameSync();
 		C3D_RenderTargetDelete(top);
+		top = NULL;
+	}
+	if (top_right) {
+		C3D_RenderTargetDelete(top_right);
+		top_right = NULL;
 	}
 	gfxSetWide(wide);
+	gfxSet3D(stereo_on);
 	top_w = wide ? 800 : 400;
 	gpu_top_xs = wide ? 2 : 1;
 	top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+	if (stereo_on) {
+		top_right = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+		C3D_RenderTargetSetOutput(top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+	}
+	present_target = top;
 	Mtx_OrthoTilt(&proj_top, 0.0f, (float) top_w, 240.0f, 0.0f, 0.0f, 1.0f, true);
+}
+
+/* each frame: 3D on or off by the setting and the slider (between frames);
+ * true while it's on */
+float gpu_scale_x(void) { return scale_x; }
+
+bool gpu_stereo_update(void)
+{
+	bool want = settings.stereo && osGet3DSliderState() > 0.0f;
+	if (gpu_on && !in_frame && want != stereo_on) {
+		stereo_on = want;
+		top_target();
+		gpu_set_screen(game_w, game_h);
+	}
+	return stereo_on;
+}
+
+/* the eye the next gpu_present draws for (0 left, 1 right) and the window
+ * text's shift in screen pixels */
+void gpu_present_eye(int eye, int text_shift)
+{
+	present_target = eye && top_right ? top_right : top;
+	present_eye_shift = text_shift;
 }
 
 void gpu_set_wide(void)
@@ -431,13 +488,26 @@ static int pow2(int n)
  * padding; 0: too long. (Pieces of at most 1 MB: a 1536x1024 sheet as one
  * 4 MB and one 2 MB block didn't fit any more into the linear memory in
  * pieces after a few resets, and the character was missing.) */
-static int split_axis(int n, int *edges)
+/* sparse textures: a fixed grid of SPARSE_PIECE (the tiles of a tiled
+ * .mkxi: piece = tile); 0: too long */
+static int split_grid(int n, int *edges)
 {
-	int k = 0, at = 0, most = n > 512 * MAXP ? 1024 : 512;
+	int k = 0;
 	edges[0] = 0;
-	while (at < n && k < MAXP) {
+	while (edges[k] < n && k < MAXSP) {
+		edges[k + 1] = edges[k] + SPARSE_PIECE < n ? edges[k] + SPARSE_PIECE : n;
+		k++;
+	}
+	return edges[k] == n ? k : 0;
+}
+
+static int split_axis(int n, int *edges, int most, int maxp)
+{
+	int k = 0, at = 0;
+	edges[0] = 0;
+	while (at < n && k < maxp) {
 		int r = n - at, p = pow2(r), len = r;
-		if (k < MAXP - 1 && p > 8 && p - r > r / 4)
+		if (k < maxp - 1 && p > 8 && p - r > r / 4)
 			len = p / 2;
 		if (len > most)
 			len = most;
@@ -476,13 +546,18 @@ unsigned gpu_null_pending, gpu_null_alloc, gpu_null_px; /* (for the log) */
  * into the texture pieces: RGBA8 in 8x8 tiles (Morton order inside); the
  * GPU reads memory row r at v = 1 - r / height, so bitmap row y goes to
  * row y */
-typedef struct { GpuTex *g; u32 alpha_or; u64 mask; /* 0: all pieces */ } UploadCtx;
+typedef struct {
+	GpuTex *g;
+	u32 alpha_or;
+	const u64 *mask; /* NULL: all pieces */
+	int x_origin;    /* the bitmap column px's rows start at (a tile's: not 0) */
+} UploadCtx;
 static void upload_rows(UploadCtx *u, int y0, int n, const px_t *px, int stride)
 {
 	GpuTex *g = u->g;
 	u32 alpha_or = u->alpha_or;
 	for (int k = 0; k < g->nx * g->ny; k++) {
-		if ((u->mask && !((u->mask >> k) & 1)) || !g->tex[k].data)
+		if ((u->mask && !PBIT(u->mask, k)) || !g->tex[k].data)
 			continue;
 		int i = k % g->nx, j = k / g->nx, x0 = g->xs[i], pw = g->xs[i + 1] - x0;
 		int ya = y0 > g->ys[j] ? y0 : g->ys[j], yb = y0 + n < g->ys[j + 1] ? y0 + n : g->ys[j + 1];
@@ -492,7 +567,7 @@ static void upload_rows(UploadCtx *u, int y0, int n, const px_t *px, int stride)
 		int tw = g->tex[k].width;
 		for (int y = ya; y < yb; y++) {
 			int ty = y - g->ys[j];
-			const px_t *src = px + (size_t) (y - y0) * stride + x0;
+			const px_t *src = px + (size_t) (y - y0) * stride + (x0 - u->x_origin);
 			u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
 			u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
 			for (int x = 0; x < pw; x++) {
@@ -537,28 +612,48 @@ static bool piece_init(GpuTex *g, int k)
 
 /* a sparse texture's pieces not drawn in this frame (and not in keep): let
  * go of; true if there was one */
-static bool pieces_drop(GpuTex *g, u64 keep)
+static bool pieces_drop(GpuTex *g, const u64 *keep)
 {
 	bool any = false;
 	for (int k = 0; k < g->nx * g->ny; k++)
-		if (((g->have >> k) & 1) && !((keep >> k) & 1) && g->piece_used[k] != frame_no) {
+		if (PBIT(g->have, k) && !PBIT(keep, k) && g->tex[k].data && g->piece_used[k] != frame_no) {
 			g->bytes -= g->tex[k].size;
 			C3D_TexDelete(&g->tex[k]);
 			memset(&g->tex[k], 0, sizeof g->tex[k]);
-			g->have &= ~(1ull << k);
+			PCLR(g->have, k);
 			any = true;
 		}
 	return any;
 }
 
+/* a piece that came out fully transparent: its memory let go of (marked
+ * empty: there, nothing to draw). Changed's big sheets are mostly empty
+ * cells around small figures. */
+static void piece_check_empty(GpuTex *g, int k)
+{
+	const u32 *d = g->tex[k].data;
+	size_t n = g->tex[k].size / 4;
+	for (size_t i = 0; i < n; i++)
+		if (d[i] & 0xff) /* (alpha: the lowest byte, stored byte-swapped) */
+			return;
+	g->bytes -= g->tex[k].size;
+	C3D_TexDelete(&g->tex[k]);
+	memset(&g->tex[k], 0, sizeof g->tex[k]);
+	PSET(g->empty, k);
+}
+
+static bool bits_any(const u64 *s) { return s[0] | s[1] | s[2] | s[3]; }
+
 /* after the frame: the pieces drawn but not there yet, read from the file */
 static void sparse_fill(GpuTex *g, Bitmap *b)
 {
-	u64 todo = g->want & ~g->have;
-	g->want = 0;
-	u64 made = 0;
+	u64 todo[4], made[4] = { 0 };
+	for (int w = 0; w < 4; w++) {
+		todo[w] = g->want[w] & ~g->have[w];
+		g->want[w] = 0;
+	}
 	for (int k = 0; k < g->nx * g->ny; k++) {
-		if (!((todo >> k) & 1))
+		if (!PBIT(todo, k))
 			continue;
 		bool ok = piece_init(g, k);
 		while (!ok && evict_one()) {
@@ -568,26 +663,88 @@ static void sparse_fill(GpuTex *g, Bitmap *b)
 		if (!ok && pieces_drop(g, todo))
 			ok = piece_init(g, k);
 		if (ok)
-			made |= 1ull << k;
+			PSET(made, k);
 		else
 			gpu_null_alloc++;
 	}
-	if (!made)
+	if (!bits_any(made))
 		return;
 	u64 t_up = svcGetSystemTick();
 	gpu_uploads++;
 	UploadCtx up = { g, 0, made };
-	if (b->px)
+	u64 t_slow = svcGetSystemTick();
+	if (b->px) {
 		upload_rows(&up, 0, b->h, b->px, b->w);
-	else if (!bitmap_stream_file(b, upload_rows_cb, &up))
-		log_only("%s: couldn't read pieces of it\n", b->file ? b->file : "(image)");
-	for (int k = 0; k < g->nx * g->ny; k++)
-		if ((made >> k) & 1) {
-			C3D_TexFlush(&g->tex[k]);
-			gpu_upload_px += (unsigned) (g->tex[k].width * g->tex[k].height);
+	} else {
+		/* a tiled .mkxi: each piece from its tile alone */
+		bool done = false;
+		for (int k = 0; k < g->nx * g->ny; k++) {
+			if (!PBIT(made, k))
+				continue;
+			int i = k % g->nx, j = k / g->nx, tw, th, tile;
+			const px_t *p = bitmap_tile(b, i, j, &tw, &th, &tile);
+			if (!p || tile != SPARSE_PIECE) {
+				done = false;
+				break;
+			}
+			u64 one[4] = { 0 };
+			PSET(one, k);
+			UploadCtx tu = { g, 0, one, i * tile };
+			upload_rows(&tu, j * tile, th, p, tw);
+			done = true;
 		}
-	g->have |= made; /* (also when reading failed: not tried again every frame) */
+		if (done)
+			goto uploaded;
+		/* only the rows of the pieces' bands (random access into the .mkxi);
+		 * else the whole file once */
+		done = true;
+		for (int j = 0; j < g->ny && done; j++) {
+			u64 band[4] = { 0 };
+			for (int i = 0; i < g->nx; i++)
+				if (PBIT(made, j * g->nx + i))
+					PSET(band, j * g->nx + i);
+			if (!bits_any(band))
+				continue;
+			UploadCtx bu = { g, 0, band };
+			done = bitmap_read_rows(b, g->ys[j], g->ys[j + 1], upload_rows_cb, &bu);
+		}
+		if (!done && !bitmap_stream_file(b, upload_rows_cb, &up))
+			log_only("%s: couldn't read pieces of it\n", b->file ? b->file : "(image)");
+	}
+uploaded:
+	for (int k = 0; k < g->nx * g->ny; k++)
+		if (PBIT(made, k)) {
+			gpu_upload_px += (unsigned) (g->tex[k].width * g->tex[k].height);
+			piece_check_empty(g, k);
+			if (g->tex[k].data)
+				C3D_TexFlush(&g->tex[k]);
+			PSET(g->have, k); /* (also when reading failed: not tried again every frame) */
+		}
+	log_slow_load("texture pieces", b->file, t_slow);
 	gpu_upload_ticks += svcGetSystemTick() - t_up;
+}
+
+static GpuTex *texture_of(Bitmap *b);
+
+/* loading ahead (a map's characters when it's set up): the texture, or a
+ * big image's pieces for r, now instead of when first drawn; only while
+ * there's room (3 MB of linear memory left) */
+void gpu_preload(Bitmap *b, Rect r)
+{
+	if (!gpu_on || in_frame || linearSpaceFree() < 3u * 1024 * 1024)
+		return;
+	GpuTex *g = texture_of(b);
+	if (!g || !g->sparse)
+		return;
+	for (int j = 0; j < g->ny; j++) {
+		if (g->ys[j + 1] <= r.y || g->ys[j] >= r.y + r.h)
+			continue;
+		for (int i = 0; i < g->nx; i++)
+			if (g->xs[i + 1] > r.x && g->xs[i] < r.x + r.w && !PBIT(g->have, j * g->nx + i))
+				PSET(g->want, j * g->nx + i);
+	}
+	if (bits_any(g->want))
+		sparse_fill(g, b);
 }
 
 /* the bitmap's texture, uploaded if the bitmap changed */
@@ -600,17 +757,22 @@ static GpuTex *texture_of(Bitmap *b)
 			if (b->gpu_version != b->version + 1) {
 				/* drawn into (it has its pixels then): the pieces there
 				 * filled again now, the others when they're drawn */
-				if (b->px && g->have) {
+				if (b->px && bits_any(g->have)) {
+					/* (empty pieces: read again when drawn) */
+					for (int w = 0; w < 4; w++) {
+						g->have[w] &= ~g->empty[w];
+						g->empty[w] = 0;
+					}
 					UploadCtx up = { g, 0, g->have };
 					upload_rows(&up, 0, b->h, b->px, b->w);
 					for (int k = 0; k < g->nx * g->ny; k++)
-						if ((g->have >> k) & 1)
+						if (PBIT(g->have, k) && g->tex[k].data)
 							C3D_TexFlush(&g->tex[k]);
 					gpu_uploads++;
 				}
 				b->gpu_version = b->version + 1;
 			}
-			if (!in_frame && (g->want & ~g->have))
+			if (!in_frame && bits_any(g->want))
 				sparse_fill(g, b);
 			return g;
 		}
@@ -627,17 +789,21 @@ static GpuTex *texture_of(Bitmap *b)
 	 * the frame (gpu_frame_end; then the loading bar can show), the texture
 	 * made only then too (one made during the frame and filled after it
 	 * came out empty after a while: characters and tiles went missing) */
-	if (!g && (b->px || b->dropped)) {
+	if (!g && (b->px || b->dropped) && (size_t) b->w * b->h * 4 >= SPARSE_MIN) {
 		GpuTex t = { 0 };
-		t.nx = split_axis(b->w, t.xs);
-		t.ny = split_axis(b->h, t.ys);
-		size_t need = 0;
-		for (int j = 0; j < t.ny; j++)
-			for (int i = 0; i < t.nx; i++)
-				need += (size_t) pow2(t.xs[i + 1] - t.xs[i]) * pow2(t.ys[j + 1] - t.ys[j]) * 4;
-		if (t.nx && t.ny && need >= SPARSE_MIN && (g = malloc(sizeof *g))) {
+		t.nx = split_grid(b->w, t.xs);
+		t.ny = split_grid(b->h, t.ys);
+		if (t.nx && t.ny && (g = malloc(sizeof *g))) {
 			/* a sparse texture: no pieces yet (draw_pieces asks for them) */
 			*g = t;
+			g->tex = calloc((size_t) t.nx * t.ny, sizeof *g->tex);
+			g->piece_used = calloc((size_t) t.nx * t.ny, sizeof *g->piece_used);
+			if (!g->tex || !g->piece_used) {
+				free(g->tex);
+				free(g->piece_used);
+				free(g);
+				return NULL;
+			}
 			g->sparse = true;
 			g->owner = b;
 			g->w = b->w;
@@ -660,8 +826,8 @@ static GpuTex *texture_of(Bitmap *b)
 			b->gpu = NULL;
 		}
 		GpuTex t = { 0 };
-		t.nx = split_axis(b->w, t.xs);
-		t.ny = split_axis(b->h, t.ys);
+		t.nx = split_axis(b->w, t.xs, b->w > 512 * MAXP ? 1024 : 512, MAXP);
+		t.ny = split_axis(b->h, t.ys, b->h > 512 * MAXP ? 1024 : 512, MAXP);
 		if (!t.nx || !t.ny)
 			return NULL; /* (over 4096 pixels) */
 		size_t need = 0;
@@ -671,8 +837,10 @@ static GpuTex *texture_of(Bitmap *b)
 		while (linearSpaceFree() < need + LINEAR_RESERVE && evict_one())
 			gpu_evictions++;
 		g = malloc(sizeof *g);
-		if (g)
+		if (g) {
 			*g = t;
+			g->tex = g->tex_own;
+		}
 		bool ok = g && tex_init(g);
 		while (g && !ok && evict_one()) {
 			gpu_evictions++;
@@ -704,7 +872,10 @@ static GpuTex *texture_of(Bitmap *b)
 	UploadCtx up = { g, 0 };
 	/* an image without its pixels: straight from its file, in rows; else
 	 * from the pixels (read again if needed: only this image's are in use) */
+	u64 t_slow = svcGetSystemTick();
 	bool streamed = !b->px && b->dropped && bitmap_stream_file(b, upload_rows_cb, &up);
+	if (streamed)
+		log_slow_load("texture", b->file, t_slow);
 	if (!streamed) {
 		if (!bitmap_px_alone(b)) {
 			gpu_null_px++;
@@ -814,12 +985,14 @@ static void draw_pieces(GpuTex *g, Rect sr, float ox, float oy, const DrawOpts *
 			int k = j * g->nx + i;
 			if (g->sparse) {
 				g->piece_used[k] = frame_no;
-				if (!((g->have >> k) & 1)) {
+				if (!PBIT(g->have, k)) {
 					/* not there yet: read after the frame */
-					g->want |= 1ull << k;
+					PSET(g->want, k);
 					queue_pending(g->owner);
 					continue;
 				}
+				if (PBIT(g->empty, k))
+					continue; /* (nothing to see there) */
 			}
 			C3D_Tex *t = &g->tex[k];
 			C3D_TexBind(0, t);
@@ -909,7 +1082,7 @@ void gpu_frame_begin_sync(bool sync)
 	/* the GPU is done with the last frame: free textures of disposed bitmaps */
 	for (int i = 0; i < ntrash; i++) {
 		tex_delete(trash[i]);
-		free(trash[i]);
+		gputex_free(trash[i]);
 	}
 	ntrash = 0;
 }
@@ -949,7 +1122,7 @@ static void draw_text_jobs(void)
 		if (!l)
 			continue;
 		/* the contents' origin on the screen, whole pixels (sharp) */
-		int ox = (int) floorf(off_x + (j->gx + gpu_margin) * scale_x + 0.5f);
+		int ox = (int) floorf(off_x + (j->gx + gpu_margin) * scale_x + 0.5f) + present_eye_shift;
 		int oy = (int) floorf(off_y + j->gy * scale_y + 0.5f);
 		/* what shows: the clip, in the layer's pixels */
 		int x0 = (int) floorf((j->clip.x - j->gx) * scale_x), y0 = (int) floorf((j->clip.y - j->gy) * scale_y);
@@ -1171,8 +1344,9 @@ static void draw_battery(void)
 
 void gpu_present(int frozen_alpha, int brightness)
 {
-	C3D_RenderTargetClear(top, C3D_CLEAR_ALL, 0x000000ff, 0);
-	C3D_FrameDrawOn(top);
+	C3D_RenderTarget *target = present_target ? present_target : top;
+	C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000ff, 0);
+	C3D_FrameDrawOn(target);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_top);
 	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 	presenting = true;

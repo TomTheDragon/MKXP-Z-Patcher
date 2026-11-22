@@ -317,6 +317,7 @@ static VALUE viewport_init(int argc, VALUE *argv, VALUE self)
 	return self;
 }
 
+static int depth_of(const Element *e, int inherited);
 static void viewport_draw(Element *e, Canvas *c, int ox, int oy)
 {
 	Viewport *v = (Viewport *) e;
@@ -334,8 +335,9 @@ static void viewport_draw(Element *e, Canvas *c, int ox, int oy)
 		sub.tone = tone_get(v->tone);
 	int n;
 	Element **list = collect(e->self, &n);
+	int vd = depth_of(e, 0);
 	for (int i = 0; i < n; i++)
-		list[i]->draw(list[i], &sub, r.x - v->ox, r.y - v->oy);
+		list[i]->draw(list[i], &sub, r.x - v->ox + stereo_shift[depth_of(list[i], vd) + 1], r.y - v->oy);
 	free(list);
 	canvas_effect(&sub, sub.clip, color_get(v->color), c->gpu ? NULL : tone_get(v->tone));
 	if (v->flash_left > 0) {
@@ -596,6 +598,7 @@ static VALUE plane_init(int argc, VALUE *argv, VALUE self)
 	s->opacity = 255;
 	s->zoom_x = s->zoom_y = 1.0;
 	s->el.draw = plane_draw;
+	s->el.layer = -1;
 	element_register(&s->el, self, argc > 0 ? argv[0] : Qnil);
 	return self;
 }
@@ -656,6 +659,23 @@ static VALUE plane_visible(VALUE self) { return plane_get(self)->visible ? Qtrue
 static VALUE plane_set_visible(VALUE self, VALUE v) { plane_get(self)->visible = RTEST(v); return v; }
 
 /* --- the whole screen */
+int stereo_shift[3];
+
+/* 3D: an element's depth: its own (planes behind, windows in front), else
+ * its viewport's (z 50 and more: pictures, weather, timer: in front) */
+static int depth_of(const Element *e, int inherited)
+{
+	if (e->layer)
+		return e->layer;
+	if (e->is_viewport)
+		return e->z >= 50 ? 1 : 0;
+	/* (outside a viewport with a high z: e.g. a message box's background
+	 * sprite, z 190 in VX: in front with its window) */
+	if (NIL_P(e->viewport) && e->z >= 100)
+		return 1;
+	return inherited;
+}
+
 void scene_draw(Canvas *c)
 {
 	int n;
@@ -665,7 +685,7 @@ void scene_draw(Canvas *c)
 	if (c->gpu && gpu_margin > 0)
 		wc.clip = (Rect) { -gpu_margin, 0, c->w + 2 * gpu_margin, c->h };
 	for (int i = 0; i < n; i++)
-		list[i]->draw(list[i], list[i]->wide ? &wc : c, 0, 0);
+		list[i]->draw(list[i], list[i]->wide ? &wc : c, stereo_shift[depth_of(list[i], 0) + 1], 0);
 	free(list);
 }
 
