@@ -154,6 +154,8 @@ void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity);
 void gpu_text_forget(Bitmap *b);
 extern int gpu_top_xs; /* 2: the top screen in wide mode (800 across) */
 bool gpu_wide_possible(void);
+bool gpu_snapshot_begin(void);
+void gpu_snapshot_end(px_t *dst, int w, int h);
 bool gpu_wide_auto(void);    /* what "auto" chooses */
 bool system_is_emulator(void); /* gpu.c: Citra / Azahar */
 void gpu_set_wide(void); /* bitmap.c: disposed or freed */

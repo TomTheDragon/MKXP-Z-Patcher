@@ -504,7 +504,15 @@ static VALUE g_snap(VALUE self)
 {
 	VALUE bv = bitmap_new_size(screen_w, screen_h);
 	Bitmap *b = bitmap_get(bv);
-	compose(b->px);
+	if (gpu_snapshot_begin()) {
+		Canvas c = { .w = screen_w, .h = screen_h, .clip = { 0, 0, screen_w, screen_h }, .gpu = true };
+		scene_draw(&c);
+		gpu_snapshot_end(b->px, screen_w, screen_h);
+		bitmap_text_layers_drop_full();
+	} else {
+		compose(b->px); /* (no GPU: the CPU, without the map) */
+	}
+	b->version++;
 	return bv;
 }
 

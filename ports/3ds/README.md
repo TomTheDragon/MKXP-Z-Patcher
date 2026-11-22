@@ -348,6 +348,12 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   RtlMoveMemory constants) with the real pixels in the original format
   (BGRA, bottom row first, zlib), like the patcher's
   compat/bitmap_marshal.rb. Bitmap#raw_data / raw_data= (mkxp-z) too.
+- Graphics.snap_to_bitmap draws the scene on the GPU into scene texture 0
+  in a frame of its own (window text at game size, as for a freeze; the
+  top screen untouched), waits for the GPU (the next C3D_FrameBegin) and
+  reads it back (tiled RGBA8, the picture's first row is the texture's
+  last). The CPU compose it used before has no tilemap: save screenshots
+  and menu backgrounds lacked the map.
 - Save screens: Ruby patch (marshal.c): Marshal.load from a File opened
   only for reading loads from the rest of the file read once (kept with
   the File, hidden), then seeks to just after the object; EOFError at the

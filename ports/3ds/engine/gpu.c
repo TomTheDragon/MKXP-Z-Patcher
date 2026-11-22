@@ -924,9 +924,10 @@ static int ntext_jobs, scene_which;
 
 void gpu_text_layer(Bitmap *cont, int gx, int gy, Rect clip, int opacity)
 {
-	if (scene_which == 1) {
-		/* the frozen picture (Graphics.freeze): the text at game size into
-		 * it (that layer is let go of after the freeze) */
+	if (scene_which >= 1) {
+		/* the frozen picture (Graphics.freeze) or a snapshot
+		 * (snap_to_bitmap): the text at game size into it (that layer is
+		 * let go of afterwards) */
 		Bitmap *l = bitmap_text_layer(cont, 1, 1);
 		if (l) {
 			Canvas c = { .w = game_w, .h = game_h, .clip = clip, .gpu = true };
@@ -966,8 +967,9 @@ void gpu_scene_begin(int which)
 	scene_which = which;
 	if (which == 0)
 		ntext_jobs = 0;
-	C3D_RenderTargetClear(scene_rt[which], C3D_CLEAR_ALL, 0x000000ff, 0);
-	C3D_FrameDrawOn(scene_rt[which]);
+	int t = which == 2 ? 0 : which; /* (2: a snapshot, in texture 0) */
+	C3D_RenderTargetClear(scene_rt[t], C3D_CLEAR_ALL, 0x000000ff, 0);
+	C3D_FrameDrawOn(scene_rt[t]);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
 	presenting = false;
 	tev_last.valid = false;
@@ -1173,6 +1175,48 @@ void gpu_frame_end(void)
 	for (int i = 0; i < npending; i++)
 		texture_of(pending[i]);
 	npending = 0;
+}
+
+/* Graphics.snap_to_bitmap: the scene drawn on the GPU (as on screen: the
+ * map, big images, window text) into scene texture 0 in a frame of its own
+ * (the top screen isn't touched), then read back. Drawing it on the CPU
+ * (compose) left out the map. Between the two: the caller draws the
+ * scene (gpu_scene_begin(2) is done here). */
+bool gpu_snapshot_begin(void)
+{
+	if (!gpu_on || in_frame)
+		return false;
+	C3D_FrameBegin(0);
+	in_frame = true;
+	gpu_scene_begin(2);
+	return true;
+}
+
+void gpu_snapshot_end(px_t *dst, int w, int h)
+{
+	C3D_FrameEnd(0);
+	in_frame = false;
+	C3D_FrameBegin(0); /* (waits until the GPU has drawn it) */
+	C3D_Tex *t = &scene_tex[0];
+	GSPGPU_InvalidateDataCache(t->data, t->size);
+	const u32 *src = t->data;
+	int tw = t->width, th = t->height;
+	for (int y = 0; y < h && y < th; y++) {
+		/* render targets: row 0 of the picture is the texture's last row */
+		int ty = th - 1 - y;
+		u32 rowbase = (u32) ((ty >> 3) * (tw >> 3)) << 6;
+		u32 my = ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3);
+		for (int x = 0; x < w; x++) {
+			int tx = x + gpu_margin;
+			if (tx >= tw)
+				break;
+			u32 mx = (tx & 1) | ((tx & 2) << 1) | ((tx & 4) << 2);
+			u32 v = src[rowbase + ((u32) (tx >> 3) << 6) + (mx | my)];
+			px_t p = __builtin_bswap32(v);
+			dst[(size_t) y * w + x] = p | 0xff000000u; /* (the screen is opaque) */
+		}
+	}
+	C3D_FrameEnd(0);
 }
 
 void gpu_text_forget(Bitmap *b)
