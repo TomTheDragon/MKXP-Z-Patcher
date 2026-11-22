@@ -360,6 +360,15 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   the map (current graphics first, then all event pages, move routes and
   "Set Move Route" / "Change Actor Graphic" in common events) get their
   texture pieces while 3 MB of linear memory are left.
+- Kept textures: gpu_forget keeps the texture of an unchanged file image
+  (named by the file) in the live list; the next Bitmap.new of the file
+  takes it over (recycled_for); evict_one frees kept ones first. Images
+  without pixels are read during the frame when first drawn (no deferral:
+  pictures appeared a frame late), sparse pieces too. The preload also
+  takes pictures (Show Picture) and sound effects (Play SE, move routes:
+  Audio.mkxpz_preload_se, first and down to 2 MB free; images down to
+  5 MB free). gfxSet3D before gfxSetWide (the other order turned wide
+  mode off after 3D).
 - $VERBOSE = nil while the game's scripts run (no "already initialized
   constant" warnings after a reset).
 - 3D (settings "3D", slider > 0): gfxSet3D, a right-eye render target;

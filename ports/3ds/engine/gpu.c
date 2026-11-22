@@ -75,6 +75,7 @@ struct GpuTex {
 	u64 have[4], want[4], empty[4];
 	unsigned *piece_used; /* sparse: frame each piece was last drawn */
 	Bitmap *owner;
+	char *recycle;      /* kept after its bitmap went (the file it shows), see gpu_forget */
 	unsigned last_used; /* frame */
 	GpuTex *prev, *next; /* the live textures, most recently used first */
 };
@@ -89,6 +90,7 @@ static void tex_delete(GpuTex *g)
 
 static void gputex_free(GpuTex *g)
 {
+	free(g->recycle);
 	if (g->sparse) {
 		free(g->tex);
 		free(g->piece_used);
@@ -145,7 +147,16 @@ static void live_touch(GpuTex *g)
 /* free the least recently used texture not used in this frame */
 static bool evict_one(void)
 {
-	GpuTex *g = live_last;
+	/* kept textures of gone images first (the oldest), then the least
+	 * recently used */
+	GpuTex *g = NULL;
+	for (GpuTex *r = live_last; r; r = r->prev)
+		if (r->recycle && r->last_used != frame_no) {
+			g = r;
+			break;
+		}
+	if (!g)
+		g = live_last;
 	if (!g || g->last_used == frame_no)
 		return false;
 	live_remove(g);
@@ -271,8 +282,11 @@ static void top_target(void)
 		C3D_RenderTargetDelete(top_right);
 		top_right = NULL;
 	}
-	gfxSetWide(wide);
+	/* (one display mode in libctru: 3D first, then the width; the other way
+	 * round gfxSet3D(false) turned wide mode off again, and the 800-column
+	 * picture showed only its left half) */
 	gfxSet3D(stereo_on);
+	gfxSetWide(wide);
 	top_w = wide ? 800 : 400;
 	gpu_top_xs = wide ? 2 : 1;
 	top = C3D_RenderTargetCreate(240, top_w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -587,15 +601,6 @@ static bool upload_rows_cb(void *ctx, int y0, int n, const px_t *px)
 	return true;
 }
 
-static void queue_pending(Bitmap *b)
-{
-	for (int i = 0; i < npending; i++)
-		if (pending[i] == b)
-			return;
-	if (npending < (int) (sizeof pending / sizeof *pending))
-		pending[npending++] = b;
-}
-
 /* a sparse texture's piece k: made (cleared) */
 static bool piece_init(GpuTex *g, int k)
 {
@@ -725,13 +730,15 @@ uploaded:
 }
 
 static GpuTex *texture_of(Bitmap *b);
+static GpuTex *recycled_for(Bitmap *b);
 
 /* loading ahead (a map's characters when it's set up): the texture, or a
  * big image's pieces for r, now instead of when first drawn; only while
- * there's room (3 MB of linear memory left) */
+ * there's room (5 MB of linear memory left: some for what loads while
+ * playing) */
 void gpu_preload(Bitmap *b, Rect r)
 {
-	if (!gpu_on || in_frame || linearSpaceFree() < 3u * 1024 * 1024)
+	if (!gpu_on || in_frame || linearSpaceFree() < 5u * 1024 * 1024)
 		return;
 	GpuTex *g = texture_of(b);
 	if (!g || !g->sparse)
@@ -785,6 +792,8 @@ static GpuTex *texture_of(Bitmap *b)
 		live_touch(g);
 		return g;
 	}
+	if (!g && (g = recycled_for(b)))
+		return g->sparse ? texture_of(b) : g; /* (sparse: its checks above) */
 	/* an image without its pixels, during drawing: read from its file after
 	 * the frame (gpu_frame_end; then the loading bar can show), the texture
 	 * made only then too (one made during the frame and filled after it
@@ -814,11 +823,9 @@ static GpuTex *texture_of(Bitmap *b)
 			return g;
 		}
 	}
-	if (in_frame && !b->px && b->dropped) {
-		queue_pending(b);
-		gpu_null_pending++;
-		return NULL;
-	}
+	/* (an image without its pixels is read from its file right away, also
+	 * during drawing: waiting for the end of the frame left it out of that
+	 * frame, and picture animations flickered) */
 	if (!g || g->w != b->w || g->h != b->h) {
 		if (g) {
 			live_remove(g);
@@ -914,16 +921,43 @@ void gpu_tex_info(Bitmap *b, char *out, size_t n)
 	         g->owner == b, b->px != NULL, b->dropped);
 }
 
+/* A bitmap goes (disposed, or collected): the texture of an unchanged
+ * image from a file is kept in graphics memory, under the file's name
+ * (games dispose pictures and load them again: picture animations, a
+ * cache cleared); the next Bitmap.new of that file takes it over
+ * (texture_of) without unpacking or uploading. Kept ones are the first to
+ * go when memory runs short (evict_one). */
 void gpu_forget(Bitmap *b)
 {
 	if (b->gpu) {
 		GpuTex *g = b->gpu;
-		live_remove(g);
 		g->owner = NULL;
+		b->gpu = NULL;
+		if (gpu_on && b->file && b->version == b->file_version && b->gpu_version == b->version + 1 &&
+		    !g->repeat && (g->recycle = strdup(b->file)))
+			return; /* (stays in the live list) */
+		live_remove(g);
 		if (gpu_on)
 			to_trash(g);
-		b->gpu = NULL;
 	}
+}
+
+/* a kept texture of this image's file (gpu_forget), taken over */
+static GpuTex *recycled_for(Bitmap *b)
+{
+	if (!b->file || b->version != b->file_version)
+		return NULL;
+	for (GpuTex *g = live_first; g; g = g->next)
+		if (g->recycle && g->w == b->w && g->h == b->h && !strcmp(g->recycle, b->file)) {
+			free(g->recycle);
+			g->recycle = NULL;
+			g->owner = b;
+			b->gpu = g;
+			b->gpu_version = b->version + 1;
+			live_touch(g);
+			return g;
+		}
+	return NULL;
 }
 
 static void vertex(float x, float y, float u, float v, float a)
@@ -986,10 +1020,12 @@ static void draw_pieces(GpuTex *g, Rect sr, float ox, float oy, const DrawOpts *
 			if (g->sparse) {
 				g->piece_used[k] = frame_no;
 				if (!PBIT(g->have, k)) {
-					/* not there yet: read after the frame */
+					/* not there yet: read now (waiting for the end of the
+					 * frame left it out of this one) */
 					PSET(g->want, k);
-					queue_pending(g->owner);
-					continue;
+					sparse_fill(g, g->owner);
+					if (!PBIT(g->have, k))
+						continue;
 				}
 				if (PBIT(g->empty, k))
 					continue; /* (nothing to see there) */

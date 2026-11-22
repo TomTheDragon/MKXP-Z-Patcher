@@ -888,11 +888,14 @@ def mkxpz_preload_map
   t = Time.now
   seen = {}
   graphics = []
+  pictures = []
   # graphics changed by move routes (command 41) and "Change Actor Graphic"
   # (322) in a list of event commands
+  sounds = []
   from_route = lambda do |route|
     (route.respond_to?(:list) ? route.list : []).each do |mc|
       graphics << [mc.parameters[0], mc.parameters[1]] if mc.code == 41 && mc.parameters.size >= 2
+      sounds << mc.parameters[0] if mc.code == 44 # Play SE
     end
   end
   from_list = lambda do |list|
@@ -900,6 +903,8 @@ def mkxpz_preload_map
       case c.code
       when 205 then from_route.call(c.parameters[1])
       when 322 then graphics << [c.parameters[1], c.parameters[2]]
+      when 231 then pictures << c.parameters[1] # Show Picture
+      when 250 then sounds << c.parameters[0]   # Play SE
       end
     end
   end
@@ -920,6 +925,14 @@ def mkxpz_preload_map
     end
   end
   ($data_common_events || []).each { |ce| from_list.call(ce.list) if ce }
+  # sound effects the events play first (small, slow to decode): decoded
+  # now, not when first played
+  ns = 0
+  sounds.map { |se| se.respond_to?(:name) ? se.name : nil }.compact.uniq.each do |name|
+    next if name.empty?
+    Audio.mkxpz_preload_se("Audio/SE/" + name)
+    ns += 1
+  end
   n = 0
   graphics.each do |name, index|
     next if !name.is_a?(String) || name.empty? || seen[[name, index]]
@@ -935,7 +948,17 @@ def mkxpz_preload_map
     end
     n += 1
   end
-  mkxpz_log("preloaded #{n} character graphics of map #{$game_map.map_id} in %.2f s" % (Time.now - t))
+  # pictures shown by the map's or common events (animations made of
+  # pictures): their textures too, while there's room
+  np = 0
+  pictures.uniq.each do |name|
+    next if !name.is_a?(String) || name.empty? || !Cache.respond_to?(:picture)
+    b = (Cache.picture(name) rescue nil) or next
+    next if b.disposed?
+    b.mkxpz_preload(0, 0, b.width, b.height)
+    np += 1
+  end
+  mkxpz_log("preloaded #{n} character graphics, #{np} pictures and #{ns} sounds of map #{$game_map.map_id} in %.2f s" % (Time.now - t))
 rescue StandardError => e
   mkxpz_log("preload: #{e.class}: #{e.message}")
 end

@@ -492,6 +492,15 @@ static VALUE a_me_play(int argc, VALUE *argv, VALUE self) { request_play(CH_ME, 
 static VALUE a_me_stop(VALUE self) { request_stop(CH_ME); return Qnil; }
 static VALUE a_me_fade(VALUE self, VALUE ms) { request_fade(CH_ME, ms); return Qnil; }
 
+/* (boot.rb: a map's sound effects decoded ahead, into the cache; only
+ * while 3 MB of linear memory are left) */
+static VALUE a_preload_se(VALUE self, VALUE name)
+{
+	if (audio_ok && linearSpaceFree() >= 2u * 1024 * 1024)
+		sound_load(StringValueCStr(name));
+	return Qnil;
+}
+
 static VALUE a_se_play(int argc, VALUE *argv, VALUE self)
 {
 	if (!audio_ok || argc < 1)
@@ -606,6 +615,7 @@ void init_audio(void)
 	rb_define_module_function(m, "me_stop", a_me_stop, 0);
 	rb_define_module_function(m, "me_fade", a_me_fade, 1);
 	rb_define_module_function(m, "se_play", a_se_play, -1);
+	rb_define_module_function(m, "mkxpz_preload_se", a_preload_se, 1);
 	rb_define_module_function(m, "se_stop", a_se_stop, 0);
 	rb_define_module_function(m, "setup_midi", a_nothing, -1);
 }
