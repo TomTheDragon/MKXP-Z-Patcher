@@ -10,7 +10,7 @@ Settings settings = {
 	.sound_volume = 100,
 	.buttons = 0,      /* A: confirm, B: cancel, Y: run, L: speed-up */
 	.screen = 0,       /* fit */
-	.frame_skip = 1,   /* auto, at most 1 picture in a row (0 off, up to 5) */
+	.frame_skip = 2,   /* auto, at most 2 pictures in a row (0 off, up to 5) */
 	.show_speed = 0,
 	.log_file = 0,
 	.overlay = 1,
@@ -22,7 +22,7 @@ Settings settings = {
 	.stereo = 1,
 	.colors = 0,
 	.wide_text = 1,
-	.same_sound = 1, /* (Changed's shark: many at once, very loud) */
+	.same_sound = 4, /* (Changed's shark: many at once, very loud) */
 };
 
 #define FILE_NAME "mkxpz-settings.ini"
@@ -33,9 +33,11 @@ void settings_load(void)
 	if (!f)
 		return;
 	char line[128];
+	int version = 1, skip = settings.frame_skip, same = settings.same_sound;
 	while (fgets(line, sizeof line, f)) {
 		int v;
-		if (sscanf(line, "music_volume=%d", &v) == 1) settings.music_volume = CLAMP(v, 0, 100);
+		if (sscanf(line, "version=%d", &v) == 1) version = v;
+		else if (sscanf(line, "music_volume=%d", &v) == 1) settings.music_volume = CLAMP(v, 0, 100);
 		else if (sscanf(line, "sound_volume=%d", &v) == 1) settings.sound_volume = CLAMP(v, 0, 100);
 		else if (sscanf(line, "buttons=%d", &v) == 1) settings.buttons = CLAMP(v, 0, 1);
 		else if (sscanf(line, "screen=%d", &v) == 1) settings.screen = CLAMP(v, 0, 2); /* fit, stretch, extended */
@@ -52,9 +54,15 @@ void settings_load(void)
 		/* (the older wide_screen=0/1 key: not read, its default was on everywhere) */
 		else if (sscanf(line, "colors=%d", &v) == 1) settings.colors = CLAMP(v, 0, 1);
 		else if (sscanf(line, "wide_text=%d", &v) == 1) settings.wide_text = CLAMP(v, 0, 1);
-		else if (sscanf(line, "same_sound=%d", &v) == 1) settings.same_sound = CLAMP(v, 0, 3);
+		else if (sscanf(line, "same_sound=%d", &v) == 1) settings.same_sound = CLAMP(v, 0, 4);
 	}
 	fclose(f);
+	/* files from before version 2 had other defaults for these two (1 and
+	 * 1): they take the new ones once */
+	if (version < 2) {
+		settings.frame_skip = skip;
+		settings.same_sound = same;
+	}
 	/* (no longer settings: 3D with the slider, the speed display and sharp
 	 * window text are always on) */
 	settings.stereo = settings.overlay = settings.sharp_text = 1;
@@ -64,7 +72,7 @@ static void settings_save(void)
 {
 	/* written only when something changed (a write shows the floppy icon) */
 	char text[1024];
-	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
+	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nversion=2\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
 	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\nstereo=%d\nsame_sound=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
 	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen, settings.stereo, settings.same_sound);
@@ -165,7 +173,7 @@ bool settings_menu(void)
 			switch (sel) {
 			case I_MUSIC: settings.music_volume = CLAMP(settings.music_volume + dir * 10, 0, 100); audio_volumes_changed(); break;
 			case I_SOUND: settings.sound_volume = CLAMP(settings.sound_volume + dir * 10, 0, 100); audio_volumes_changed(); break;
-			case I_SAME: settings.same_sound = (settings.same_sound + (dir > 0 ? 1 : 3)) % 4; break;
+			case I_SAME: settings.same_sound = (settings.same_sound + (dir > 0 ? 1 : 4)) % 5; break;
 			case I_BUTTONS: settings.buttons ^= 1; break;
 			case I_SCREEN: /* fit, stretch, extended (boot.rb: the wider map at the next frame) */
 				settings.screen = (settings.screen + (dir > 0 ? 1 : 2)) % 3;

@@ -293,6 +293,8 @@ VALUE rb_hash_values(VALUE hash); /* (Ruby's hash.c; only in its internal header
 static int event_update_kind; /* 0 Ruby, 1 "Anti Lag VX"'s (events.c), 2 VX's (scene.c) */
 static ID id_slow_update_events, iv_events, iv_common_events, id_events_direct_ok;
 static VALUE event_update_class;
+static VALUE common_event_class; /* (Game_CommonEvent when its update is the standard one) */
+static ID iv_interpreter;
 
 static VALUE update_event(VALUE e)
 {
@@ -310,10 +312,64 @@ static VALUE fast_update_events(VALUE self)
 	for (long i = 0; i < RARRAY_LEN(list); i++)
 		update_event(RARRAY_AREF(list, i));
 	list = rb_hash_values(ce);
-	for (long i = 0; i < RARRAY_LEN(list); i++)
-		rb_funcall(RARRAY_AREF(list, i), id_update, 0);
+	for (long i = 0; i < RARRAY_LEN(list); i++) {
+		VALUE c = RARRAY_AREF(list, i);
+		/* (VX's standard Game_CommonEvent#update does nothing without a
+		 * parallel process) */
+		if (common_event_class && !RB_SPECIAL_CONST_P(c) && CLASS_OF(c) == common_event_class &&
+		    NIL_P(IV(c, iv_interpreter)))
+			continue;
+		rb_funcall(c, id_update, 0);
+	}
 	RB_GC_GUARD(list);
 	return Qnil;
+}
+
+/* Game_Map#events_xy (VX's standard): the events at x, y; pos? (standard)
+ * read in C for the engine's events */
+static ID id_slow_events_xy, id_pos_q, iv_x, iv_y;
+static VALUE events_xy_map_class, events_xy_event_class;
+
+static VALUE fast_events_xy(VALUE self, VALUE x, VALUE y)
+{
+	VALUE gm = mkxpz_gvar(gv_game_map);
+	if (RB_SPECIAL_CONST_P(gm) || CLASS_OF(gm) != events_xy_map_class || !FIXNUM_P(x) || !FIXNUM_P(y))
+		return rb_funcall(self, id_slow_events_xy, 2, x, y);
+	VALUE ev = IV(gm, iv_events);
+	if (!RB_TYPE_P(ev, T_HASH))
+		return rb_funcall(self, id_slow_events_xy, 2, x, y);
+	VALUE result = rb_ary_new(), list = rb_hash_values(ev);
+	for (long i = 0; i < RARRAY_LEN(list); i++) {
+		VALUE e = RARRAY_AREF(list, i), ex, ey;
+		bool at;
+		if (!RB_SPECIAL_CONST_P(e) && CLASS_OF(e) == events_xy_event_class && FIXNUM_P(ex = IV(e, iv_x)) &&
+		    FIXNUM_P(ey = IV(e, iv_y)))
+			at = ex == x && ey == y; /* (fixnums: equal values, equal VALUEs) */
+		else
+			at = RTEST(rb_funcall(e, id_pos_q, 2, x, y));
+		if (at)
+			rb_ary_push(result, e);
+	}
+	RB_GC_GUARD(list);
+	return result;
+}
+
+static VALUE fast_install_vx_map_more(VALUE self, VALUE common_class, VALUE map_class, VALUE event_class)
+{
+	(void) self;
+	if (RTEST(common_class)) {
+		common_event_class = common_class;
+		rb_gc_register_mark_object(common_class);
+	}
+	if (RTEST(map_class)) {
+		events_xy_map_class = rb_obj_class(mkxpz_gvar(gv_game_map)) == rb_cNilClass ? map_class
+		                                                                          : CLASS_OF(mkxpz_gvar(gv_game_map));
+		events_xy_event_class = event_class;
+		rb_gc_register_mark_object(map_class);
+		rb_gc_register_mark_object(event_class);
+		rb_define_method(map_class, "events_xy", fast_events_xy, 2);
+	}
+	return Qtrue;
 }
 
 /* Game_Interpreter#setup_starting_event (VX's standard): the event loop
@@ -421,5 +477,8 @@ void init_events(void)
 	I(iv_need_refresh, "@need_refresh"); I(iv_starting, "@starting"); I(gv_game_temp, "$game_temp");
 	I(iv_common_event_id, "@common_event_id"); I(id_refresh, "refresh");
 	rb_define_global_function("mkxpz_fast_install_vx_map_loops", fast_install_vx_map_loops, 5);
+	rb_define_global_function("mkxpz_fast_install_vx_map_more", fast_install_vx_map_more, 3);
+	I(iv_interpreter, "@interpreter"); I(id_slow_events_xy, "mkxpz_slow_events_xy"); I(id_pos_q, "pos?");
+	I(iv_x, "@x"); I(iv_y, "@y");
 #undef I
 }

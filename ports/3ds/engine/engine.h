@@ -66,6 +66,7 @@ typedef struct Bitmap_ {
 	unsigned layer_gen;
 	int layer_done;          /* ops already in the layer */
 	float layer_sx, layer_sy;
+	unsigned layer_epoch; /* (text_layer_epoch when made) */
 	/* a big .mkxi's compressed data and its blocks' offsets (random access:
 	 * bitmap_read_rows); lz_tried: not again after a failure */
 	unsigned char *lz;
@@ -213,6 +214,8 @@ bool gpu_wide_possible(void);
 bool gpu_snapshot_begin(void);
 void gpu_snapshot_end(px_t *dst, int w, int h);
 bool gpu_wide_auto(void);    /* what "auto" chooses */
+extern unsigned text_layer_epoch; /* bitmap.c: changed, every text layer is made again */
+extern int gpu_redraw_frames;     /* gpu.c: frames still drawn in full (none skipped) after 2D/3D changed */
 bool gpu_stereo_update(void);  /* 3D on or off (setting and slider); true: on */
 void gpu_present_eye(int eye, int text_shift);
 float gpu_scale_x(void);
@@ -329,6 +332,13 @@ void audio_volumes_changed(void);
 typedef struct { VALUE klass; uint32_t index; } IvCache;
 VALUE mkxpz_ivar(VALUE obj, ID id, IvCache *c);
 VALUE mkxpz_gvar(ID id);
+/* a C object's instance variables, its table looked up once (IV() looks
+ * it up each time); taken again after anything that may add one (a call
+ * into Ruby) */
+typedef struct { VALUE obj; VALUE *ptr; uint32_t n; } IvSet;
+void mkxpz_ivars(VALUE obj, IvSet *set);
+VALUE mkxpz_ivar_from(IvSet *set, ID id, IvCache *c);
+#define IVS(set, id) ({ static IvCache ivs_c_; mkxpz_ivar_from((set), (id), &ivs_c_); })
 VALUE mkxpz_frame_class_name(VALUE frame, bool *singleton);
 #define IV(obj, id) ({ static IvCache iv_c_; mkxpz_ivar((obj), (id), &iv_c_); })
 /* setting one the same way (the slot cached; else rb_ivar_set) */

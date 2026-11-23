@@ -604,6 +604,10 @@ MKXPZ_STOCK_VX = {
   'Game_Character#dash?' => 1832952089,
   'Game_Event#on_screen' => 1066362925, # ("Anti Lag VX" by Anaryu)
   'Game_Map#update_events' => 2215309251,
+  'Spriteset_Map#update_characters' => 2054994623,
+  'Game_CommonEvent#update' => 2487817127,
+  'Game_Map#events_xy' => 2651135462,
+  'Game_Character#pos?' => 3099177633,
   'Game_Interpreter#setup_starting_event' => 796049156,
   'Game_Map#events' => :attr,
   'Game_Map#need_refresh' => :attr,
@@ -685,8 +689,11 @@ def mkxpz_fast_setup_vx
   return mkxpz_log('character sprites: Ruby (not the standard VX methods)') unless
     mkxpz_fast_ok?(Sprite_Character, :sprite) && mkxpz_fast_ok?(Game_Event, :character) && mkxpz_fast_ok?(Game_Map, :map)
   Sprite_Character.send(:alias_method, :mkxpz_slow_update, :update)
-  mkxpz_fast_install_vx(Sprite_Character)
-  mkxpz_log('character sprites: native (VX)')
+  # the standard loop over them too (a Ruby block call per sprite)
+  loop_too = defined?(Spriteset_Map) && mkxpz_stock?(Spriteset_Map, :update_characters)
+  Spriteset_Map.send(:alias_method, :mkxpz_slow_update_characters, :update_characters) if loop_too
+  mkxpz_fast_install_vx(Sprite_Character, loop_too ? Spriteset_Map : nil)
+  mkxpz_log("character sprites: native (VX#{', the loop too' if loop_too})")
 rescue StandardError => e
   mkxpz_log("character sprites: Ruby (#{e.class}: #{e.message})")
 ensure
@@ -730,8 +737,14 @@ def mkxpz_fast_setup_vx_map_loops
     end
   end
   temp = $game_temp ? $game_temp.class : Game_Temp
+  # common events without a parallel process skipped in C; events_xy
+  # (all events, every time: the cat boss in Changed-special asks it often)
+  ce = um && defined?(Game_CommonEvent) && mkxpz_stock?(Game_CommonEvent, :update) ? Game_CommonEvent : nil
+  xy = mkxpz_stock?(Game_Map, :events_xy) && mkxpz_stock?(Game_Map, :events) && mkxpz_stock?(Game_Event, :pos?)
+  Game_Map.send(:alias_method, :mkxpz_slow_events_xy, :events_xy) if xy
   mkxpz_fast_install_vx_map_loops(um ? Game_Map : nil, ss ? Game_Interpreter : nil, temp, Game_Event, kind)
-  mkxpz_log("map loops: native#{' update_events' if um}#{' setup_starting_event' if ss} (event update kind #{kind})")
+  mkxpz_fast_install_vx_map_more(ce, xy ? Game_Map : nil, Game_Event)
+  mkxpz_log("map loops: native#{' update_events' if um}#{' setup_starting_event' if ss}#{' common_events' if ce}#{' events_xy' if xy} (event update kind #{kind})")
 rescue StandardError => e
   mkxpz_log("map loops: Ruby (#{e.class}: #{e.message})")
 end
@@ -899,6 +912,20 @@ def mkxpz_ours?(klass, name)
   loc && loc[0] == 'boot.rb'
 end
 
+module MkxpzWideNumberInput
+  def initialize(*args)
+    super
+    self.mkxpz_wide = true if respond_to?(:mkxpz_wide=)
+  end
+end
+
+module MkxpzWideChoices
+  def update_placement
+    super
+    self.x += Graphics.mkxpz_margin if x + width >= Graphics.width
+  end
+end
+
 def mkxpz_wide_setup
   return unless defined?(Window_Message) && Window_Message.method_defined?(:update)
   return if mkxpz_ours?(Window_Message, :update)
@@ -909,22 +936,33 @@ def mkxpz_wide_setup
       mkxpz_wide_update
     end
 
+    # (the setting changed while a text shows: the box changes at once,
+    # its text taken over (a box left wide stuck out of the screen and its
+    # letters were cut off; a narrow one waited for the next text))
     def mkxpz_wide_fit
       m = Graphics.mkxpz_margin
-      # (XP's windows have no openness: shown is visible)
-      shown = respond_to?(:openness) ? openness > 0 : visible
-      return if @mkxpz_m == m || (@mkxpz_m && shown) || disposed?
+      return if @mkxpz_m == m || disposed?
       old = @mkxpz_m || 0
       @mkxpz_m = m
       self.mkxpz_wide = true
       self.x = x + old - m
       self.width = width - 2 * old + 2 * m
+      had = contents && !contents.disposed? ? contents : nil
+      keep = had && Bitmap.new(had.width, had.height).mkxpz_take(had)
+      font = had && (had.font.dup rescue nil)
       if respond_to?(:create_contents, true)
         create_contents
       else
         # XP: the contents made in initialize, 16 pixels inside each edge
         contents.dispose if contents && !contents.disposed?
         self.contents = Bitmap.new(width - 32, height - 32)
+      end
+      if keep
+        # (the text keeps its place in the box: the contents' left edge
+        # moved with the box's)
+        contents.mkxpz_take(keep)
+        contents.font = font if font
+        keep.dispose
       end
       if @back_bitmap && @back_sprite && respond_to?(:create_back_bitmap, true)
         # VX Ace's dimmed background, as wide as the box
@@ -946,25 +984,14 @@ def mkxpz_wide_setup
   end
   # number input: placed at the wide box's left edge (VX), so it may use
   # the sides too (its first digits were cut off)
-  if defined?(Window_NumberInput) && !mkxpz_ours?(Window_NumberInput, :initialize)
-    Window_NumberInput.class_eval do
-      alias_method :mkxpz_wide_ni_initialize, :initialize
-      def initialize(*args)
-        mkxpz_wide_ni_initialize(*args)
-        self.mkxpz_wide = true if respond_to?(:mkxpz_wide=)
-      end
-    end
-  end
+  # (prepended modules, not aliases: the widescreen script prepends to
+  # these classes at the first frame, and after a reset an alias made then
+  # took the prepended method: the two called each other without end.
+  # Prepending again does nothing.)
+  Window_NumberInput.prepend(MkxpzWideNumberInput) if defined?(Window_NumberInput)
   # VX Ace's choices: at the box's right end
-  if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement) &&
-     !mkxpz_ours?(Window_ChoiceList, :update_placement)
-    Window_ChoiceList.class_eval do
-      alias_method :mkxpz_wide_update_placement, :update_placement
-      def update_placement
-        mkxpz_wide_update_placement
-        self.x += Graphics.mkxpz_margin if x + width >= Graphics.width
-      end
-    end
+  if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement)
+    Window_ChoiceList.prepend(MkxpzWideChoices)
   end
 rescue StandardError => e
   mkxpz_log("wide message box: #{e.class}")
@@ -1309,16 +1336,19 @@ rescue StandardError => e
   mkxpz_log("preload: #{e.class}: #{e.message}")
 end
 
+# (a prepended module: the widescreen script prepends to Spriteset_Map at
+# the first frame; after a reset an alias made then took its initialize, and
+# the two called each other: "stack level too deep" in Changed)
+module MkxpzPreloadHook
+  def initialize(*args)
+    super
+    mkxpz_preload_map
+  end
+end
+
 def mkxpz_preload_setup
   return unless defined?(Spriteset_Map) && Spriteset_Map.private_method_defined?(:initialize)
-  return if mkxpz_ours?(Spriteset_Map, :initialize)
-  Spriteset_Map.class_eval do
-    alias_method :mkxpz_preload_initialize, :initialize
-    def initialize(*args)
-      mkxpz_preload_initialize(*args)
-      mkxpz_preload_map
-    end
-  end
+  Spriteset_Map.prepend(MkxpzPreloadHook)
 end
 
 def mkxpz_prepare

@@ -106,6 +106,7 @@ static bool ops_add(Bitmap *b, Rect r, VALUE str, int align)
 	return true;
 }
 
+unsigned text_layer_epoch;
 static Bitmap *full_layers[16]; /* scale-1 layers made for a freeze */
 static int nfull;
 
@@ -120,7 +121,8 @@ Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy)
 		return NULL;
 	Bitmap *l = b->layer;
 	bool redraw = !l || l->w != w || l->h != h || b->layer_gen != b->ops_gen || b->layer_sx != sx ||
-	              b->layer_sy != sy || b->layer_done > b->nops;
+	              b->layer_sy != sy || b->layer_done > b->nops ||
+	              b->layer_epoch != text_layer_epoch;
 	if (l && (l->w != w || l->h != h))
 		layer_free(&b->layer), l = NULL;
 	if (!l) {
@@ -157,6 +159,7 @@ Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy)
 	b->layer_done = b->nops;
 	b->layer_sx = sx;
 	b->layer_sy = sy;
+	b->layer_epoch = text_layer_epoch;
 	if (sx == 1 && sy == 1 && nfull < 16) /* (only for a freeze: let go after it) */
 		full_layers[nfull++] = b;
 	return l;
@@ -1069,6 +1072,30 @@ static VALUE bitmap_init_copy(VALUE self, VALUE orig)
 	return self;
 }
 
+/* Bitmap#mkxpz_take(old): old's pixels (from the top left, as far as both
+ * reach) and its texts, still sharp: a message box made wider or narrower
+ * (settings "Text boxes") shows the same text at once */
+static VALUE bitmap_take(VALUE self, VALUE other)
+{
+	Bitmap *b = bitmap_get(self), *o = bitmap_get(other);
+	int w = b->w < o->w ? b->w : o->w, h = b->h < o->h ? b->h : o->h;
+	for (int y = 0; y < h; y++)
+		memcpy(b->px + (size_t) y * b->w, o->px + (size_t) y * o->w, (size_t) w * 4);
+	for (int i = 0; i < o->nops; i++) {
+		TextOp *t = &o->ops[i];
+		VALUE keep = b->font;
+		b->font = t->font; /* (ops_add copies the bitmap's font) */
+		bool ok = t->r.x < b->w && t->r.y < b->h && ops_add(b, t->r, t->str, t->align);
+		b->font = keep;
+		if (!ok && t->r.x < b->w && t->r.y < b->h)
+			font_draw_text(b, t->font, t->r.x, t->r.y, t->r.w, t->r.h, t->str, t->align);
+		RB_GC_GUARD(keep);
+	}
+	b->ops_gen++;
+	b->version++;
+	return self;
+}
+
 VALUE bitmap_new_size(int w, int h)
 {
 	VALUE a[2] = { INT2NUM(w), INT2NUM(h) };
@@ -1566,6 +1593,7 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "height", bitmap_height, 0);
 	rb_define_method(cBitmap, "rect", bitmap_rect, 0);
 	rb_define_method(cBitmap, "blt", bitmap_blt_m, -1);
+	rb_define_method(cBitmap, "mkxpz_take", bitmap_take, 1);
 	rb_define_method(cBitmap, "stretch_blt", bitmap_stretch_blt, -1);
 	rb_define_method(cBitmap, "fill_rect", bitmap_fill_rect, -1);
 	rb_define_method(cBitmap, "gradient_fill_rect", bitmap_gradient_fill_rect, -1);

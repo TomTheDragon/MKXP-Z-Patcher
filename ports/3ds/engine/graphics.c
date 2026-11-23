@@ -263,7 +263,8 @@ static void gpu_frame_with(int frozen_alpha)
 	/* skipped (not drawn) when 2 frames late, at most frame_skip (settings:
 	 * 1..5, 0 off) in a row: 1 keeps at least 30 pictures a second, more
 	 * keep the game's speed in slower scenes with fewer pictures */
-	if (settings.frame_skip && frozen_alpha < 0 && now > due + 2 * period && skipped_row < settings.frame_skip) {
+	if (settings.frame_skip && frozen_alpha < 0 && now > due + 2 * period && skipped_row < settings.frame_skip &&
+	    !gpu_redraw_frames) {
 		skipped_row++;
 		t_skipped++;
 		frame_count++;
@@ -276,6 +277,8 @@ static void gpu_frame_with(int frozen_alpha)
 	t_begin += svcGetSystemTick() - tb;
 	draw_eyes(frozen_alpha, stereo);
 	gpu_frame_end();
+	if (gpu_redraw_frames)
+		gpu_redraw_frames--;
 	frame_count++;
 }
 

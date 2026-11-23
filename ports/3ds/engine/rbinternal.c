@@ -43,6 +43,39 @@ VALUE mkxpz_ivar(VALUE obj, ID id, IvCache *c)
 	return v == Qundef ? Qnil : v;
 }
 
+void mkxpz_ivars(VALUE obj, IvSet *set)
+{
+	struct gen_ivtbl *t;
+	set->obj = obj;
+	set->ptr = NULL;
+	set->n = 0;
+	if (!RB_SPECIAL_CONST_P(obj) && RB_BUILTIN_TYPE(obj) == T_DATA && FL_TEST_RAW(obj, FL_EXIVAR) &&
+	    rb_ivar_generic_ivtbl_lookup(obj, &t)) {
+		set->ptr = t->ivptr;
+		set->n = t->numiv;
+	}
+}
+
+VALUE mkxpz_ivar_from(IvSet *set, ID id, IvCache *c)
+{
+	VALUE obj = set->obj;
+	if (RB_SPECIAL_CONST_P(obj) || RB_BUILTIN_TYPE(obj) != T_DATA)
+		return mkxpz_ivar(obj, id, c);
+	VALUE klass = RBASIC(obj)->klass;
+	if (c->klass != klass) {
+		st_table *t = RCLASS_IV_INDEX_TBL(rb_obj_class(obj));
+		st_data_t ent;
+		if (!t || !st_lookup(t, (st_data_t) id, &ent))
+			return rb_ivar_get(obj, id);
+		c->klass = klass;
+		c->index = ((struct rb_iv_index_tbl_entry *) ent)->index;
+	}
+	if (!set->ptr || c->index >= set->n)
+		return Qnil;
+	VALUE v = set->ptr[c->index];
+	return v == Qundef ? Qnil : v;
+}
+
 /* setting a plain object's instance variable in its slot (with the write
  * barrier); anything else (a new variable, frozen, C objects): rb_ivar_set */
 void mkxpz_ivar_set(VALUE obj, ID id, VALUE val, IvCache *c)

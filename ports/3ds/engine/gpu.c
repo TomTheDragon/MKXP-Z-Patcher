@@ -499,6 +499,8 @@ static void top_target(void)
  * true while it's on */
 float gpu_scale_x(void) { return scale_x; }
 
+int gpu_redraw_frames;
+
 bool gpu_stereo_update(void)
 {
 	bool want = settings.stereo && osGet3DSliderState() > 0.0f;
@@ -506,6 +508,11 @@ bool gpu_stereo_update(void)
 		stereo_on = want;
 		top_target();
 		gpu_set_screen(game_w, game_h);
+		/* the whole picture again: every text layer made anew, and the
+		 * next frames drawn (none skipped), so both screens' buffers
+		 * show the new look */
+		text_layer_epoch++;
+		gpu_redraw_frames = 3;
 	}
 	return stereo_on;
 }

@@ -437,7 +437,20 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   by creation (Element.sort_y); characters and objects of the same priority
   overlapped in creation order before.
 - Frame skip: 0 off, 1..5 auto with at most that many skipped pictures in
-  a row (the lateness that is still caught up grows with it).
+  a row (the lateness that is still caught up grows with it); 2 by default
+  (settings files carry `version=2`; older ones take the new defaults of
+  frame skip and "Same sound" (4) once).
+- Maps with many events (VX): character sprites far off the screen (their
+  size and 64 pixels more) are only placed and hidden; Spriteset_Map's
+  sprite loop, Game_CommonEvent#update without a parallel process and
+  Game_Map#events_xy run in C when they are the standard methods (checksums
+  in MKXPZ_STOCK_VX). C objects' instance variables are read through one
+  table lookup per object (IvSet). Changed-special's cat boss (422 events):
+  12.8 -> 8.8 ms of Ruby per frame in the emulator.
+- Hooks into classes that the widescreen script also prepends to
+  (Spriteset_Map, Window_NumberInput, Window_ChoiceList) are prepended
+  modules, not aliases: after a reset an alias took the prepended method
+  and the two called each other.
 - Games in an RGSS archive (Game.rgssad / .rgss2a / .rgss3a):
   `tools/extract-archive.py <archive> [<folder>]` unpacks it (RGSSAD 1
   and 3, as the patcher's archive.rs) for the package; the engine reads

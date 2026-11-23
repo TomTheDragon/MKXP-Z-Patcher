@@ -966,12 +966,14 @@ static bool adjust_vx(VALUE v, VALUE disp, VALUE margin, bool loop, VALUE size, 
 
 static VALUE fast_update_vx(VALUE self)
 {
-	VALUE chr = IV(self, iv_character);
+	IvSet me;
+	mkxpz_ivars(self, &me);
+	VALUE chr = IVS(&me, iv_character);
 	VALUE gm = mkxpz_gvar(id_game_map);
 	if (!fast_ok(CLASS_OF(self), 0) || !fast_ok(CLASS_OF(chr), 1) || !fast_ok(CLASS_OF(gm), 2))
 		return rb_funcall(self, id_slow_update, 0);
 	VALUE aid = IV(chr, iv_animation_id), bid = IV(chr, iv_balloon_id);
-	if (!NIL_P(IV(self, iv_animation)) || !FIXNUM_P(aid) || FIX2LONG(aid) != 0 || !FIXNUM_P(bid) ||
+	if (!NIL_P(IVS(&me, iv_animation)) || !FIXNUM_P(aid) || FIX2LONG(aid) != 0 || !FIXNUM_P(bid) ||
 	    FIX2LONG(bid) != 0)
 		return rb_funcall(self, id_slow_update, 0);
 	/* Sprite_Base#update: Sprite#update, @@animations.clear */
@@ -987,33 +989,21 @@ static VALUE fast_update_vx(VALUE self)
 		rb_funcall(animations_cv, id_clear, 0);
 	}
 	/* update_bitmap: only when the graphic changed */
-	if (!rb_equal(IV(self, iv_tile_id), IV(chr, iv_tile_id)) ||
-	    !rb_equal(IV(self, iv_character_name), IV(chr, iv_character_name)) ||
-	    !rb_equal(IV(self, iv_character_index), IV(chr, iv_character_index)))
+	if (!rb_equal(IVS(&me, iv_tile_id), IV(chr, iv_tile_id)) ||
+	    !rb_equal(IVS(&me, iv_character_name), IV(chr, iv_character_name)) ||
+	    !rb_equal(IVS(&me, iv_character_index), IV(chr, iv_character_index)))
+	{
 		rb_funcall(self, id_update_bitmap, 0);
+		mkxpz_ivars(self, &me); /* (it sets variables, maybe new ones) */
+	}
 	Sprite *s = sprite_get(self);
 	s->visible = !RTEST(IV(chr, iv_transparent));
-	/* update_src_rect */
-	VALUE tile = IV(self, iv_tile_id);
-	if (rb_equal(tile, INT2FIX(0))) {
-		VALUE idx = IV(chr, iv_character_index), pat = IV(chr, iv_pattern);
-		VALUE dir = IV(chr, iv_direction), cw = IV(self, iv_cw), ch = IV(self, iv_ch);
-		if (FIXNUM_P(idx) && FIXNUM_P(pat) && FIXNUM_P(dir) && FIXNUM_P(cw) && FIXNUM_P(ch)) {
-			long long index = FIX2LONG(idx), pattern = FIX2LONG(pat) < 3 ? FIX2LONG(pat) : 1;
-			Rect *r = rect_get(s->src_rect);
-			r->x = (int) ((floor_mod(index, 4) * 3 + pattern) * FIX2LONG(cw));
-			r->y = (int) ((floor_div(index, 4) * 4 + floor_div(FIX2LONG(dir) - 2, 2)) * FIX2LONG(ch));
-			r->w = (int) FIX2LONG(cw);
-			r->h = (int) FIX2LONG(ch);
-		} else {
-			rb_funcall(self, id_update_src_rect, 0);
-		}
-	}
 	/* screen_x, screen_y, screen_z */
 	VALUE map = IV(gm, iv_map);
 	VALUE ctile = IV(chr, iv_tile_id), name = IV(chr, iv_character_name), prio = IV(chr, iv_priority_type);
 	VALUE peak = IV(chr, iv_jump_peak), count = IV(chr, iv_jump_count);
 	long long ax, ay;
+	bool sx_set = false;
 	VALUE st = RB_TYPE_P(map, T_OBJECT) ? IV(map, iv_scroll_type) : Qnil;
 	if (FIXNUM_P(st) && FIXNUM_P(ctile) && RB_TYPE_P(name, T_STRING) && FIXNUM_P(peak) && FIXNUM_P(count) &&
 	    adjust_vx(IV(chr, iv_real_x), IV(gm, iv_display_x), IV(gm, iv_margin_x),
@@ -1025,10 +1015,43 @@ static VALUE fast_update_vx(VALUE self)
 		s->x = (int) CLAMP(floor_div(ax + 8007, 8) - 1000 + 16, -999999, 999999);
 		long long y = floor_div(ay + 8007, 8) - 1000 + 32 - (object ? 0 : 4);
 		s->y = (int) CLAMP(y - floor_div(p * p - n * n, 2), -999999, 999999);
+		sx_set = true;
 	} else {
 		VALUE x = rb_funcall(chr, id_screen_x, 0), y = rb_funcall(chr, id_screen_y, 0);
 		rb_funcall(self, rb_intern("x="), 1, x);
 		rb_funcall(self, rb_intern("y="), 1, y);
+	}
+	/* far off the screen (the sprite's size and 64 pixels more): hidden,
+	 * the rest (frame, z, opacity, a balloon) when it comes near again
+	 * (the cat boss in Changed-special: 245 of 422 events off the
+	 * screen) */
+	VALUE bdur = IVS(&me, iv_balloon_duration);
+	VALUE ow = IVS(&me, iv_cw), oh = IVS(&me, iv_ch);
+	if (sx_set && FIXNUM_P(bdur) && FIX2LONG(bdur) == 0 && FIXNUM_P(ow) && FIXNUM_P(oh)) {
+		long long cw2 = FIX2LONG(ow) / 2 + 64, chh = FIX2LONG(oh) + 64;
+		if (s->x + cw2 < 0 || s->x - cw2 > screen_w || s->y + 64 < 0 || s->y - chh > screen_h) {
+			/* (hidden: its frame (src_rect) may still be the whole sheet,
+			 * e.g. a new sprite, which reached onto the screen) */
+			s->visible = false;
+			return Qnil;
+		}
+	}
+	/* update_src_rect */
+	VALUE tile = IVS(&me, iv_tile_id);
+	if (rb_equal(tile, INT2FIX(0))) {
+		VALUE idx = IV(chr, iv_character_index), pat = IV(chr, iv_pattern);
+		VALUE dir = IV(chr, iv_direction), cw = IVS(&me, iv_cw), ch = IVS(&me, iv_ch);
+		if (FIXNUM_P(idx) && FIXNUM_P(pat) && FIXNUM_P(dir) && FIXNUM_P(cw) && FIXNUM_P(ch)) {
+			long long index = FIX2LONG(idx), pattern = FIX2LONG(pat) < 3 ? FIX2LONG(pat) : 1;
+			Rect *r = rect_get(s->src_rect);
+			r->x = (int) ((floor_mod(index, 4) * 3 + pattern) * FIX2LONG(cw));
+			r->y = (int) ((floor_div(index, 4) * 4 + floor_div(FIX2LONG(dir) - 2, 2)) * FIX2LONG(ch));
+			r->w = (int) FIX2LONG(cw);
+			r->h = (int) FIX2LONG(ch);
+		} else {
+			rb_funcall(self, id_update_src_rect, 0);
+			mkxpz_ivars(self, &me);
+		}
 	}
 	/* screen_z: 200 above, 60 below, a tile by its passage flags (Ruby), 100 */
 	if (FIXNUM_P(prio) && FIX2LONG(prio) == 2)
@@ -1038,7 +1061,10 @@ static VALUE fast_update_vx(VALUE self)
 	else if (FIXNUM_P(prio) && FIXNUM_P(ctile) && FIX2LONG(ctile) <= 0)
 		s->el.z = 100;
 	else
+	{
 		rb_funcall(self, rb_intern("z="), 1, rb_funcall(chr, id_screen_z, 0)); /* (a tile: passages) */
+		mkxpz_ivars(self, &me);
+	}
 	/* opacity, blend_type, bush_depth */
 	VALUE op = IV(chr, iv_opacity), bl = IV(chr, iv_blend_type), bu = IV(chr, iv_bush_depth);
 	if (FIXNUM_P(op) && FIXNUM_P(bl) && FIXNUM_P(bu)) {
@@ -1051,7 +1077,7 @@ static VALUE fast_update_vx(VALUE self)
 		rb_funcall(self, rb_intern("bush_depth="), 1, bu);
 	}
 	/* update_balloon: only while one shows */
-	VALUE bd = IV(self, iv_balloon_duration);
+	VALUE bd = IVS(&me, iv_balloon_duration);
 	if (!FIXNUM_P(bd) || FIX2LONG(bd) > 0)
 		rb_funcall(self, id_update_balloon, 0);
 	return Qnil;
@@ -1060,9 +1086,36 @@ static VALUE fast_update_vx(VALUE self)
 /* (events.c: "Anti Lag VX"'s loops call these directly) */
 VALUE mkxpz_sprite_update_vx(VALUE sprite) { return fast_update_vx(sprite); }
 
-static VALUE fast_install_vx(VALUE self, VALUE klass)
+/* Spriteset_Map#update_characters (VX's standard): each sprite's update,
+ * the engine's called directly */
+static VALUE vx_sprite_class;
+static ID iv_character_sprites_vx, id_slow_update_characters_vx;
+static VALUE fast_update_characters_vx(VALUE self)
+{
+	VALUE list = IV(self, iv_character_sprites_vx);
+	if (!RB_TYPE_P(list, T_ARRAY))
+		return rb_funcall(self, id_slow_update_characters_vx, 0);
+	for (long i = 0; i < RARRAY_LEN(list); i++) {
+		VALUE sp = RARRAY_AREF(list, i);
+		if (!RB_SPECIAL_CONST_P(sp) && CLASS_OF(sp) == vx_sprite_class)
+			fast_update_vx(sp);
+		else
+			rb_funcall(sp, rb_intern("update"), 0);
+	}
+	return list;
+}
+
+static VALUE fast_install_vx(VALUE self, VALUE klass, VALUE spriteset)
 {
 	(void) self;
+	vx_sprite_class = klass;
+	rb_gc_register_mark_object(klass);
+	if (RTEST(spriteset)) {
+		rb_gc_register_mark_object(spriteset);
+		iv_character_sprites_vx = rb_intern("@character_sprites");
+		id_slow_update_characters_vx = rb_intern("mkxpz_slow_update_characters");
+		rb_define_method(spriteset, "update_characters", fast_update_characters_vx, 0);
+	}
 	cSpriteBase = rb_class_superclass(klass);
 	rb_gc_register_mark_object(cSpriteBase);
 	rb_gc_register_address(&animations_cv);
@@ -1288,7 +1341,7 @@ void init_fast(void)
 	I(iv_move_frequency, "@move_frequency"); I(iv_trigger, "@trigger"); I(iv_interpreter, "@interpreter");
 #undef I
 	rb_define_global_function("mkxpz_fast_install", fast_install, 1);
-	rb_define_global_function("mkxpz_fast_install_vx", fast_install_vx, 1);
+	rb_define_global_function("mkxpz_fast_install_vx", fast_install_vx, 2);
 	rb_define_global_function("mkxpz_fast_install_event_update_vx", fast_install_event_update_vx, 2);
 	iv_wait_count = rb_intern("@wait_count");
 	rb_define_global_function("mkxpz_fast_install_event_update", fast_install_event_update, 1);
