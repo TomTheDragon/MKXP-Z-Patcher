@@ -303,6 +303,7 @@ typedef struct {
 	int screen;     /* 0 fit, 1 stretch */
 	int wide_text;  /* fit: message boxes over the screen's whole width */
 	int frame_skip; /* 0 off, 1 auto */
+	int same_sound; /* the same sound effect at most this often at once (0: no limit) */
 	int show_speed; /* "Bottom log": messages and speed lines on the bottom screen (off) */
 	int log_file;   /* mkxpz-3ds.log in the game folder (off; also on with a file mkxpz-log) */
 	int overlay;    /* game speed and memory on the bottom screen */

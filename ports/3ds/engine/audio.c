@@ -682,6 +682,7 @@ static Sound sounds[SE_CACHE];
 static size_t se_bytes;
 static unsigned use_clock;
 static ndspWaveBuf se_wb[CH_SE_N];
+static unsigned se_started[CH_SE_N], se_clock; /* (when each channel's sound started) */
 static int next_se;
 
 /* lets go of the least recently used sound effect that isn't playing;
@@ -930,14 +931,32 @@ static VALUE a_se_play(int argc, VALUE *argv, VALUE self)
 	if (!snd)
 		return Qnil;
 	int vol = argc > 1 ? num2int(argv[1]) : 80, pitch = argc > 2 ? num2int(argv[2]) : 100;
-	/* a free channel, else the oldest one */
 	int c = -1;
+	/* (settings "Same sound": already playing that often: its oldest one
+	 * starts again, instead of one more on top: many at once added up to
+	 * a very loud sound, e.g. Changed's shark fight) */
+	if (settings.same_sound > 0) {
+		int n = 0, oldest = -1;
+		for (int i = 0; i < CH_SE_N; i++)
+			/* (queued counts too: several started in the same frame aren't
+			 * playing yet for the DSP) */
+			if (se_wb[i].data_pcm16 == snd->pcm &&
+			    (se_wb[i].status == NDSP_WBUF_QUEUED || se_wb[i].status == NDSP_WBUF_PLAYING)) {
+				n++;
+				if (oldest < 0 || se_started[i] < se_started[oldest])
+					oldest = i;
+			}
+		if (n >= settings.same_sound)
+			c = oldest;
+	}
+	/* a free channel, else the oldest one */
 	for (int i = 0; i < CH_SE_N && c < 0; i++)
 		if (!ndspChnIsPlaying(CH_SE0 + (next_se + i) % CH_SE_N))
 			c = (next_se + i) % CH_SE_N;
 	if (c < 0)
 		c = next_se;
 	next_se = (c + 1) % CH_SE_N;
+	se_started[c] = ++se_clock;
 	int ch = CH_SE0 + c;
 	ndspChnWaveBufClear(ch);
 	ndspChnReset(ch);
