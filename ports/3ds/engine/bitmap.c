@@ -415,7 +415,7 @@ static bool mkxi_index(Bitmap *b)
 	unsigned char *d = size > 32 && (size_t) size <= LZ_KEEP_MAX ? malloc((size_t) size) : NULL;
 	bool ok = d && fread(d, 1, (size_t) size, f) == (size_t) size;
 	fclose(f);
-	if (ok && !memcmp(d, "MKXI", 4) && le32(d + 4) == 2 && (int) le32(d + 8) == b->w && (int) le32(d + 12) == b->h) {
+	if (ok && !memcmp(d, "MKXI", 4) && (le32(d + 4) & 0xff) == 2 && (int) le32(d + 8) == b->w && (int) le32(d + 12) == b->h) {
 		/* version 2: tiles (convert-images.py); their table */
 		int tile = (int) le32(d + 16), n = (int) le32(d + 20);
 		int tx = tile > 0 ? (b->w + tile - 1) / tile : 0, ty = tile > 0 ? (b->h + tile - 1) / tile : 0;
@@ -439,7 +439,7 @@ static bool mkxi_index(Bitmap *b)
 		b->mkxi_version = 2;
 		return true;
 	}
-	if (!ok || memcmp(d, "MKXI", 4) || le32(d + 4) != 1 || (int) le32(d + 8) != b->w || (int) le32(d + 12) != b->h ||
+	if (!ok || memcmp(d, "MKXI", 4) || (le32(d + 4) & 0xff) != 1 || (int) le32(d + 8) != b->w || (int) le32(d + 12) != b->h ||
 	    le32(d + 16) != 0x184D2204) {
 		free(d);
 		return false;
@@ -532,6 +532,25 @@ const px_t *bitmap_tile(Bitmap *b, int i, int j, int *tw, int *th, int *tile)
 	if (!lz4_frame(b->lz + b->blk[2 * k], b->blk[2 * k + 1], (unsigned char *) buf, want))
 		return NULL;
 	return buf;
+}
+
+/* (gpu.c) a tiled image's tile size (0: not tiled) */
+void bitmap_tile_size(Bitmap *b, int *tile)
+{
+	*tile = mkxi_index(b) && b->mkxi_version == 2 ? b->blk_max : 0;
+}
+
+/* (gpu.c) a tiled image's tile k: the first tile with the same data
+ * (convert-images.py stores identical tiles once: the same place in the
+ * file), or k; only with tiles of the size piece and n of them */
+int bitmap_tile_alias(Bitmap *b, int k, int piece, int n)
+{
+	if (!mkxi_index(b) || b->mkxi_version != 2 || b->blk_max != piece || b->nblk != n || k >= n || !b->blk[2 * k + 1])
+		return k;
+	for (int t = 0; t < k; t++)
+		if (b->blk[2 * t] == b->blk[2 * k] && b->blk[2 * t + 1] == b->blk[2 * k + 1])
+			return t;
+	return k;
 }
 
 /* rows y0 .. y1-1 of a tiled image: its tile rows unpacked into a band */
@@ -753,8 +772,12 @@ static bool load_mkxi(Bitmap *b, const char *path)
 	if (!ok)
 		log_only("%s: read %u of %ld bytes%s\n", path, (unsigned) got, size, data ? "" : " (no memory)");
 	uint32_t head[4];
-	if (ok)
+	if (ok) {
 		memcpy(head, data, 16);
+		/* (the version's second byte: the texture format, convert-images.py) */
+		b->tex_fmt = (unsigned char) ((head[1] >> 8) & 0x7f);
+		head[1] &= 0xff;
+	}
 	if (ok && !memcmp(head, "MKXI", 4) && head[1] == 2 && head[2] && head[3] && head[2] <= 8192 && head[3] <= 8192 &&
 	    size >= 24) {
 		/* tiled (version 2): each tile into its place */
@@ -844,7 +867,7 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
 	if (!f)
 		return false;
 	uint32_t head[4];
-	if (fread(head, 1, 16, f) != 16 || memcmp(head, "MKXI", 4) || head[1] != 1 || (int) head[2] != b->w ||
+	if (fread(head, 1, 16, f) != 16 || memcmp(head, "MKXI", 4) || (head[1] & 0xff) != 1 || (int) head[2] != b->w ||
 	    (int) head[3] != b->h) {
 		fclose(f);
 		return false;
@@ -957,8 +980,9 @@ static VALUE bitmap_init(int argc, VALUE *argv, VALUE self)
 		if (!loaded && pl > 5 && !strcasecmp(path + pl - 5, ".mkxi")) {
 			FILE *hf = fopen(path, "rb");
 			uint32_t head[4];
-			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && (head[1] == 1 || head[1] == 2) && head[2] &&
-			    head[3] && head[2] <= 8192 && head[3] <= 8192 && (size_t) head[2] * head[3] * 4 >= 256 * 1024) {
+			if (hf && fread(head, 1, 16, hf) == 16 && !memcmp(head, "MKXI", 4) && ((head[1] & 0xff) == 1 || (head[1] & 0xff) == 2) &&
+			    head[2] && head[3] && head[2] <= 8192 && head[3] <= 8192 && (size_t) head[2] * head[3] * 4 >= 256 * 1024) {
+				b->tex_fmt = (unsigned char) ((head[1] >> 8) & 0x7f);
 				b->w = (int) head[2];
 				b->h = (int) head[3];
 				b->dropped = true;

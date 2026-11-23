@@ -29,8 +29,35 @@ def run(cmd, data=None):
     return subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
 
 
-TILE = 256
+TILE = 128
 TILED_MIN = 4 * 1024 * 1024
+# the version word's second byte: the texture format that represents the
+# image exactly (the engine uses it while the image is unchanged; 0x80:
+# decided, for up_to_date): 0 RGBA8, 1 RGB8, 2 LA8, 3 L8, 4 LA4, 5 L4,
+# 6 A8, 7 A4
+FMT_DECIDED = 0x80
+FOUR_BIT = set(range(0, 256, 17))
+
+
+def exact_format(raw):
+    """the smallest GPU texture format holding every pixel exactly (also
+    the colour of invisible ones: the GPU's filtering mixes it in)"""
+    r, g, b, a = raw[0::4], raw[1::4], raw[2::4], raw[3::4]
+    n = len(a)
+    opaque = a.count(255) == n
+    grey = r == g == b
+    black = r.count(0) == n and grey
+    a4 = set(a) <= FOUR_BIT
+    l4 = set(r) <= FOUR_BIT
+    if black and not opaque:
+        return 7 if a4 else 6
+    if grey and opaque:
+        return 5 if l4 else 3
+    if grey:
+        return 4 if l4 and a4 else 2
+    if opaque:
+        return 1
+    return 0
 
 
 def up_to_date(path, w_h_big):
@@ -41,17 +68,22 @@ def up_to_date(path, w_h_big):
     if len(head) < 8:
         return False
     version = struct.unpack_from("<I", head, 4)[0]
+    if not (version >> 8) & FMT_DECIDED:
+        return False
     if w_h_big:
-        return version == 2
-    return version == 1 and len(head) == 22 and (head[21] >> 4) & 7 == 4
+        return version & 0xff == 2 and len(head) >= 20 and struct.unpack_from("<I", head, 16)[0] == TILE
+    return version & 0xff == 1 and len(head) == 22 and (head[21] >> 4) & 7 == 4
 
 
-def tiled(raw, w, h, lz4):
-    """version 2: 256x256 tiles, each its own LZ4 frame"""
+def tiled(raw, w, h, lz4, fmt):
+    """version 2: 128x128 tiles, each its own LZ4 frame; identical tiles
+    stored once (the same place in the table: the engine shares their
+    texture)"""
     tx, ty = (w + TILE - 1) // TILE, (h + TILE - 1) // TILE
-    head = b"MKXI" + struct.pack("<IIIII", 2, w, h, TILE, tx * ty)
+    head = b"MKXI" + struct.pack("<IIIII", 2 | (fmt | FMT_DECIDED) << 8, w, h, TILE, tx * ty)
     at = len(head) + 8 * tx * ty
     table, data = [], []
+    seen = {}
     for j in range(ty):
         for i in range(tx):
             x0, y0 = i * TILE, j * TILE
@@ -60,8 +92,13 @@ def tiled(raw, w, h, lz4):
             if not any(rows[3::4]):
                 table.append((0, 0))
                 continue
+            key = (tw, th, rows)
+            if key in seen:
+                table.append(seen[key])
+                continue
             packed = run(lz4 + ["-12", "-B4", "-q", "-c", "-"], rows)
             table.append((at, len(packed)))
+            seen[key] = table[-1]
             data.append(packed)
             at += len(packed)
     return head + b"".join(struct.pack("<II", o, n) for o, n in table) + b"".join(data)
@@ -91,12 +128,13 @@ def main(game):
                 continue
             # 64 KB blocks: unpacking then needs no big extra buffer (the
             # default 4 MB blocks don't fit into an original 3DS's memory)
+            fmt = exact_format(raw)
             with open(dst, "wb") as f:
                 if big:
-                    f.write(tiled(raw, w, h, lz4))
+                    f.write(tiled(raw, w, h, lz4, fmt))
                 else:
                     packed = run(lz4 + ["-12", "-B4", "-q", "-c", "-"], raw)
-                    f.write(b"MKXI" + struct.pack("<III", 1, w, h) + packed)
+                    f.write(b"MKXI" + struct.pack("<III", 1 | (fmt | FMT_DECIDED) << 8, w, h) + packed)
             count += 1
             before += os.path.getsize(src)
             after += os.path.getsize(dst)

@@ -73,6 +73,7 @@ typedef struct Bitmap_ {
 	int nblk, blk_max;
 	bool lz_tried;
 	bool whole;      /* texture in one piece (a tilemap uses it) */
+	unsigned char tex_fmt; /* the texture format the file says fits exactly (0 RGBA8; convert-images.py) */
 	int mkxi_version; /* (of the kept data: 1 rows, 2 tiles of blk_max; blk: offset, length pairs) */
 } Bitmap;
 typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;
@@ -133,6 +134,8 @@ void pack_list(const char *dir, void (*add)(const char *name, void *ctx), void *
 /* a tiled .mkxi's tile (i, j) unpacked (a buffer reused by the next call;
  * NULL: not a tiled image); its size in *tw, *th; *tile its edge length */
 const px_t *bitmap_tile(Bitmap *b, int i, int j, int *tw, int *th, int *tile);
+int bitmap_tile_alias(Bitmap *b, int k, int piece, int n); /* the first tile with the same data */
+void bitmap_tile_size(Bitmap *b, int *tile); /* 0: not a tiled image */
 px_t *bitmap_px_alone(Bitmap *b); /* bitmap_px when no other image's pixels are in use */
 extern unsigned bitmap_released;
 size_t heap_free(void);     /* free normal memory (memory.c) */
