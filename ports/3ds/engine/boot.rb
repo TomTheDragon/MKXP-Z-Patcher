@@ -165,6 +165,7 @@ module Kernel
 
   def msgbox(*args)
     $stdout.puts(args.map(&:to_s).join)
+    mkxpz_log("message box: #{args.map(&:to_s).join}") if respond_to?(:mkxpz_log, true)
     nil
   end
 
@@ -206,8 +207,210 @@ module Kernel
     loop { Graphics.update }
   end
 end
-# XP / VX print with message boxes too
-alias print msgbox if $MKXPZ_RGSS >= 2
+# --- what RGSS1-3 had from Ruby 1.8 / 1.9 (as MKXP-Z's ruby_classic_wrap.rb)
+class Hash
+  alias_method :index, :key unless method_defined?(:index)
+end
+class Object
+  TRUE = true unless const_defined?(:TRUE)
+  FALSE = false unless const_defined?(:FALSE)
+  NIL = nil unless const_defined?(:NIL)
+  alias_method :id, :object_id unless method_defined?(:id)
+  alias_method :type, :class unless method_defined?(:type)
+end
+class NilClass
+  def id; 4; end
+end
+class TrueClass
+  def id; 2; end
+end
+# Ruby 1.8: string[i] = 65 set a character code (Heartache 101's input
+# script); later Ruby raises a TypeError for it
+class String
+  alias_method :mkxpz_classic_aset, :[]=
+  def []=(*args)
+    args[-1] = (args[-1] & 255).chr if args.size >= 2 && args[-1].is_a?(Integer)
+    mkxpz_classic_aset(*args)
+  end
+end
+
+# Windows' text mode: reading a file opened with "r" (not "rb") turned
+# CRLF line ends into "\n" (games compare lines with "\n", Heartache 101's
+# profile files have CRLF); binary reads stay as they are
+class File
+  class << self
+    def mkxpz_text_read?(mode, opts)
+      mode = opts[:mode] if opts.key?(:mode)
+      mode.nil? || (mode.is_a?(String) && mode.start_with?('r') && !mode.include?('b') && !mode.include?('+') &&
+                    !mode.include?(':'))
+    end
+    alias_method :mkxpz_text_open, :open
+    def open(name, mode = nil, *rest, **opts, &blk)
+      if mkxpz_text_read?(mode, opts) && !opts.key?(:universal_newline) && !opts.key?(:binmode) && rest.empty?
+        opts = opts.merge(universal_newline: true)
+      end
+      mode ? mkxpz_text_open(name, mode, *rest, **opts, &blk) : mkxpz_text_open(name, **opts, &blk)
+    end
+  end
+end
+class IO
+  class << self
+    %i[read readlines foreach].each do |m|
+      alias_method :"mkxpz_text_#{m}", m
+      define_method(m) do |name, *args, **opts, &blk|
+        # (File.read etc. without a mode: text, as on Windows)
+        if self <= File && !opts.key?(:mode) && !opts.key?(:binmode) && !opts.key?(:universal_newline) &&
+           name.is_a?(String)
+          opts = opts.merge(universal_newline: true)
+        end
+        send(:"mkxpz_text_#{m}", name, *args, **opts, &blk)
+      end
+    end
+  end
+end
+
+# --- MKXP-Z's own additions (System, Graphics.delta, Input.release?...),
+# for games written for MKXP-Z (Pokemon Essentials v21+): each only where
+# the game doesn't define it itself. On the 3DS: no keyboard, mouse or
+# window, so those answer "nothing".
+module System
+  MKXPZ_START = Process.clock_gettime(Process::CLOCK_MONOTONIC) rescue Time.now.to_f
+  class << self
+    def uptime
+      (Process.clock_gettime(Process::CLOCK_MONOTONIC) rescue Time.now.to_f) - MKXPZ_START
+    end
+    def platform; 'Nintendo 3DS'; end
+    def is_windows?; false; end
+    def is_mac?; false; end
+    def is_linux?; false; end
+    def is_really_windows?; false; end
+    def is_really_mac?; false; end
+    def is_really_linux?; false; end
+    def is_rosetta?; false; end
+    def is_wine?; false; end
+    def user_language; 'en_US'; end
+    def user_name; 'Player'; end
+    def data_directory; './'; end
+    def game_title
+      @mkxpz_title ||= (File.read('Game.ini')[/^\s*Title\s*=\s*(.*?)\s*$/i, 1] rescue nil).to_s
+    end
+    def mount(*) nil; end
+    def unmount(*) nil; end
+    def reload_cache(*) nil; end
+    def set_window_title(*) nil; end
+    def show_settings(*) nil; end
+    def desensitize(name); name; end
+    def nproc; 2; end
+    def memory; 64; end
+    def launch(*) nil; end
+    def default_font_family; Font.default_name; end
+    def power_state; { discharging: true, seconds: nil, percent: nil }; end
+    def puts(*a) mkxpz_log(a.join("\n")); end
+    def raw_key_states; ''; end
+  end
+  CONFIG = {} unless const_defined?(:CONFIG)
+  VERSION = '2.4.2' unless const_defined?(:VERSION)
+end
+
+module Graphics
+  class << self
+    def mkxpz_compat_def(name, &blk)
+      define_method(name, &blk) unless method_defined?(name)
+    end
+  end
+  # seconds since the last Graphics.update (MKXP-Z), set by the update below
+  @mkxpz_delta = 1.0 / 60
+  class << self
+    alias_method :mkxpz_compat_update, :update
+    def update
+      now = System.uptime
+      @mkxpz_delta = @mkxpz_last ? now - @mkxpz_last : 1.0 / 60
+      @mkxpz_last = now
+      Input.mkxpz_compat_track if Input.respond_to?(:mkxpz_compat_track)
+      mkxpz_compat_update
+    end
+    def delta; @mkxpz_delta; end
+    def fullscreen; false; end
+    def fullscreen=(v); v; end
+    def center; nil; end
+    def scale; 1.0; end
+    def scale=(v); v; end
+    def frame_time; @mkxpz_delta; end
+    def average_frame_rate; frame_rate; end
+    def display_width; 400; end
+    def display_height; 240; end
+    def show_cursor; false; end
+    def show_cursor=(v); v; end
+    def fixed_aspect_ratio; true; end
+    def fixed_aspect_ratio=(v); v; end
+    def smooth_scaling; 1; end
+    def smooth_scaling=(v); v; end
+    def integer_scaling; false; end
+    def integer_scaling=(v); v; end
+    def screenshot(*) false; end
+    def vsync; true; end
+    def vsync=(v); v; end
+  end
+end
+
+module Input
+  class << self
+    # how long each button has been held (frames) and what was held in the
+    # last frame: from the first use of release? / time? / count on
+    def mkxpz_compat_track
+      return unless @mkxpz_track
+      @mkxpz_prev = @mkxpz_now || {}
+      @mkxpz_now = {}
+      @mkxpz_frames ||= Hash.new(0)
+      @mkxpz_track.each_key do |k|
+        held = press?(k)
+        @mkxpz_now[k] = held
+        @mkxpz_frames[k] = held ? @mkxpz_frames[k] + 1 : 0
+      end
+    end
+    def mkxpz_watch(k)
+      (@mkxpz_track ||= {})[k] = true
+    end
+    def release?(k)
+      mkxpz_watch(k)
+      (@mkxpz_prev || {})[k] && !press?(k) ? true : false
+    end
+    def count(k)
+      mkxpz_watch(k)
+      (@mkxpz_frames || {})[k].to_i
+    end
+    def time?(k)
+      count(k) / 60.0
+    end
+    def pressex?(*) false; end
+    def triggerex?(*) false; end
+    def repeatex?(*) false; end
+    def releaseex?(*) false; end
+    def repeatcount(k); count(k); end
+    def timeex?(*) 0.0; end
+    def text_input; false; end
+    def text_input=(v); v; end
+    def gets; ''; end
+    def clipboard; ''; end
+    def clipboard=(v); v; end
+    def scroll_v; 0; end
+    def mouse_x; 0; end
+    def mouse_y; 0; end
+    def mouse_in_window; false; end
+    def key_name(k); k.to_s; end
+    def axis_triggerex?(*) false; end
+    def joystick; nil; end
+    def rumble(*) nil; end
+  end
+end
+
+class Bitmap
+  def self.max_size; 1024; end unless respond_to?(:max_size)
+end
+
+# XP / VX print with message boxes too (RGSS1's print is one as well:
+# Middens shows "Unable to find file" with it)
+alias print msgbox
 
 $stdout.sync = true
 
@@ -673,13 +876,21 @@ def mkxpz_wide_setup
 
     def mkxpz_wide_fit
       m = Graphics.mkxpz_margin
-      return if @mkxpz_m == m || (@mkxpz_m && openness > 0) || disposed?
+      # (XP's windows have no openness: shown is visible)
+      shown = respond_to?(:openness) ? openness > 0 : visible
+      return if @mkxpz_m == m || (@mkxpz_m && shown) || disposed?
       old = @mkxpz_m || 0
       @mkxpz_m = m
       self.mkxpz_wide = true
       self.x = x + old - m
       self.width = width - 2 * old + 2 * m
-      create_contents
+      if respond_to?(:create_contents, true)
+        create_contents
+      else
+        # XP: the contents made in initialize, 16 pixels inside each edge
+        contents.dispose if contents && !contents.disposed?
+        self.contents = Bitmap.new(width - 32, height - 32)
+      end
       if @back_bitmap && @back_sprite && respond_to?(:create_back_bitmap, true)
         # VX Ace's dimmed background, as wide as the box
         @back_bitmap.dispose
@@ -815,7 +1026,57 @@ def mkxpz_run_scripts
       eval(File.read('mkxpz-test.rb'), TOPLEVEL_BINDING, 'mkxpz-test.rb')
       test = false
     end
-    eval(s[3], TOPLEVEL_BINDING, name.empty? ? "Section#{i}" : name)
+    file = name.empty? ? "Section#{i}" : name
+    begin
+      eval(s[3], TOPLEVEL_BINDING, file)
+    rescue SyntaxError => e
+      # (the section itself doesn't compile: nothing of it ran yet)
+      raise unless e.message.start_with?("#{file}:")
+      tries = (tries || 0) + 1
+      fixed = mkxpz_ruby18_fix(s[3], e.message, file)
+      raise if fixed == s[3] || tries > 5
+      mkxpz_log("#{file}: Ruby 1.8 syntax rewritten")
+      s[3] = fixed
+      $mkxpz_sections[file] = fixed if $mkxpz_sections[file]
+      retry
+    end
+  end
+end
+
+# Ruby 1.8 syntax that later Ruby (and MKXP-Z's) rejects, as RPG Maker XP /
+# VX scripts have it: "when 3:" (now "when 3 then") and a space before an
+# argument list, "Bitmap.new (w, h)" (now a syntax error). Only for a
+# section that doesn't compile.
+MKXPZ_KEYWORDS = %w[if unless while until and or not when in elsif case then return else do begin end yield
+                    defined? super].freeze
+def mkxpz_ruby18_fix(code, message = '', file = nil)
+  # "next" / "break" / "redo" outside a loop: Ruby 1.8 compiled it (and
+  # raised only when it ran there); the lines Ruby names now raise that
+  if file
+    lines = code.lines
+    message.scan(/^#{Regexp.escape(file)}:(\d+): Invalid (next|break|redo|retry)/) do |n, word|
+      i = n.to_i - 1
+      lines[i] = lines[i].sub(/\b#{word}\b/, "raise(LocalJumpError, '#{word}')") if lines[i]
+    end
+    code = lines.join
+  end
+  # (\r: scripts with Windows line ends)
+  code = code.gsub(/\bwhen\b([^\n:#]*[^:\s]):(?=[ \t\r]|$)/) { "when#{$1} then" }
+  code = code.gsub(/(?<![\w@$:])((?:[A-Za-z_]\w*\.)*[a-z_]\w*[?!]?) +\(([^()\n]*,[^()\n]*)\)/) do
+    MKXPZ_KEYWORDS.include?($1) ? $& : "#{$1}(#{$2})"
+  end
+  # block parameters that are instance or global variables:
+  # "do |@infile|" -> "do |mkxpz_p0| @infile = mkxpz_p0;"
+  code = code.gsub(/(\bdo[ \t]*|\{[ \t]*)\|([^|\n]*[@$][^|\n]*)\|/) do
+    opener, params = $1, $2
+    names = params.split(',').map(&:strip)
+    temps = names.each_with_index.map { |n, i| n =~ /\A[@$]/ ? "mkxpz_p#{i}" : n }
+    sets = names.each_with_index.select { |n, _| n =~ /\A[@$]/ }.map { |n, i| "#{n} = mkxpz_p#{i};" }
+    "#{opener}|#{temps.join(', ')}| #{sets.join(' ')}"
+  end
+  # "x.is_a? (Float)": a predicate's single argument too
+  code.gsub(/(?<![\w@$:])((?:[A-Za-z_]\w*\.)*[a-z_]\w*[?!]) +\(([^()\n]*)\)/) do
+    MKXPZ_KEYWORDS.include?($1) ? $& : "#{$1}(#{$2})"
   end
 end
 

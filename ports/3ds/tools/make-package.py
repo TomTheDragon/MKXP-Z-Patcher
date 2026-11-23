@@ -28,10 +28,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEVKITPRO = os.environ.get("DEVKITPRO", os.path.join(HERE, "..", "..", "..", "dist", "devkitpro"))
 
 
+def game_base(game):
+    """the name of the game's .exe/.ini/archive: "game" (Game.exe), or e.g.
+    "pocket mirror" (RGSS takes them from the .exe's name)"""
+    names = {n.lower() for n in os.listdir(game)}
+    if "game.ini" in names:
+        return "game"
+    for n in sorted(names):
+        if n.endswith(".ini") and n[:-4] + ".exe" in names:
+            return n[:-4]
+    return "game"
+
+
 def game_title(game):
     """Game.ini's Title (Windows code page or UTF-8)"""
+    base = game_base(game)
     for name in os.listdir(game):
-        if name.lower() == "game.ini":
+        if name.lower() == base + ".ini":
             raw = open(os.path.join(game, name), "rb").read()
             for enc in ("utf-8-sig", "cp1252", "cp932"):
                 try:
@@ -116,8 +129,9 @@ def exe_icon(exe):
 def icon_png(game, tmp):
     """a 48x48 PNG of the game's icon, or None"""
     magick = shlex.split(os.environ.get("MAGICK", "magick"))
+    base = game_base(game)
     for name in os.listdir(game):
-        if name.lower() == "game.exe":
+        if name.lower() == base + ".exe":
             ico = exe_icon(os.path.join(game, name))
             if not ico:
                 return None

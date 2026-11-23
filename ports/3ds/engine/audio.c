@@ -335,10 +335,49 @@ typedef struct {
 } Sound;
 
 #define SE_CACHE 48
+/* (decoded sound effects live in linear memory, which textures need too:
+ * at most this much; Pocket Mirror's 55 effects took almost all of it) */
+#define SE_BYTES (4u * 1024 * 1024)
 static Sound sounds[SE_CACHE];
+static size_t se_bytes;
 static unsigned use_clock;
 static ndspWaveBuf se_wb[CH_SE_N];
 static int next_se;
+
+/* lets go of the least recently used sound effect that isn't playing;
+ * false if there's none (any: also from textures, gpu.c, when graphics
+ * memory runs short) */
+static bool se_release_one(bool any)
+{
+	(void) any;
+	Sound *old = NULL;
+	for (int i = 0; i < SE_CACHE; i++) {
+		if (!sounds[i].pcm)
+			continue;
+		bool playing = false;
+		for (int c = 0; c < CH_SE_N; c++)
+			if (se_wb[c].data_pcm16 == sounds[i].pcm && ndspChnIsPlaying(CH_SE0 + c))
+				playing = true;
+		if (!playing && (!old || sounds[i].used < old->used))
+			old = &sounds[i];
+	}
+	if (!old)
+		return false;
+	for (int c = 0; c < CH_SE_N; c++)
+		if (se_wb[c].data_pcm16 == old->pcm) {
+			ndspChnWaveBufClear(CH_SE0 + c);
+			se_wb[c].data_pcm16 = NULL;
+		}
+	linearFree(old->pcm);
+	se_bytes -= (size_t) old->frames * old->channels * 2;
+	old->pcm = NULL;
+	return true;
+}
+
+bool audio_release_memory(void)
+{
+	return audio_ok && se_release_one(true);
+}
 
 static Sound *sound_load(const char *name)
 {
@@ -386,8 +425,12 @@ static Sound *sound_load(const char *name)
 				se_wb[c].data_pcm16 = NULL;
 			}
 		linearFree(slot->pcm);
+		se_bytes -= (size_t) slot->frames * slot->channels * 2;
 		slot->pcm = NULL;
 	}
+	/* within the budget: the least recently used ones go */
+	while (n > 0 && se_bytes + (size_t) n * src.channels * 2 > SE_BYTES && se_release_one(false))
+		;
 	int16_t *pcm = n > 0 ? linearAlloc(n * src.channels * 2) : NULL;
 	if (pcm) {
 		memcpy(pcm, tmp, n * src.channels * 2);
@@ -398,6 +441,7 @@ static Sound *sound_load(const char *name)
 		slot->channels = src.channels;
 		slot->rate = src.rate;
 		slot->used = ++use_clock;
+		se_bytes += (size_t) n * src.channels * 2;
 	}
 	log_slow_load("sound", name, t_load);
 	free(tmp);
@@ -496,7 +540,7 @@ static VALUE a_me_fade(VALUE self, VALUE ms) { request_fade(CH_ME, ms); return Q
  * while 3 MB of linear memory are left) */
 static VALUE a_preload_se(VALUE self, VALUE name)
 {
-	if (audio_ok && linearSpaceFree() >= 2u * 1024 * 1024)
+	if (audio_ok && linearSpaceFree() >= 2u * 1024 * 1024 && se_bytes < 3u * 1024 * 1024)
 		sound_load(StringValueCStr(name));
 	return Qnil;
 }

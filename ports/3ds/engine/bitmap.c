@@ -724,7 +724,7 @@ static bool find_image(const char *name, char *out, size_t n)
 	snprintf(stem, sizeof stem, "%s", name);
 	char *dot = strrchr(stem, '.');
 	if (dot && !strchr(dot, '/') && !strchr(dot, '\\') &&
-	    (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".bmp")))
+	    (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".bmp")))
 		*dot = 0;
 	static const char *const mkxi[] = { ".mkxi", NULL };
 	if (file_find(stem, mkxi, out, n))

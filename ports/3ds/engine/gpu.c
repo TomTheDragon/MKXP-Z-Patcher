@@ -773,7 +773,7 @@ static void sparse_fill(GpuTex *g, Bitmap *b)
 		if (!PBIT(todo, k))
 			continue;
 		bool ok = piece_init(g, k);
-		while (!ok && evict_one()) {
+		while (!ok && (evict_one() || audio_release_memory())) {
 			gpu_evictions++;
 			ok = piece_init(g, k);
 		}
@@ -985,7 +985,7 @@ static GpuTex *texture_of(Bitmap *b)
 		for (int j = 0; j < t.ny; j++)
 			for (int i = 0; i < t.nx; i++)
 				need += (size_t) pow2(t.xs[i + 1] - t.xs[i]) * pow2(t.ys[j + 1] - t.ys[j]) * 4;
-		while (linearSpaceFree() < need + LINEAR_RESERVE && evict_one())
+		while (linearSpaceFree() < need + LINEAR_RESERVE && (evict_one() || audio_release_memory()))
 			gpu_evictions++;
 		g = malloc(sizeof *g);
 		if (g) {
@@ -993,7 +993,7 @@ static GpuTex *texture_of(Bitmap *b)
 			g->tex = g->tex_own;
 		}
 		bool ok = g && tex_init(g);
-		while (g && !ok && evict_one()) {
+		while (g && !ok && (evict_one() || audio_release_memory())) {
 			gpu_evictions++;
 			ok = tex_init(g);
 		}

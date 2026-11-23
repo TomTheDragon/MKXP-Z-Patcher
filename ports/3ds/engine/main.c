@@ -436,6 +436,88 @@ static int sd_fstat(struct _reent *r, void *fd, struct stat *st)
 	return rc;
 }
 
+/* folder listings: the plain folder's names, then the pack's (pack.c);
+ * a folder only in the pack (no plain one) lists the pack alone */
+static void *dir_pack_only[8];
+static bool dir_is_pack_only(void *it)
+{
+	for (int i = 0; i < 8; i++)
+		if (dir_pack_only[i] == it)
+			return true;
+	return false;
+}
+
+static DIR_ITER *sd_diropen(struct _reent *r, DIR_ITER *it, const char *path)
+{
+	DIR_ITER *res = sd_orig->diropen_r(r, it, path);
+	if (res) {
+		pack_dir_open(it, path);
+		return res;
+	}
+	if (pack_dir_open(it, path)) {
+		for (int i = 0; i < 8; i++)
+			if (!dir_pack_only[i]) {
+				dir_pack_only[i] = it;
+				r->_errno = 0;
+				return it;
+			}
+		pack_dir_close(it);
+	}
+	return NULL;
+}
+
+static int sd_dirnext(struct _reent *r, DIR_ITER *it, char *filename, struct stat *st)
+{
+	if (!dir_is_pack_only(it)) {
+		int rc = sd_orig->dirnext_r(r, it, filename, st);
+		if (rc == 0) {
+			pack_dir_seen(it, filename);
+			return 0;
+		}
+		if (!pack_dir_is(it))
+			return rc;
+	}
+	if (pack_dir_next(it, filename, st))
+		return 0;
+	r->_errno = ENOENT;
+	return -1;
+}
+
+static int sd_dirreset(struct _reent *r, DIR_ITER *it)
+{
+	pack_dir_reset(it);
+	if (dir_is_pack_only(it))
+		return 0;
+	return sd_orig->dirreset_r ? sd_orig->dirreset_r(r, it) : -1;
+}
+
+static int sd_dirclose(struct _reent *r, DIR_ITER *it)
+{
+	pack_dir_close(it);
+	for (int i = 0; i < 8; i++)
+		if (dir_pack_only[i] == it) {
+			dir_pack_only[i] = NULL;
+			return 0;
+		}
+	return sd_orig->dirclose_r(r, it);
+}
+
+/* Dir.chdir: also into a folder that's only in Game.data (Heartache 101
+ * reads its data from inside "Data") */
+static int sd_chdir(struct _reent *r, const char *name)
+{
+	int rc = sd_orig->chdir_r(r, name);
+	if (rc == 0) {
+		pack_chdir(name, true);
+		return 0;
+	}
+	if (pack_chdir(name, false)) {
+		r->_errno = 0;
+		return 0;
+	}
+	return rc;
+}
+
 static void guard_sd_writes(void)
 {
 	int i = FindDevice("sdmc:");
@@ -456,6 +538,14 @@ static void guard_sd_writes(void)
 		sd_tab.stat_r = sd_stat;
 	if (sd_orig->fstat_r)
 		sd_tab.fstat_r = sd_fstat;
+	if (sd_orig->chdir_r)
+		sd_tab.chdir_r = sd_chdir;
+	if (sd_orig->diropen_r && sd_orig->dirnext_r && sd_orig->dirclose_r) {
+		sd_tab.diropen_r = sd_diropen;
+		sd_tab.dirnext_r = sd_dirnext;
+		sd_tab.dirreset_r = sd_dirreset;
+		sd_tab.dirclose_r = sd_dirclose;
+	}
 	devoptab_list[i] = &sd_tab;
 	if (log_file) {
 		__handle *h = __get_handle(fileno(log_file));

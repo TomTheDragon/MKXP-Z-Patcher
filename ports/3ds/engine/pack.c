@@ -8,8 +8,9 @@
  * own writes, e.g. a language file, saves and settings, stay plain).
  *
  * Format: "MKXPZPK1", u32 count, u32 index length; the index (sorted by
- * name): per file u32 offset, u32 size, u16 name length, the name
- * (lowercase, "/", relative to the game folder); then the files. */
+ * the lowercase name): per file u32 offset, u32 size, u16 name length, the
+ * name ("/", relative to the game folder; lowercase in older packs); then
+ * the files. */
 #include "engine.h"
 #include <3ds.h>
 #include <errno.h>
@@ -21,13 +22,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-typedef struct { const char *name; u32 offset, size; } PackEntry;
+/* name: lowercase (lookups); shown: as the game named it (listings) */
+typedef struct { const char *name, *shown; u32 offset, size; } PackEntry;
 
 static const devoptab_t *dev;       /* sdmc's own functions */
 static void *pack_fs;               /* the pack opened through them */
 static PackEntry *entries;
 static int nentries;
-static char *names;                 /* the index's names */
+static char *names, *shown_names;   /* the index's names: lowercase, as given */
 static char game_dir[256];          /* without "sdmc:", e.g. /3ds/Changed */
 static LightLock lock;
 
@@ -44,35 +46,95 @@ static struct { void *fd; int entry; u32 pos; } open_files[PACK_OPEN];
 
 bool pack_active(void) { return pack_fs != NULL; }
 
-/* a path as the pack names it (NULL: outside the game folder) */
-static bool pack_name(const char *path, char *out, size_t n)
+/* the working folder inside the game folder ("" the game folder itself,
+ * e.g. "data" after Dir.chdir("Data"), which may exist only in the pack);
+ * cwd_outside: changed to somewhere else (relative names aren't the
+ * pack's then) */
+static char pack_cwd[256];
+static bool cwd_outside;
+
+/* a path as the pack names it: relative to the working folder, "\\" as
+ * "/", "." and ".." resolved, lowercase; false: outside the game folder
+ * ("" is the game folder itself) */
+static bool pack_resolve(const char *path, char *out, size_t n)
 {
 	if (!strncasecmp(path, "sdmc:", 5))
 		path += 5;
 	char buf[512];
-	if (path[0] == '/') {
+	size_t o = 0;
+	if (path[0] == '/' || path[0] == '\\') {
 		size_t gl = strlen(game_dir);
-		if (strncasecmp(path, game_dir, gl) || (path[gl] != '/' && path[gl]))
+		if (strncasecmp(path, game_dir, gl) || (path[gl] != '/' && path[gl] != '\\' && path[gl]))
 			return false;
 		path += gl;
+	} else {
+		if (cwd_outside)
+			return false;
+		o = strlen(pack_cwd);
+		memcpy(buf, pack_cwd, o);
 	}
-	/* normalize: "\\" -> "/", no "./" or "//", lowercase */
-	size_t o = 0;
-	for (const char *p = path; *p && o + 1 < sizeof buf; p++) {
-		char c = *p == '\\' ? '/' : *p;
-		if (c == '/' && (o == 0 || buf[o - 1] == '/'))
-			continue;
-		if (c == '.' && (o == 0 || buf[o - 1] == '/') && (p[1] == '/' || p[1] == '\\' || !p[1]))
-			continue;
-		buf[o++] = (char) (c >= 'A' && c <= 'Z' ? c + 32 : c);
+	/* segment by segment */
+	const char *p = path;
+	while (*p) {
+		while (*p == '/' || *p == '\\')
+			p++;
+		const char *e = p;
+		while (*e && *e != '/' && *e != '\\')
+			e++;
+		size_t len = (size_t) (e - p);
+		if (len == 1 && p[0] == '.') {
+			/* (nothing) */
+		} else if (len == 2 && p[0] == '.' && p[1] == '.') {
+			if (!o)
+				return false; /* (above the game folder) */
+			while (o > 0 && buf[o - 1] != '/')
+				o--;
+			if (o > 0)
+				o--; /* (the "/" before it) */
+		} else if (len) {
+			if (o + 1 + len + 1 >= sizeof buf)
+				return false;
+			if (o)
+				buf[o++] = '/';
+			for (size_t k = 0; k < len; k++)
+				buf[o++] = (char) (p[k] >= 'A' && p[k] <= 'Z' ? p[k] + 32 : p[k]);
+		}
+		p = e;
 	}
-	while (o > 0 && buf[o - 1] == '/')
-		o--;
 	buf[o] = 0;
-	if (!o || o >= n)
+	if (o >= n)
 		return false;
 	memcpy(out, buf, o + 1);
 	return true;
+}
+
+/* the same, for a file or folder in it (not the game folder itself) */
+static bool pack_name(const char *path, char *out, size_t n)
+{
+	return pack_resolve(path, out, n) && out[0];
+}
+
+static bool is_dir(const char *name);
+
+/* Dir.chdir: the working folder follows (done: the SD card's own chdir
+ * worked); true if path is a folder of the pack (a chdir into it then
+ * counts as done, though it isn't a plain folder) */
+bool pack_chdir(const char *path, bool done)
+{
+	if (!pack_fs)
+		return false;
+	char name[512];
+	if (!pack_resolve(path, name, sizeof name)) {
+		if (done)
+			cwd_outside = true; /* (somewhere else on the SD card) */
+		return false;
+	}
+	bool dir = !name[0] || is_dir(name);
+	if (done || dir) {
+		snprintf(pack_cwd, sizeof pack_cwd, "%s", name);
+		cwd_outside = false;
+	}
+	return dir;
 }
 
 static int find(const char *name)
@@ -148,11 +210,13 @@ void pack_init(const void *sd_devoptab)
 	unsigned char *idx = count && ilen ? malloc(ilen) : NULL;
 	entries = idx ? calloc(count, sizeof *entries) : NULL;
 	names = idx ? malloc(ilen) : NULL;
-	if (!idx || !entries || !names || !pack_read_at(16, idx, ilen)) {
+	shown_names = idx ? malloc(ilen) : NULL;
+	if (!idx || !entries || !names || !shown_names || !pack_read_at(16, idx, ilen)) {
 		log_only("pack: Game.data unreadable\n");
 		free(idx);
 		free(entries);
 		free(names);
+		free(shown_names);
 		entries = NULL;
 		sd->close_r(&r, fs);
 		free(fs);
@@ -167,9 +231,14 @@ void pack_init(const void *sd_devoptab)
 		p += 10;
 		if (p + nl > ilen || np + nl + 1 > ilen)
 			break;
-		memcpy(names + np, idx + p, nl);
+		memcpy(shown_names + np, idx + p, nl);
+		shown_names[np + nl] = 0;
+		for (unsigned c = 0; c < nl; c++) {
+			char ch = (char) idx[p + c];
+			names[np + c] = ch >= 'A' && ch <= 'Z' ? (char) (ch + 32) : ch;
+		}
 		names[np + nl] = 0;
-		entries[nentries++] = (PackEntry) { names + np, off, size };
+		entries[nentries++] = (PackEntry) { names + np, shown_names + np, off, size };
 		np += nl + 1;
 		p += nl;
 	}
@@ -368,13 +437,153 @@ void pack_list(const char *dir, void (*add)(const char *name, void *ctx), void *
 		const char *n = entries[i].name;
 		if (dl && (strncmp(n, d, dl) || n[dl] != '/'))
 			continue;
-		const char *rest = dl ? n + dl + 1 : n;
+		const char *rest = dl ? entries[i].shown + dl + 1 : entries[i].shown;
 		const char *slash = strchr(rest, '/');
 		size_t len = slash ? (size_t) (slash - rest) : strlen(rest);
-		if (!len || len >= sizeof last || (strlen(last) == len && !strncmp(last, rest, len)))
+		if (!len || len >= sizeof last || (strlen(last) == len && !strncasecmp(last, rest, len)))
 			continue;
 		memcpy(last, rest, len);
 		last[len] = 0;
 		add(last, ctx);
 	}
+}
+
+/* --- folder listings (Dir.entries, Dir.glob): a folder of the pack lists
+ * its files and subfolders, after the plain ones there (a name both plain
+ * and in the pack once). Converted images (.mkxi) are listed by the name
+ * the game knows (.png): Bitmap.new of that finds the .mkxi. */
+typedef struct { char **name; bool *dir; u32 *size; bool *used; int n, at; } PackDir;
+#define PACK_DIRS 8
+static struct { void *it; PackDir d; } open_dirs[PACK_DIRS];
+
+static void dir_add(PackDir *d, const char *name, size_t len, bool dir, u32 size)
+{
+	for (int i = 0; i < d->n; i++)
+		if (strlen(d->name[i]) == len && !strncasecmp(d->name[i], name, len))
+			return;
+	char **nn = realloc(d->name, sizeof *nn * (d->n + 1));
+	if (nn) d->name = nn;
+	bool *nd = realloc(d->dir, sizeof *nd * (d->n + 1));
+	if (nd) d->dir = nd;
+	u32 *ns = realloc(d->size, sizeof *ns * (d->n + 1));
+	if (ns) d->size = ns;
+	bool *nu = realloc(d->used, sizeof *nu * (d->n + 1));
+	if (nu) d->used = nu;
+	char *copy = malloc(len + 1);
+	if (!nn || !nd || !ns || !nu || !copy) {
+		free(copy);
+		return;
+	}
+	memcpy(copy, name, len);
+	copy[len] = 0;
+	if (!dir && len > 5 && !strcasecmp(copy + len - 5, ".mkxi"))
+		memcpy(copy + len - 5, ".png", 5);
+	d->name[d->n] = copy;
+	d->dir[d->n] = dir;
+	d->size[d->n] = size;
+	d->used[d->n] = false;
+	d->n++;
+}
+
+/* a listing of the folder starts (it: newlib's DIR_ITER); false: the pack
+ * has nothing in it */
+bool pack_dir_open(void *it, const char *path)
+{
+	char dname[512] = "";
+	if (!pack_fs)
+		return false;
+	if (!pack_name(path, dname, sizeof dname)) {
+		/* (the game folder itself: "." or its full path) */
+		const char *p = !strncasecmp(path, "sdmc:", 5) ? path + 5 : path;
+		if (strcmp(p, ".") && strcmp(p, "./") && strcasecmp(p, game_dir))
+			return false;
+		dname[0] = 0;
+	}
+	int slot = -1;
+	for (int i = 0; i < PACK_DIRS && slot < 0; i++)
+		if (!open_dirs[i].it)
+			slot = i;
+	if (slot < 0)
+		return false;
+	PackDir d = { 0 };
+	size_t dl = strlen(dname);
+	for (int i = 0; i < nentries; i++) {
+		const char *n = entries[i].name;
+		if (dl && (strncmp(n, dname, dl) || n[dl] != '/'))
+			continue;
+		const char *rest = dl ? entries[i].shown + dl + 1 : entries[i].shown;
+		const char *slash = strchr(rest, '/');
+		dir_add(&d, rest, slash ? (size_t) (slash - rest) : strlen(rest), slash != NULL, entries[i].size);
+	}
+	if (!d.n)
+		return false;
+	open_dirs[slot].it = it;
+	open_dirs[slot].d = d;
+	return true;
+}
+
+static PackDir *dir_of(void *it)
+{
+	for (int i = 0; i < PACK_DIRS; i++)
+		if (open_dirs[i].it == it)
+			return &open_dirs[i].d;
+	return NULL;
+}
+
+bool pack_dir_is(void *it) { return dir_of(it) != NULL; }
+
+/* a name the plain folder listed: not listed again from the pack */
+void pack_dir_seen(void *it, const char *name)
+{
+	PackDir *d = dir_of(it);
+	if (!d)
+		return;
+	size_t l = strlen(name);
+	for (int i = 0; i < d->n; i++)
+		if (!strcasecmp(d->name[i], name) ||
+		    (l > 4 && !strncasecmp(d->name[i], name, l - 4) && !strcasecmp(d->name[i] + l - 4, ".png") && strlen(d->name[i]) == l))
+			d->used[i] = true;
+}
+
+/* the next name from the pack; false at the end */
+bool pack_dir_next(void *it, char *filename, struct stat *st)
+{
+	PackDir *d = dir_of(it);
+	if (!d)
+		return false;
+	while (d->at < d->n && d->used[d->at])
+		d->at++;
+	if (d->at >= d->n)
+		return false;
+	strcpy(filename, d->name[d->at]); /* (newlib's buffer: NAME_MAX + 1) */
+	if (st)
+		fill_stat(st, d->size[d->at], d->dir[d->at]);
+	d->at++;
+	return true;
+}
+
+void pack_dir_reset(void *it)
+{
+	PackDir *d = dir_of(it);
+	if (d) {
+		d->at = 0;
+		for (int i = 0; i < d->n; i++)
+			d->used[i] = false;
+	}
+}
+
+void pack_dir_close(void *it)
+{
+	for (int i = 0; i < PACK_DIRS; i++)
+		if (open_dirs[i].it == it) {
+			PackDir *d = &open_dirs[i].d;
+			for (int k = 0; k < d->n; k++)
+				free(d->name[k]);
+			free(d->name);
+			free(d->dir);
+			free(d->size);
+			free(d->used);
+			open_dirs[i].it = NULL;
+			memset(d, 0, sizeof *d);
+		}
 }

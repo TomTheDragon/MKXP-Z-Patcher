@@ -13,11 +13,14 @@ The output folder (made new; copy it into sdmc:/3ds/mkxpz/) gets:
   Game.ini, Fonts/ and text files (.txt, .ini: games write some) as they are
 Left out: Game.exe and other programs, DLLs, the archive itself, editor
 project files, saves, zip files, hidden files, the PC patcher's mkxp-z
-folder.
+folder, Movies (the engine plays no videos), Photoshop files, manuals
+(PDF, HTML), Thumbs.db / desktop.ini, uninstallers. Other files in the
+game's folder itself stay plain (games write some).
 
 Pack format (engine/pack.c): "MKXPZPK1", u32 count, u32 index length;
-per file (sorted by name) u32 offset, u32 size, u16 name length, the name
-(lowercase, "/", relative to the game folder); then the files.
+per file (sorted by the lowercase name) u32 offset, u32 size, u16 name
+length, the name (as the game has it, "/", relative to the game folder);
+then the files.
 
 Needs ImageMagick ("magick", or MAGICK), lz4 ("lz4", or LZ4) and smdhtool
 (devkitPro, or SMDHTOOL).
@@ -40,7 +43,10 @@ def tool(name):
 
 
 SKIP_EXT = {".exe", ".dll", ".rgssad", ".rgss2a", ".rgss3a", ".rxproj", ".rvproj", ".rvproj2", ".lnk", ".url",
-            ".ppdb", ".zip", ".7z", ".rar"}
+            ".ppdb", ".zip", ".7z", ".rar", ".psd", ".pdf", ".html", ".htm", ".ifl"}
+SKIP_NAMES = {"thumbs.db", "desktop.ini"}
+# (the 3DS engine plays no videos: Graphics.play_movie does nothing)
+SKIP_DIRS_ANYWHERE = {"movies"}
 PLAIN_EXT = {".txt", ".ini", ".cfg", ".json"}
 SKIP_DIRS = {"mkxp-z"}
 
@@ -81,6 +87,13 @@ def main():
             if os.path.splitext(name.lower())[1] in (".rgssad", ".rgss2a", ".rgss3a"):
                 sys.argv = ["extract-archive.py", os.path.join(game, name), stage]
                 extract.main()
+        # (a game whose .exe has another name, e.g. "Pocket Mirror.exe": its
+        # .ini is the engine's Game.ini)
+        base = tool("make-package").game_base(game)
+        if base != "game":
+            for name in os.listdir(stage):
+                if name.lower() == base + ".ini":
+                    os.rename(os.path.join(stage, name), os.path.join(stage, "Game.ini"))
         # 2. images converted (.mkxi next to each PNG)
         if os.path.isdir(os.path.join(stage, "Graphics")):
             convert.main(stage)
@@ -88,7 +101,7 @@ def main():
         os.makedirs(out)
         files = []
         for dirpath, dirnames, filenames in os.walk(stage):
-            dirnames.sort()
+            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS_ANYWHERE)
             rel_dir = os.path.relpath(dirpath, stage)
             for name in sorted(filenames):
                 rel = os.path.normpath(os.path.join(rel_dir, name))
@@ -96,19 +109,25 @@ def main():
                 ext = os.path.splitext(low)[1]
                 src = os.path.join(dirpath, name)
                 top = low.split("/")[0]
+                if os.path.basename(low) in SKIP_NAMES or ext in SKIP_EXT or os.path.basename(low).startswith("uninstall"):
+                    continue
+                # (files in the game folder itself stay plain: games write
+                # some, e.g. Heartache 101's "records", opened with "r+")
                 if top == "fonts" or ext in PLAIN_EXT or "/" not in low:
                     dst = os.path.join(out, rel)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copy2(src, dst)
                     continue
-                if top == "graphics" and ext in (".png", ".jpg", ".bmp") and \
+                if top == "graphics" and ext in (".png", ".jpg", ".jpeg", ".bmp") and \
                         os.path.exists(os.path.splitext(src)[0] + ".mkxi"):
                     continue  # (the .mkxi is used)
-                files.append((low, src))
+                files.append((low, rel.replace(os.sep, "/"), src))
         files.sort()
         index = b""
-        sizes = [os.path.getsize(src) for _, src in files]
-        names = [low.encode("utf-8") for low, _ in files]
+        sizes = [os.path.getsize(src) for _, _, src in files]
+        # (sorted by the lowercase name, which the engine looks up; stored
+        # as the game names them, for folder listings)
+        names = [shown.encode("utf-8") for _, shown, _ in files]
         ilen = sum(10 + len(n) for n in names)
         at = 16 + ilen
         for n, size in zip(names, sizes):
@@ -116,7 +135,7 @@ def main():
             at += size
         with open(os.path.join(out, "Game.data"), "wb") as f:
             f.write(b"MKXPZPK1" + struct.pack("<II", len(files), ilen) + index)
-            for _, src in files:
+            for _, _, src in files:
                 with open(src, "rb") as s:
                     shutil.copyfileobj(s, f)
         # 4. the .3dsx (title and icon from the original folder: Game.exe)

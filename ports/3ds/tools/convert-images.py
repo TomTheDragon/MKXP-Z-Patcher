@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MKXP-Z 3DS: convert a game's images ahead of time (PNG -> .mkxi).
+"""MKXP-Z 3DS: convert a game's images ahead of time (PNG, JPG, BMP -> .mkxi).
 
 The 3DS needs about 200 ms to unpack a 768x512 PNG (zlib) and much less
 for LZ4. For each PNG in the game's Graphics folder this writes a .mkxi
@@ -76,7 +76,8 @@ def main(game):
     count = before = after = 0
     for dirpath, _, files in os.walk(root):
         for name in sorted(files):
-            if not name.lower().endswith(".png"):
+            # (JPG and BMP too: the engine itself reads only PNG and .mkxi)
+            if not name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
                 continue
             src = os.path.join(dirpath, name)
             dst = os.path.splitext(src)[0] + ".mkxi"

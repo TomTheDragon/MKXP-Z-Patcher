@@ -492,7 +492,9 @@ static VALUE sprite_dispose(VALUE self)
 	return Qnil;
 }
 static VALUE sprite_disposed(VALUE self) { return ((Sprite *) rb_check_typeddata(self, &sprite_type))->disposed ? Qtrue : Qfalse; }
-static VALUE sprite_bitmap(VALUE self) { return sprite_get(self)->bitmap; }
+/* (also after dispose, as in RGSS: Pocket Mirror's message background
+ * disposes the sprite, then its bitmap through it) */
+static VALUE sprite_bitmap(VALUE self) { return ((Sprite *) rb_check_typeddata(self, &sprite_type))->bitmap; }
 static VALUE sprite_set_wide(VALUE self, VALUE v) { sprite_get(self)->el.wide = RTEST(v); return v; }
 static VALUE sprite_set_bitmap(VALUE self, VALUE b)
 {

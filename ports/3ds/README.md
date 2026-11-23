@@ -465,6 +465,17 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (3 MB) and taken over by Bitmap.new. Pack: files read from Game.data
   without a failed SD open first (pack_first), except in folders that are
   plain too or written to.
+- Old games: boot.rb retries a section that doesn't compile with
+  mkxpz_ruby18_fix (when x:, "foo (a, b)", |@ivar| block parameters,
+  next/break outside a loop by the error's line), Ruby 1.8 classics
+  (TRUE, Hash#index, Object#id, String#[]= with a number), Windows text
+  mode (File.open "r" / File.read: universal_newline), MKXP-Z extras
+  (System, Graphics.delta, Input.release?/time?/count and no-op keyboard
+  / mouse / window calls), print as a message box (also RGSS1).
+- pack.c: folder listings (sd dir hooks; .mkxi listed as .png) and a
+  working folder for Dir.chdir into pack folders (pack_resolve). files.c
+  is locked (the audio thread looks up music at the same time).
+- Sound effects: at most 4 MB cached (SE_BYTES), released for textures.
 - Text: ruby-3ds.patch loads plain Marshal strings as UTF-8 for XP / VX
   games (mkxpz_marshal_utf8; their data has no encodings). font.c takes a
   letter the font lacks from another font that has it (fallback_face).

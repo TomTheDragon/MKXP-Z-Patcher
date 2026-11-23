@@ -93,6 +93,7 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
  * possible for this image: then bitmap_stream_file) */
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 void gpu_preload_begin(void);
+bool audio_release_memory(void); /* audio.c: a cached sound effect let go of (textures need room) */
 void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
 /* pack.c: the game's files in Game.data */
 struct _reent;
@@ -101,7 +102,14 @@ void pack_init(const void *sd_devoptab);
 bool pack_active(void);
 bool pack_is(void *fd);
 bool pack_first(const char *path);
+bool pack_chdir(const char *path, bool done);
 void pack_note_write(const char *path);
+bool pack_dir_open(void *it, const char *path);
+bool pack_dir_is(void *it);
+void pack_dir_seen(void *it, const char *name);
+bool pack_dir_next(void *it, char *filename, struct stat *st);
+void pack_dir_reset(void *it);
+void pack_dir_close(void *it);
 int pack_open(struct _reent *r, void *fileStruct, const char *path, int flags);
 int pack_close(void *fd);
 long pack_read(struct _reent *r, void *fd, char *ptr, size_t len);

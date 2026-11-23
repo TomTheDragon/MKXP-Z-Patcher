@@ -97,9 +97,25 @@ static FontFile *find_family(const char *name)
 	return NULL;
 }
 
+/* fonts every Windows has (games check for them and quit without them,
+ * Heartache 101: "Arial font not found"): drawn with the engine's font
+ * (Liberation Sans is made to match Arial's widths), as MKXP-Z does */
+static bool windows_standard(const char *name)
+{
+	static const char *const std[] = { "Arial", "Arial Black", "Tahoma", "Verdana", "Times New Roman", "Courier New",
+	                                   "Georgia", "Trebuchet MS", "Segoe UI", "Microsoft Sans Serif", "MS Sans Serif",
+	                                   "Lucida Console", "Comic Sans MS", "Impact", "MS Gothic", "MS PGothic",
+	                                   "MS UI Gothic", "MS Mincho", "MS PMincho", "UmePlus Gothic", NULL };
+	for (int i = 0; std[i]; i++)
+		if (!strcasecmp(name, std[i]))
+			return true;
+	return false;
+}
+
 static VALUE font_exist(VALUE klass, VALUE name)
 {
-	return find_family(StringValueCStr(name)) ? Qtrue : Qfalse;
+	const char *n = StringValueCStr(name);
+	return find_family(n) || windows_standard(n) ? Qtrue : Qfalse;
 }
 
 /* the first available of the font's name(s), else the fallback */
