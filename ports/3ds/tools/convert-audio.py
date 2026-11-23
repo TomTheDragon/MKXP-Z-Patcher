@@ -38,7 +38,7 @@ def build_mkxa(work):
     exe = os.path.join(work, "mkxa")
     cc = shlex.split(os.environ.get("CC", "cc"))
     r = subprocess.run(cc + ["-O2", "-o", exe, os.path.join(HERE, "mkxa.c"), "-lm"],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode:
         sys.exit("can't compile mkxa.c:\n" + r.stderr.decode(errors="replace"))
     return exe
@@ -61,7 +61,7 @@ def probe(path):
     """(rate, channels, loop start, loop length) of a file (ffprobe)"""
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
                         "stream=sample_rate,channels:format_tags:stream_tags", "-of", "default=nw=1", path],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     info = {}
     for line in r.stdout.decode(errors="replace").splitlines():
         if "=" in line:
@@ -86,7 +86,8 @@ def convert_one(mkxa, path, music, soundfont):
             if not soundfont:
                 return path, "MIDI kept (no SoundFont)"
             with open(pcm, "wb") as f:
-                r = subprocess.run([mkxa, "midi", soundfont, path, str(DSP_RATE)], stdout=f, stderr=subprocess.PIPE)
+                r = subprocess.run([mkxa, "midi", soundfont, path, str(DSP_RATE)], stdin=subprocess.DEVNULL, stdout=f,
+                               stderr=subprocess.PIPE)
             if r.returncode:
                 return path, "MIDI not rendered: " + r.stderr.decode(errors="replace").strip()
             for line in r.stderr.decode(errors="replace").splitlines():
@@ -103,7 +104,7 @@ def convert_one(mkxa, path, music, soundfont):
                 loop_start = ls * rate // src_rate
                 loop_end = (ls + ll) * rate // src_rate
             r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-ac", str(channels), "-ar", str(rate),
-                                "-f", "s16le", pcm], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                "-f", "s16le", pcm], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if r.returncode:
                 return path, "not decoded: " + r.stderr.decode(errors="replace").strip()[:200]
         with open(pcm, "rb") as f:
