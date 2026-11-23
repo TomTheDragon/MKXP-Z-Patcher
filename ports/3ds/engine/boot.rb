@@ -269,9 +269,15 @@ class File
       mode.nil? || (mode.is_a?(String) && mode.start_with?('r') && !mode.include?('b') && !mode.include?('+') &&
                     !mode.include?(':'))
     end
+    # (Ruby data, e.g. save files, which VX reads with "r": never; it
+    # starts with 04 08, and CRLF conversion broke it: no saves seen)
+    def mkxpz_marshal_file?(name)
+      name.is_a?(String) && (File.binread(name, 2) == "\x04\x08".b rescue false)
+    end
     alias_method :mkxpz_text_open, :open
     def open(name, mode = nil, *rest, **opts, &blk)
-      if mkxpz_text_read?(mode, opts) && !opts.key?(:universal_newline) && !opts.key?(:binmode) && rest.empty?
+      if mkxpz_text_read?(mode, opts) && !opts.key?(:universal_newline) && !opts.key?(:binmode) && rest.empty? &&
+         !mkxpz_marshal_file?(name)
         opts = opts.merge(universal_newline: true)
       end
       mode ? mkxpz_text_open(name, mode, *rest, **opts, &blk) : mkxpz_text_open(name, **opts, &blk)
@@ -285,7 +291,7 @@ class IO
       define_method(m) do |name, *args, **opts, &blk|
         # (File.read etc. without a mode: text, as on Windows)
         if self <= File && !opts.key?(:mode) && !opts.key?(:binmode) && !opts.key?(:universal_newline) &&
-           name.is_a?(String)
+           name.is_a?(String) && !File.mkxpz_marshal_file?(name)
           opts = opts.merge(universal_newline: true)
         end
         send(:"mkxpz_text_#{m}", name, *args, **opts, &blk)
@@ -936,6 +942,17 @@ def mkxpz_wide_setup
       end
     rescue StandardError => e
       mkxpz_log("wide message box: #{e.class}: #{e.message}")
+    end
+  end
+  # number input: placed at the wide box's left edge (VX), so it may use
+  # the sides too (its first digits were cut off)
+  if defined?(Window_NumberInput) && !mkxpz_ours?(Window_NumberInput, :initialize)
+    Window_NumberInput.class_eval do
+      alias_method :mkxpz_wide_ni_initialize, :initialize
+      def initialize(*args)
+        mkxpz_wide_ni_initialize(*args)
+        self.mkxpz_wide = true if respond_to?(:mkxpz_wide=)
+      end
     end
   end
   # VX Ace's choices: at the box's right end

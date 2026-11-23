@@ -52,15 +52,25 @@ static void ops_free(Bitmap *b)
 	layer_free(&b->layer);
 }
 
-/* texts in the rect are covered (fill_rect, clear_rect) */
+/* texts in the rect are covered (fill_rect, clear_rect): a text covered
+ * only partly goes into the pixels first (game resolution), so what the
+ * fill leaves of it stays (removed whole, e.g. Changed's number input lost
+ * its first digits) */
 static void ops_remove(Bitmap *b, Rect r)
 {
 	int n = 0;
 	for (int i = 0; i < b->nops; i++) {
 		Rect o = b->ops[i].r;
 		bool hit = o.x < r.x + r.w && r.x < o.x + o.w && o.y < r.y + r.h && r.y < o.y + o.h;
-		if (!hit)
+		if (!hit) {
 			b->ops[n++] = b->ops[i];
+			continue;
+		}
+		bool covered = r.x <= o.x && r.y <= o.y && r.x + r.w >= o.x + o.w && r.y + r.h >= o.y + o.h;
+		if (!covered && b->px) {
+			font_draw_text(b, b->ops[i].font, o.x, o.y, o.w, o.h, b->ops[i].str, b->ops[i].align);
+			b->version++;
+		}
 	}
 	if (n != b->nops) {
 		b->nops = n;

@@ -519,7 +519,11 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 	}
 	int tx = align == 1 ? x + (w - sw) / 2 : align == 2 ? x + w - sw : x;
 	int ty = y + (h - m.h) / 2;
-	Rect clip = { x - 1, y - 1, w + 2, h + 2 };
+	/* (across: the rect; up and down: the letters' own height, when it's
+	 * more than the rect's: our fonts' ascent + descent is a bit more than
+	 * Windows', and the rect cut the bottom of the letters off) */
+	int extra = m.h > h ? (m.h - h) / 2 + 2 : 1;
+	Rect clip = { x - 1, y - extra, w + 2, h + 2 * extra };
 	Mask only = m;
 	int sh = text_scale < 0.75f ? 1 : 2; /* (the shadow's offset, at the scale) */
 	if (attr_true(font, "@shadow"))
