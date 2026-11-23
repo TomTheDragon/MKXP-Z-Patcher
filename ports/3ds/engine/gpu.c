@@ -291,13 +291,28 @@ unsigned gpu_used_kb(unsigned *count)
 }
 
 bool gpu_on;
+/* The GPU's command list for a frame (immediate-mode quads put their
+ * vertices into it): 512 KB, and sent off in the middle of the frame when
+ * 3/4 full. In 3D everything is drawn twice; Changed's boss fight ran
+ * the default 256 KB full (GPUCMD_Add stops the program then). */
+#define CMDBUF_SIZE (512 * 1024)
+unsigned gpu_cmd_splits;
+static void cmdbuf_room(void)
+{
+	u32 size = 0, offset = 0;
+	GPUCMD_GetBuffer(NULL, &size, &offset);
+	if (size && offset > size / 4 * 3) {
+		C3D_FrameSplit(0);
+		gpu_cmd_splits++;
+	}
+}
 /* statistics (shown with the frame times) */
 unsigned gpu_uploads, gpu_upload_px, gpu_draws;
 u64 gpu_upload_ticks;
 
 void gpu_init(void)
 {
-	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+	C3D_Init(CMDBUF_SIZE);
 	top_target();
 	for (int i = 0; i < 2; i++) {
 		if (!C3D_TexInitVRAM(&scene_tex[i], SCENE_W, SCENE_H, GPU_RGBA8))
@@ -1127,6 +1142,7 @@ static void quad(float x0, float y0, float x1, float y1, float u0, float v0, flo
 		}
 	}
 	gpu_draws++;
+	cmdbuf_room();
 	C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
 	for (int i = 0; i < 4; i++)
 		vertex(px[i], py[i], pu[i], pv[i], a);
@@ -1235,6 +1251,7 @@ void gpu_fill(Canvas *c, Rect r, const Color *col, int alpha)
 	set_clip(c->clip);
 	set_blend(0);
 	set_tev(false, NULL, NULL);
+	cmdbuf_room();
 	C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
 	float x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
 	float cr = col->r / 255.0f, cg = col->g / 255.0f, cb = col->b / 255.0f, ca = alpha / 255.0f;
@@ -1700,6 +1717,7 @@ void gpu_draw_buffer(const float *verts, int first, int count, float tx, float t
 	C3D_Mtx m = proj_scene;
 	Mtx_Translate(&m, tx, ty, 0, true);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &m);
+	cmdbuf_room();
 	C3D_DrawArrays(GPU_TRIANGLES, first, count);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
 }
