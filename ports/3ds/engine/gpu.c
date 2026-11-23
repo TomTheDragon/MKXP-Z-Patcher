@@ -227,6 +227,29 @@ static bool evict_one(void)
  * memory holds more. Kept free: VRAM_RESERVE (the screens are made again
  * when 3D or wide mode change). */
 #define VRAM_RESERVE (512 * 1024)
+/* sources of VRAM copies, freed at the next frame's start */
+static C3D_Tex *vram_src;
+static int nvram_src, vram_src_cap;
+static C3D_Tex *vram_src_keep(void)
+{
+	if (nvram_src == vram_src_cap) {
+		int nc = vram_src_cap ? vram_src_cap * 2 : 32;
+		C3D_Tex *n = realloc(vram_src, sizeof *n * nc);
+		if (!n)
+			return NULL;
+		vram_src = n;
+		vram_src_cap = nc;
+	}
+	return &vram_src[nvram_src++];
+}
+
+static void vram_src_free(void)
+{
+	for (int i = 0; i < nvram_src; i++)
+		C3D_TexDelete(&vram_src[i]);
+	nvram_src = 0;
+}
+
 static bool to_vram(C3D_Tex *t)
 {
 	if (!t->data || in_vram(t) || vramSpaceFree() < t->size + VRAM_RESERVE)
@@ -234,15 +257,27 @@ static bool to_vram(C3D_Tex *t)
 	C3D_Tex v;
 	if (!C3D_TexInitVRAM(&v, t->width, t->height, t->fmt))
 		return false;
-	/* (copied by the CPU: the bytes are already in the GPU's order. The
-	 * GPU's TextureCopy left the VRAM as it was: garbage in characters and
-	 * backgrounds) */
-	memcpy(v.data, t->data, t->size);
-	GSPGPU_FlushDataCache(v.data, v.size); /* (the CPU caches VRAM too) */
+	/* (a GPU copy: the processor may not write VRAM on the console. During
+	 * a frame C3D_SyncTextureCopy only queues it (with the frame's drawing,
+	 * in order): the source stays until the next frame's start, when the
+	 * GPU is done with it (freed at once, it was overwritten before the
+	 * copy ran: garbage in characters and backgrounds)) */
+	GSPGPU_FlushDataCache(t->data, t->size);
+	u32 line = (u32) t->size / ((u32) t->height / 8); /* bytes of one row of 8x8 blocks */
+	if (line % 16 || line / 16 > 0xffff || t->size % line) {
+		C3D_TexDelete(&v);
+		return false;
+	}
+	C3D_Tex *keep = vram_src_keep();
+	if (!keep) {
+		C3D_TexDelete(&v);
+		return false;
+	}
+	C3D_SyncTextureCopy((u32 *) t->data, GX_BUFFER_DIM(line / 16, 0), (u32 *) v.data, GX_BUFFER_DIM(line / 16, 0), t->size, 8);
+	*keep = *t; /* (freed at the next frame's start) */
 	v.param = t->param;
 	v.border = t->border;
 	v.lodParam = t->lodParam;
-	C3D_TexDelete(t);
 	*t = v;
 	return true;
 }
@@ -1363,6 +1398,7 @@ void gpu_frame_begin_sync(bool sync)
 		gputex_free(trash[i]);
 	}
 	ntrash = 0;
+	vram_src_free(); /* (the copies of the last frame are done) */
 	vram_migrate();
 }
 

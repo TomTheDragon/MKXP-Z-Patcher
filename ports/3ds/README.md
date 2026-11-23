@@ -486,7 +486,9 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   format decided) names the exact format (TEX_FMT: RGBA8, RGB8, LA8, L8,
   LA4, L4, A8, A4) used while the image is unchanged; 256 tiles of older
   packages still load (tiles a multiple of the piece). VRAM moves are a
-  CPU memcpy (the GPU's TextureCopy with these parameters didn't copy).
+  GPU TextureCopy (the CPU may not write VRAM on the console); inside a frame
+  C3D_SyncTextureCopy only queues it, so the source is freed at the next
+  frame's start (vram_src_free).
 - Screen "extended": the PC patcher's compat/widescreen.rb (embedded by
   build.sh) with Graphics.widescreen_mode (2 when extended) and
   Graphics.widescreen_resize; wide_w 5:3 (704 at 416). RGSS_VERSION is
