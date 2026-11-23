@@ -37,7 +37,7 @@ void settings_load(void)
 		if (sscanf(line, "music_volume=%d", &v) == 1) settings.music_volume = CLAMP(v, 0, 100);
 		else if (sscanf(line, "sound_volume=%d", &v) == 1) settings.sound_volume = CLAMP(v, 0, 100);
 		else if (sscanf(line, "buttons=%d", &v) == 1) settings.buttons = CLAMP(v, 0, 1);
-		else if (sscanf(line, "screen=%d", &v) == 1) settings.screen = v == 1 ? 1 : 0; /* (the old 1:1 mode: fit) */
+		else if (sscanf(line, "screen=%d", &v) == 1) settings.screen = CLAMP(v, 0, 2); /* fit, stretch, extended */
 		else if (sscanf(line, "frame_skip=%d", &v) == 1) settings.frame_skip = CLAMP(v, 0, 5);
 		else if (sscanf(line, "bottom_log=%d", &v) == 1) settings.show_speed = CLAMP(v, 0, 1);
 		else if (sscanf(line, "log_file=%d", &v) == 1) settings.log_file = CLAMP(v, 0, 1);
@@ -53,6 +53,9 @@ void settings_load(void)
 		else if (sscanf(line, "wide_text=%d", &v) == 1) settings.wide_text = CLAMP(v, 0, 1);
 	}
 	fclose(f);
+	/* (no longer settings: 3D with the slider, the speed display and sharp
+	 * window text are always on) */
+	settings.stereo = settings.overlay = settings.sharp_text = 1;
 }
 
 static void settings_save(void)
@@ -81,12 +84,14 @@ static void settings_save(void)
 	fclose(f);
 }
 
-enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_STEREO, I_TEXT, I_SHARP, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_OVERLAY, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
+/* (no longer settings: 3D (always, with the slider), the speed display
+ * (always on) and sharp window text (always: no drawback)) */
+enum { I_MUSIC, I_SOUND, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
 
 static void show(int sel)
 {
 	static const char *const buttons[] = { "A:ok B:back L:speed-up", "B:ok A:back L/R:page" };
-	static const char *const screens[] = { "fit (whole picture)", "stretch (fill)" };
+	static const char *const screens[] = { "fit (whole picture)", "stretch (fill)", "extended (wider map)" };
 	char v[I_COUNT][40];
 	snprintf(v[I_MUSIC], 40, "%d%%", settings.music_volume);
 	snprintf(v[I_SOUND], 40, "%d%%", settings.sound_volume);
@@ -99,10 +104,8 @@ static void show(int sel)
 		snprintf(v[I_WIDE], 40, "%s", gpu_wide_possible() ? "on (800 across)" : "on (2DS: no 800)");
 	else
 		snprintf(v[I_WIDE], 40, "off (400 across)");
-	snprintf(v[I_STEREO], 40, "%s", settings.stereo ? "on (with the slider)" : "off");
-	snprintf(v[I_TEXT], 40, "%s", settings.screen != 0 ? "(only with fit)" :
+	snprintf(v[I_TEXT], 40, "%s", settings.screen == 1 ? "(not with stretch)" :
 	         settings.wide_text ? "whole screen width" : "game's width");
-	snprintf(v[I_SHARP], 40, "%s", settings.sharp_text ? "sharp" : "game resolution");
 	snprintf(v[I_SMOOTH], 40, "%s", settings.smooth ? "on (smoother edges)" : "off");
 	snprintf(v[I_BATTERY], 40, "%s", settings.battery ? "on (top left)" : "off");
 	snprintf(v[I_ACTIVITY], 40, "%s", settings.activity_icons ? "on (top right)" : "off");
@@ -111,12 +114,11 @@ static void show(int sel)
 		snprintf(v[I_SKIP], 40, "auto, max %d in a row", settings.frame_skip);
 	else
 		snprintf(v[I_SKIP], 40, "off");
-	snprintf(v[I_OVERLAY], 40, "%s", settings.overlay ? "on (at the top)" : "off");
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
 	snprintf(v[I_LOG], 40, "%s", settings.log_file ? "on (mkxpz-3ds.log)" : "off");
 	v[I_RESET][0] = v[I_BACK][0] = 0;
-	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "3D", "Text boxes", "Window text", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
-	                                            "Speed display", "Bottom log", "Log file", "Reset game (title)", "Back to the game" };
+	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Buttons", "Screen", "Top screen", "Text boxes", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
+	                                            "Bottom log", "Log file", "Reset game (title)", "Back to the game" };
 	printf("\x1b[2J\x1b[1;1H\x1b[1m MKXP-Z settings\x1b[0m   (START: back)\n\n");
 	for (int i = 0; i < I_COUNT; i++) {
 		printf("%s %-14s %s\n", i == sel ? "\x1b[33m>" : " ", names[i], v[i]);
@@ -158,20 +160,20 @@ bool settings_menu(void)
 			case I_MUSIC: settings.music_volume = CLAMP(settings.music_volume + dir * 10, 0, 100); audio_volumes_changed(); break;
 			case I_SOUND: settings.sound_volume = CLAMP(settings.sound_volume + dir * 10, 0, 100); audio_volumes_changed(); break;
 			case I_BUTTONS: settings.buttons ^= 1; break;
-			case I_SCREEN: settings.screen ^= 1; gpu_set_screen(screen_w, screen_h); break;
+			case I_SCREEN: /* fit, stretch, extended (boot.rb: the wider map at the next frame) */
+				settings.screen = (settings.screen + (dir > 0 ? 1 : 2)) % 3;
+				gpu_set_screen(screen_w, screen_h);
+				break;
 			case I_WIDE: /* auto, on, off */
 				settings.wide_screen = settings.wide_screen == 2 ? (dir > 0 ? 1 : 0) : settings.wide_screen == 1 ? (dir > 0 ? 0 : 2) : (dir > 0 ? 2 : 1);
 				gpu_set_wide();
 				break;
-			case I_STEREO: settings.stereo ^= 1; break;
 			case I_TEXT: settings.wide_text ^= 1; gpu_set_screen(screen_w, screen_h); break;
-			case I_SHARP: settings.sharp_text ^= 1; break;
 			case I_SMOOTH: settings.smooth ^= 1; break;
 			case I_BATTERY: settings.battery ^= 1; break;
 			case I_ACTIVITY: settings.activity_icons ^= 1; break;
 			case I_COLORS: settings.colors ^= 1; break;
 			case I_SKIP: settings.frame_skip = CLAMP(settings.frame_skip + dir, 0, 5); break;
-			case I_OVERLAY: settings.overlay ^= 1; break;
 			case I_SPEED: settings.show_speed ^= 1; break;
 			case I_LOG: settings.log_file ^= 1; log_set_enabled(settings.log_file); break;
 			}

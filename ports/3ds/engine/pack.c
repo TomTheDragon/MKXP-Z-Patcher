@@ -186,8 +186,10 @@ void pack_init(const void *sd_devoptab)
 	if (!sd || !sd->open_r || !sd->read_r || !sd->seek_r)
 		return;
 	char cwd[256];
-	if (!getcwd(cwd, sizeof cwd))
+	if (!getcwd(cwd, sizeof cwd)) {
+		log_only("pack: no working folder\n");
 		return;
+	}
 	snprintf(game_dir, sizeof game_dir, "%s", !strncasecmp(cwd, "sdmc:", 5) ? cwd + 5 : cwd);
 	size_t gl = strlen(game_dir);
 	while (gl > 1 && game_dir[gl - 1] == '/')
@@ -196,6 +198,12 @@ void pack_init(const void *sd_devoptab)
 	void *fs = calloc(1, sd->structSize ? sd->structSize : 64);
 	struct _reent r = { 0 };
 	if (!fs || sd->open_r(&r, fs, "Game.data", O_RDONLY, 0) == -1) {
+		/* (no pack: plain files; noted when it's there but won't open) */
+		FILE *f = fopen("Game.data", "rb");
+		if (f) {
+			fclose(f);
+			log_only("pack: Game.data there but not opened (error %d)\n", r._errno);
+		}
 		free(fs);
 		return;
 	}

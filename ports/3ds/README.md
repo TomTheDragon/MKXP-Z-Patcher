@@ -479,6 +479,11 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   plays on its own DSP channel and is the clock; late pictures are left out
   (at least 4 a second shown). boot.rb's Win32API answers mciSendString
   (open / play / status / close) with Graphics.play_movie.
+- Screen "extended": the PC patcher's compat/widescreen.rb (embedded by
+  build.sh) with Graphics.widescreen_mode (2 when extended) and
+  Graphics.widescreen_resize; wide_w 5:3 (704 at 416). RGSS_VERSION is
+  defined for VX Ace. The start draws gpu_startup_progress until the first
+  frame; the top framebuffers are cleared right after gfxInit.
 - GPU command list: 512 KB, C3D_FrameSplit when 3/4 full (cmdbuf_room).
 - Old games: boot.rb retries a section that doesn't compile with
   mkxpz_ruby18_fix (when x:, "foo (a, b)", |@ivar| block parameters,

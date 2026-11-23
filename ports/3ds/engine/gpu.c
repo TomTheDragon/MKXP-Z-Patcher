@@ -468,7 +468,7 @@ void gpu_set_screen(int w, int h)
 	/* fit with wide text boxes: the picture as wide as the screen (5:3);
 	 * the game draws in the middle, its message boxes over all of it */
 	gpu_margin = 0;
-	if (settings.screen == 0 && settings.wide_text && h * 400 > w * 240)
+	if (settings.screen != 1 && settings.wide_text && h * 400 > w * 240)
 		gpu_margin = (h * 400 / 240 - w) / 2;
 	if (w + 2 * gpu_margin > SCENE_W)
 		gpu_margin = (SCENE_W - w) / 2;
@@ -667,6 +667,15 @@ static bool tex_init(GpuTex *g)
 					C3D_TexDelete(&g->tex[k]);
 				return false;
 			}
+	/* (cleared where the image doesn't reach: the padding up to the power
+	 * of two held old memory, which filtering, planes and zoomed sprites
+	 * can show at the edges: garbage) */
+	for (int j = 0; j < g->ny; j++)
+		for (int i = 0; i < g->nx; i++) {
+			C3D_Tex *t = &g->tex[j * g->nx + i];
+			if (t->width != g->xs[i + 1] - g->xs[i] || t->height != g->ys[j + 1] - g->ys[j])
+				memset(t->data, 0, t->size);
+		}
 	return true;
 }
 
@@ -1807,4 +1816,48 @@ void gpu_movie_frame(void *c3d_tex, int w, int h)
 		quad(x0, y0, x0 + dw * xs, y0 + dh, 0, 1, (float) w / tex->width, 1 - (float) h / tex->height, 1.0f, 0, 0, 0);
 	}
 	gpu_frame_end();
+}
+
+/* the start (main.c, boot.rb): "LOADING" and a bar on the black top screen
+ * until the game's first picture (before: whatever memory held, garbage) */
+void gpu_startup_progress(float frac)
+{
+	if (!gpu_on || in_frame)
+		return;
+	static const char *const glyphs[7][5] = {
+		{ "#..", "#..", "#..", "#..", "###" }, /* L */
+		{ ".#.", "#.#", "#.#", "#.#", ".#." }, /* O */
+		{ ".#.", "#.#", "###", "#.#", "#.#" }, /* A */
+		{ "##.", "#.#", "#.#", "#.#", "##." }, /* D */
+		{ "###", ".#.", ".#.", ".#.", "###" }, /* I */
+		{ "#.#", "###", "###", "###", "#.#" }, /* N */
+		{ ".##", "#..", "#.#", "#.#", ".##" }, /* G */
+	};
+	static const int word[7] = { 0, 1, 2, 3, 4, 5, 6 };
+	frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+	C3D_FrameBegin(0);
+	in_frame = true;
+	for (int eye = 0; eye < (top_right ? 2 : 1); eye++) {
+		C3D_RenderTarget *target = eye ? top_right : top;
+		C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000ff, 0);
+		C3D_FrameDrawOn(target);
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_ui);
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		presenting = true;
+		tev_last.valid = false;
+		cur_clip = (Rect) { -1, -1, -1, -1 };
+		cur_blend = -1;
+		Canvas c = { .clip = { 0, 0, 400, 240 } };
+		Color white = { 230, 230, 230, 255 }, back = { 60, 60, 70, 255 }, bar = { 120, 170, 255, 255 };
+		int wx = 200 - (7 * 8 - 2) / 2, wy = 100;
+		for (int i = 0; i < 7; i++)
+			for (int y = 0; y < 5; y++)
+				for (int x = 0; x < 3; x++)
+					if (glyphs[word[i]][y][x] == '#')
+						gpu_fill(&c, (Rect) { wx + i * 8 + x * 2, wy + y * 2, 2, 2 }, &white, 255);
+		gpu_fill(&c, (Rect) { 120, 120, 160, 6 }, &back, 255);
+		gpu_fill(&c, (Rect) { 120, 120, (int) (160 * frac), 6 }, &bar, 255);
+	}
+	C3D_FrameEnd(0);
+	in_frame = false;
 }

@@ -433,6 +433,10 @@ class Bitmap
   def self.max_size; 1024; end unless respond_to?(:max_size)
 end
 
+# VX Ace's RGSS3 (and MKXP-Z) have it; games and the widescreen script
+# check it
+RGSS_VERSION = '3.0.1' if $MKXPZ_RGSS == 3 && !defined?(RGSS_VERSION)
+
 # XP / VX print with message boxes too (RGSS1's print is one as well:
 # Middens shows "Unable to find file" with it)
 alias print msgbox
@@ -1020,6 +1024,7 @@ def mkxpz_run_scripts
   # scripts again, "already initialized constant" for each of them)
   $VERBOSE = nil
   $RGSS_SCRIPTS = load_data($MKXPZ_SCRIPTS)
+  mkxpz_widescreen_setup
   $RGSS_SCRIPTS.each_with_index do |s, i|
     s[3] = Zlib::Inflate.inflate(s[2]).force_encoding(Encoding::UTF_8)
   end
@@ -1052,6 +1057,8 @@ def mkxpz_run_scripts
       test = false
     end
     file = name.empty? ? "Section#{i}" : name
+    # (the start's loading bar: 40 % .. 100 % over the sections)
+    Graphics.mkxpz_startup(0.4 + 0.6 * i / $RGSS_SCRIPTS.size) if i % 8 == 0 && Graphics.respond_to?(:mkxpz_startup)
     begin
       eval(s[3], TOPLEVEL_BINDING, file)
     rescue SyntaxError => e
@@ -1066,6 +1073,18 @@ def mkxpz_run_scripts
       retry
     end
   end
+end
+
+# Screen: extended (settings): the PC patcher's widescreen script (its mode
+# 2, a wider view on maps; VX / VX Ace), at 5:3 for the top screen (704 at
+# 416 high) instead of 16:9. Once: not again after a reset (it aliases).
+def mkxpz_widescreen_setup
+  return if $mkxpz_ws_loaded || $MKXPZ_RGSS < 2 || !defined?(MKXPZ_WIDESCREEN_SRC)
+  $mkxpz_ws_loaded = true
+  eval(MKXPZ_WIDESCREEN_SRC, TOPLEVEL_BINDING, 'widescreen.rb')
+  MkxpzWidescreen.singleton_class.send(:define_method, :wide_w) { (@base_h * 5.0 / 3 / 32).round * 32 }
+rescue StandardError, SyntaxError => e
+  mkxpz_log("widescreen: #{e.class}: #{e.message}")
 end
 
 # Ruby 1.8 syntax that later Ruby (and MKXP-Z's) rejects, as RPG Maker XP /

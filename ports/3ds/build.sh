@@ -80,7 +80,9 @@ import sys, os
 src, out = sys.argv[1], sys.argv[2]
 with open(out, 'w') as o:
     o.write('/* made by build.sh */\n')
-    for name in ['boot.rb', 'ruby/module_rpg1.rb', 'ruby/module_rpg2.rb', 'ruby/module_rpg3.rb']:
+    # (widescreen.rb: the PC patcher's, the same file)
+    for name in ['boot.rb', 'ruby/module_rpg1.rb', 'ruby/module_rpg2.rb', 'ruby/module_rpg3.rb',
+                 '../../../patcher-rs/assets/compat/widescreen.rb']:
         data = open(os.path.join(src, name), 'rb').read() + b'\0'
         var = os.path.basename(name).replace('.', '_')
         o.write('static const char %s[] = {\n' % var)

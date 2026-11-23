@@ -127,6 +127,7 @@ static double ms(u64 ticks) { return ticks * 1000.0 / SYSCLOCK_ARM11; }
 
 /* the last speed line (for tests: Graphics.mkxpz_speed) */
 extern unsigned gpu_cmd_splits;
+static bool first_frame_done; /* (the start's loading bar until then) */
 static char speed_line[400];
 static VALUE g_speed(VALUE self) { return rb_str_new_cstr(speed_line); }
 
@@ -214,7 +215,8 @@ static void draw_eyes(int frozen_alpha, bool stereo)
 		stereo_shift[0] = -sign * d; /* behind */
 		stereo_shift[1] = 0;
 		stereo_shift[2] = sign * d;  /* in front */
-		gpu_present_eye(eye, (int) lroundf(stereo_shift[2] * gpu_scale_x()));
+		/* (window text: its position already has the window's shift) */
+		gpu_present_eye(eye, 0);
 		if (frozen_alpha < 255)
 			gpu_draw_scene(0);
 		gpu_present(frozen_alpha, brightness);
@@ -225,6 +227,7 @@ static void draw_eyes(int frozen_alpha, bool stereo)
 
 static void gpu_frame_with(int frozen_alpha)
 {
+	first_frame_done = true;
 	if (!aptMainLoop())
 		rb_exit(0);
 	input_poll();
@@ -572,10 +575,21 @@ static VALUE g_snap(VALUE self)
 
 static VALUE g_resize(VALUE self, VALUE w, VALUE h)
 {
-	int nw = CLAMP(num2int(w), 16, 640), nh = CLAMP(num2int(h), 16, 480);
+	/* (up to 1024 across: the extended screen's wider map, 704) */
+	int nw = CLAMP(num2int(w), 16, 1024), nh = CLAMP(num2int(h), 16, 480);
 	if (nw != screen_w || nh != screen_h)
 		alloc_screen(nw, nh);
 	return Qnil;
+}
+
+/* the PC patcher's widescreen script (embedded, boot.rb): its mode 2 (a
+ * wider view on maps) with the setting Screen: extended, else off */
+static VALUE g_widescreen_mode(VALUE self) { return INT2FIX(settings.screen == 2 ? 2 : 0); }
+static VALUE g_widescreen_resize(int argc, VALUE *argv, VALUE self)
+{
+	if (argc < 2)
+		rb_raise(rb_eArgError, "widescreen_resize(width, height[, frame width])");
+	return g_resize(self, argv[0], argv[1]);
 }
 
 static VALUE g_width(VALUE self) { return INT2NUM(screen_w); }
@@ -591,6 +605,8 @@ static VALUE g_nothing(int argc, VALUE *argv, VALUE self) { return Qnil; }
 void gpu_tex_dump(void);
 static VALUE g_tex_dump(VALUE self) { gpu_tex_dump(); return Qnil; }
 static VALUE g_preload_begin(VALUE self) { gpu_preload_begin(); return Qnil; }
+/* (boot.rb: while the game's scripts load, until the first picture) */
+static VALUE g_startup(VALUE self, VALUE frac) { if (!first_frame_done) gpu_startup_progress((float) NUM2DBL(frac)); return Qnil; }
 
 void init_graphics(void)
 {
@@ -601,6 +617,7 @@ void init_graphics(void)
 	rb_define_module_function(mGraphics, "mkxpz_margin", g_margin, 0);
 	rb_define_module_function(mGraphics, "mkxpz_tex_dump", g_tex_dump, 0);
 	rb_define_module_function(mGraphics, "mkxpz_preload_begin", g_preload_begin, 0);
+	rb_define_module_function(mGraphics, "mkxpz_startup", g_startup, 1);
 	rb_define_module_function(mGraphics, "mkxpz_reset", g_reset, 0);
 	rb_define_module_function(mGraphics, "mkxpz_loading", g_loading, -1);
 	rb_define_module_function(mGraphics, "wait", g_wait, 1);
@@ -610,6 +627,8 @@ void init_graphics(void)
 	rb_define_module_function(mGraphics, "fadein", g_fadein, 1);
 	rb_define_module_function(mGraphics, "snap_to_bitmap", g_snap, 0);
 	rb_define_module_function(mGraphics, "resize_screen", g_resize, 2);
+	rb_define_module_function(mGraphics, "widescreen_mode", g_widescreen_mode, 0);
+	rb_define_module_function(mGraphics, "widescreen_resize", g_widescreen_resize, -1);
 	rb_define_module_function(mGraphics, "frame_reset", g_nothing, -1);
 	rb_define_module_function(mGraphics, "play_movie", g_nothing, -1);
 	rb_define_module_function(mGraphics, "width", g_width, 0);

@@ -93,6 +93,7 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
  * possible for this image: then bitmap_stream_file) */
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 void gpu_preload_begin(void);
+void gpu_startup_progress(float frac); /* gpu.c: the loading bar at the start */
 bool audio_release_memory(void); /* audio.c: a cached sound effect let go of (textures need room) */
 /* audio.c: a movie's sound (movie.c) */
 bool audio_movie_open(int rate, int channels);

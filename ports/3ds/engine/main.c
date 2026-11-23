@@ -807,6 +807,20 @@ int main(int argc, char **argv)
 {
 	stack_paint();
 	gfxInitDefault();
+	/* (the top screen black at once: its memory showed as garbage until the
+	 * game's first picture) */
+	for (int i = 0; i < 2; i++) {
+		u16 fw, fh;
+		u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fw, &fh);
+		if (fb)
+			memset(fb, 0, (size_t) fw * fh * 3);
+		fb = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &fw, &fh);
+		if (fb)
+			memset(fb, 0, (size_t) fw * fh * 3);
+		gfxFlushBuffers();
+		gfxSwapBuffers();
+		gspWaitForVBlank();
+	}
 	console_init();
 	atexit(hold_on_exit);
 	romfsInit();
@@ -899,6 +913,7 @@ int main(int argc, char **argv)
 		init_events();
 		init_window();
 		gpu_init();
+		gpu_startup_progress(0.1f);
 		{
 			extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 			bool n3ds = false;
@@ -935,15 +950,22 @@ int main(int argc, char **argv)
 			init_tilemap();
 		prof_init();
 		say("step: classes\n");
+		gpu_startup_progress(0.2f);
+		/* (the PC patcher's widescreen script, for Screen: extended; boot.rb
+		 * runs it before the game's scripts) */
+		rb_define_global_const("MKXPZ_WIDESCREEN_SRC", rb_str_new_cstr(widescreen_rb));
 		bool ok = eval_source(boot_rb, "boot.rb");
 		say("step: boot.rb\n");
+		gpu_startup_progress(0.25f);
 		eRGSSError = rb_const_get(rb_cObject, rb_intern("RGSSError"));
 		eRGSSReset = rb_const_get(rb_cObject, rb_intern("RGSSReset"));
 		const char *rpg = rgss_version == 3 ? module_rpg3_rb : rgss_version == 2 ? module_rpg2_rb : module_rpg1_rb;
 		ok = ok && eval_source(rpg, "module_rpg.rb");
 		say("step: rpg\n");
+		gpu_startup_progress(0.3f);
 		fonts_scan("romfs:/fonts");
 		say("step: fonts\n");
+		gpu_startup_progress(0.35f);
 		if (!ok) {
 			show_error();
 			wait_start();
@@ -952,6 +974,7 @@ int main(int argc, char **argv)
 		int state = 0;
 		gpu_selftest();
 		say("step: scripts\n");
+		gpu_startup_progress(0.4f);
 		rb_protect(run_scripts, Qnil, &state);
 		say("scripts ended (%d)\n", state);
 		if (state) {
