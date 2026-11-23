@@ -928,6 +928,7 @@ int main(int argc, char **argv)
 		if (!audio_start())
 			say("No sound: the DSP firmware is missing (run \"DSP1\" once: sdmc:/3ds/dspfirm.cdc)\n");
 		init_graphics();
+		init_movie(); /* (after Graphics: its play_movie) */
 		init_input();
 		init_audio();
 		if (rgss_version >= 2)

@@ -1,23 +1,43 @@
 /* Audio with the 3DS's DSP (ndsp): BGM, BGS and ME are streamed (decoded
  * ahead by an audio thread), sound effects are decoded once and cached.
  * Formats: Ogg Vorbis (Tremor; RPG Maker's LOOPSTART / LOOPLENGTH loop
- * points) and WAV (PCM 8/16 bit). MIDI: not yet (silent).
+ * points), WAV (PCM 8/16 bit), MP3 (libmpg123) and MIDI (TinySoundFont
+ * with a General MIDI SoundFont: soundfont.sf2 in the game folder or in
+ * sdmc:/3ds/mkxpz/; RPG Maker's loop point, controller 111).
  * The DSP needs its firmware, sdmc:/3ds/dspfirm.cdc (made with the "DSP1"
  * homebrew); without it the game runs silently. */
 #include "engine.h"
 #include <3ds.h>
 #include <tremor/ivorbisfile.h>
+#define MPG123_NO_LARGENAME
+#include <mpg123.h>
+#include <math.h>
+#define TSF_IMPLEMENTATION
+#include "tsf.h"
+#define TML_IMPLEMENTATION
+#include "tml.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
 /* --- decoders */
-enum { SRC_NONE, SRC_OGG, SRC_WAV };
+enum { SRC_NONE, SRC_OGG, SRC_WAV, SRC_MP3, SRC_MIDI, SRC_ADPCM };
 
 typedef struct {
 	int type;
 	FILE *f;
 	OggVorbis_File vf;
+	mpg123_handle *mh;                  /* MP3 */
+	tsf *synth;                         /* MIDI: its own copy of the SoundFont's synthesizer */
+	tml_message *midi, *msg;            /* MIDI: all messages, the next one */
+	unsigned midi_loop_ms;              /* MIDI: controller 111 (RPG Maker's loop point) */
+	/* .mkxa (DSP-ADPCM, made by tools/mkxa.c): */
+	int16_t coefs[2][16], hist[2][2], loop_hist[2][2];
+	int16_t cache[2][14];               /* the decoded frame cache_at */
+	long cache_at;                      /* (-1: none) */
+	long next_frame;                    /* the next frame in the file */
+	uint8_t *abuf;                      /* read buffer */
+	int abuf_len, abuf_at;
 	int channels, rate;
 	long data_start, data_frames, bits; /* WAV */
 	long pos;                           /* frames */
@@ -36,14 +56,291 @@ static long comment_num(vorbis_comment *vc, const char *key)
 static uint32_t le32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t) p[3] << 24; }
 static uint16_t le16(const unsigned char *p) { return p[0] | p[1] << 8; }
 
+/* --- MP3 (libmpg123), reading through the FILE (so also from Game.data) */
+static mpg123_ssize_t mp3_read(void *h, void *buf, size_t n) { return (mpg123_ssize_t) fread(buf, 1, n, h); }
+static off_t mp3_seek(void *h, off_t off, int whence) { return fseek(h, off, whence) ? -1 : ftell(h); }
+
+static bool mp3_open(Source *s)
+{
+	static bool inited;
+	if (!inited) {
+		mpg123_init();
+		inited = true;
+	}
+	int err = 0;
+	s->mh = mpg123_new(NULL, &err);
+	if (!s->mh)
+		return false;
+	mpg123_param(s->mh, MPG123_ADD_FLAGS, MPG123_QUIET, 0);
+	/* 16-bit samples at whatever rate the file has */
+	mpg123_format_none(s->mh);
+	const long *rates;
+	size_t nrates;
+	mpg123_rates(&rates, &nrates);
+	for (size_t i = 0; i < nrates; i++)
+		mpg123_format(s->mh, rates[i], MPG123_MONO | MPG123_STEREO, MPG123_ENC_SIGNED_16);
+	long rate;
+	int channels, enc;
+	if (mpg123_replace_reader_handle(s->mh, mp3_read, mp3_seek, NULL) != MPG123_OK ||
+	    mpg123_open_handle(s->mh, s->f) != MPG123_OK ||
+	    mpg123_getformat(s->mh, &rate, &channels, &enc) != MPG123_OK || channels < 1 || channels > 2) {
+		mpg123_delete(s->mh);
+		s->mh = NULL;
+		return false;
+	}
+	s->type = SRC_MP3;
+	s->rate = (int) rate;
+	s->channels = channels;
+	return true;
+}
+
+/* --- .mkxa: DSP-ADPCM (tools/mkxa.c), decoded here for music (cheap);
+ * mono sound effects are played by the DSP itself (sound_load) */
+#define ADPCM_BUF 4096
+static bool adpcm_open(Source *s)
+{
+	unsigned char h[28];
+	if (fseek(s->f, 0, SEEK_SET) || fread(h, 1, 28, s->f) != 28 || memcmp(h, "MKXA", 4) || le32(h + 4) != 1)
+		return false;
+	s->rate = (int) le32(h + 8);
+	s->channels = (int) le32(h + 12);
+	s->data_frames = (long) le32(h + 16);
+	s->loop_start = (long) le32(h + 20);
+	s->loop_end = (long) le32(h + 24);
+	if (s->channels < 1 || s->channels > 2 || !s->rate)
+		return false;
+	for (int c = 0; c < s->channels; c++) {
+		unsigned char b[36];
+		if (fread(b, 1, 36, s->f) != 36)
+			return false;
+		for (int k = 0; k < 16; k++)
+			s->coefs[c][k] = (int16_t) le16(b + k * 2);
+		s->loop_hist[c][0] = (int16_t) le16(b + 32);
+		s->loop_hist[c][1] = (int16_t) le16(b + 34);
+	}
+	s->data_start = 28 + 36 * s->channels;
+	s->abuf = malloc(ADPCM_BUF);
+	if (!s->abuf)
+		return false;
+	if (s->loop_start > 0 && !s->loop_end)
+		s->loop_end = s->data_frames;
+	s->type = SRC_ADPCM;
+	s->cache_at = -1;
+	return true;
+}
+
+static int16_t clamp16(int v) { return v < -32768 ? -32768 : v > 32767 ? 32767 : (int16_t) v; }
+
+/* the next frame (of each channel) into the cache */
+static bool adpcm_next(Source *s)
+{
+	int need = 8 * s->channels;
+	if (s->abuf_at + need > s->abuf_len) {
+		int left = s->abuf_len - s->abuf_at;
+		memmove(s->abuf, s->abuf + s->abuf_at, left);
+		s->abuf_len = left + (int) fread(s->abuf + left, 1, ADPCM_BUF - left, s->f);
+		s->abuf_at = 0;
+		if (s->abuf_len < need)
+			return false;
+	}
+	for (int c = 0; c < s->channels; c++) {
+		const uint8_t *b = s->abuf + s->abuf_at + c * 8;
+		int p = b[0] >> 4 & 7, scale = b[0] & 15, c1 = s->coefs[c][p * 2], c2 = s->coefs[c][p * 2 + 1];
+		int h1 = s->hist[c][0], h2 = s->hist[c][1];
+		for (int i = 0; i < 14; i++) {
+			int nib = b[1 + i / 2] >> (i & 1 ? 0 : 4) & 15;
+			if (nib >= 8)
+				nib -= 16;
+			int v = clamp16((((nib << scale) << 11) + 1024 + c1 * h1 + c2 * h2) >> 11);
+			h2 = h1;
+			h1 = v;
+			s->cache[c][i] = (int16_t) v;
+		}
+		s->hist[c][0] = (int16_t) h1;
+		s->hist[c][1] = (int16_t) h2;
+	}
+	s->abuf_at += need;
+	s->cache_at = s->next_frame++;
+	return true;
+}
+
+static long adpcm_read(Source *s, int16_t *out, long n)
+{
+	long done = 0;
+	while (done < n && s->pos + done < s->data_frames) {
+		long at = s->pos + done, f = at / 14;
+		while (s->cache_at != f)
+			if (!adpcm_next(s))
+				return done;
+		int i = (int) (at % 14);
+		long k = 14 - i;
+		if (k > n - done)
+			k = n - done;
+		if (k > s->data_frames - at)
+			k = s->data_frames - at;
+		for (long j = 0; j < k; j++)
+			for (int c = 0; c < s->channels; c++)
+				out[(done + j) * s->channels + c] = s->cache[c][i + j];
+		done += k;
+	}
+	return done;
+}
+
+/* to the start or the loop point (the history there is in the file);
+ * elsewhere: from the nearer of the two, decoding up to it */
+static void adpcm_seek(Source *s, long frame)
+{
+	long f = frame / 14, from = 0;
+	memset(s->hist, 0, sizeof s->hist);
+	if (s->loop_start > 0 && f >= s->loop_start / 14) {
+		from = s->loop_start / 14;
+		memcpy(s->hist, s->loop_hist, sizeof s->hist);
+	}
+	fseek(s->f, s->data_start + from * 8 * s->channels, SEEK_SET);
+	s->abuf_len = s->abuf_at = 0;
+	s->next_frame = from;
+	s->cache_at = -1;
+	while (s->next_frame < f && adpcm_next(s))
+		;
+}
+
+/* --- MIDI: TinySoundFont, the SoundFont loaded once (the samples stay
+ * 16-bit: about the .sf2's size in memory) and shared by every MIDI
+ * playing */
+#define MIDI_RATE 22050
+static tsf *soundfont;
+static bool soundfont_tried;
+static LightLock sf_lock = 1; /* (LightLock_Init: 1 is unlocked) */
+
+static tsf *soundfont_get(void)
+{
+	LightLock_Lock(&sf_lock);
+	if (!soundfont_tried) {
+		soundfont_tried = true;
+		static const char *const where[] = { "soundfont.sf2", "../soundfont.sf2", "sdmc:/3ds/mkxpz/soundfont.sf2",
+		                                     "sdmc:/3ds/soundfont.sf2", NULL };
+		for (int i = 0; where[i] && !soundfont; i++) {
+			FILE *f = fopen(where[i], "rb");
+			if (!f)
+				continue;
+			fclose(f);
+			soundfont = tsf_load_filename(where[i]);
+			log_only("MIDI: SoundFont %s %s\n", where[i], soundfont ? "loaded" : "couldn't be loaded");
+		}
+		if (!soundfont)
+			say("MIDI music needs a SoundFont: soundfont.sf2 in sdmc:/3ds/mkxpz/\n");
+	}
+	LightLock_Unlock(&sf_lock);
+	return soundfont;
+}
+
+static bool midi_open(Source *s, const char *path)
+{
+	tsf *base = soundfont_get();
+	if (!base)
+		return false;
+	s->midi = tml_load_filename(path);
+	if (!s->midi)
+		return false;
+	LightLock_Lock(&sf_lock);
+	s->synth = tsf_copy(base);
+	LightLock_Unlock(&sf_lock);
+	if (!s->synth) {
+		tml_free(s->midi);
+		s->midi = NULL;
+		return false;
+	}
+	tsf_set_output(s->synth, TSF_STEREO_INTERLEAVED, MIDI_RATE, -3.0f);
+	tsf_channel_set_bank_preset(s->synth, 9, 128, 0); /* (channel 10: drums) */
+	for (tml_message *m = s->midi; m; m = m->next)
+		if (m->type == TML_CONTROL_CHANGE && m->control == 111) {
+			s->midi_loop_ms = m->time;
+			break;
+		}
+	s->msg = s->midi;
+	s->type = SRC_MIDI;
+	s->rate = MIDI_RATE;
+	s->channels = 2;
+	if (s->midi_loop_ms)
+		s->loop_start = (long) ((long long) s->midi_loop_ms * MIDI_RATE / 1000);
+	return true;
+}
+
+/* the messages up to ms */
+static void midi_feed(Source *s, unsigned ms)
+{
+	for (; s->msg && s->msg->time <= ms; s->msg = s->msg->next) {
+		tml_message *m = s->msg;
+		switch (m->type) {
+		case TML_PROGRAM_CHANGE: tsf_channel_set_presetnumber(s->synth, m->channel, m->program, m->channel == 9); break;
+		case TML_NOTE_ON: tsf_channel_note_on(s->synth, m->channel, m->key, m->velocity / 127.0f); break;
+		case TML_NOTE_OFF: tsf_channel_note_off(s->synth, m->channel, m->key); break;
+		case TML_PITCH_BEND: tsf_channel_set_pitchwheel(s->synth, m->channel, m->pitch_bend); break;
+		case TML_CONTROL_CHANGE: tsf_channel_midi_control(s->synth, m->channel, m->control, m->control_value); break;
+		}
+	}
+}
+
+static long midi_read(Source *s, int16_t *out, long n)
+{
+	long done = 0;
+	while (done < n) {
+		if (!s->msg && !tsf_active_voice_count(s->synth))
+			break; /* the end */
+		long block = n - done < 64 ? n - done : 64;
+		midi_feed(s, (unsigned) ((long long) (s->pos + done) * 1000 / MIDI_RATE));
+		tsf_render_short(s->synth, out + done * 2, (int) block, 0);
+		done += block;
+	}
+	return done;
+}
+
+/* (only to the start or the loop point: messages from there; the notes
+ * sounding stop) */
+static void midi_seek(Source *s, long frame)
+{
+	unsigned ms = (unsigned) ((long long) frame * 1000 / MIDI_RATE);
+	tsf_note_off_all(s->synth);
+	if (ms == 0) {
+		tsf_reset(s->synth);
+		tsf_channel_set_bank_preset(s->synth, 9, 128, 0);
+		s->msg = s->midi;
+		return;
+	}
+	/* (programs, controllers from the start up to there: notes left out) */
+	for (s->msg = s->midi; s->msg && s->msg->time < ms; s->msg = s->msg->next) {
+		tml_message *m = s->msg;
+		if (m->type == TML_PROGRAM_CHANGE)
+			tsf_channel_set_presetnumber(s->synth, m->channel, m->program, m->channel == 9);
+		else if (m->type == TML_CONTROL_CHANGE)
+			tsf_channel_midi_control(s->synth, m->channel, m->control, m->control_value);
+		else if (m->type == TML_PITCH_BEND)
+			tsf_channel_set_pitchwheel(s->synth, m->channel, m->pitch_bend);
+	}
+}
+
 static bool src_open(Source *s, const char *path)
 {
 	memset(s, 0, sizeof *s);
+	{
+		size_t l = strlen(path);
+		if ((l > 4 && !strcasecmp(path + l - 4, ".mid")) || (l > 5 && !strcasecmp(path + l - 5, ".midi")))
+			return midi_open(s, path);
+	}
 	s->f = fopen(path, "rb");
 	if (!s->f)
 		return false;
 	unsigned char head[12];
-	if (fread(head, 1, 12, s->f) == 12 && !memcmp(head, "RIFF", 4) && !memcmp(head + 8, "WAVE", 4)) {
+	if (fread(head, 1, 12, s->f) == 12 && !memcmp(head, "MKXA", 4)) {
+		if (adpcm_open(s))
+			return true;
+		free(s->abuf);
+		s->abuf = NULL;
+		fclose(s->f);
+		s->f = NULL;
+		return false;
+	}
+	if (!memcmp(head, "RIFF", 4) && !memcmp(head + 8, "WAVE", 4)) {
 		/* WAV: find "fmt " and "data" */
 		unsigned char ch[8];
 		while (fread(ch, 1, 8, s->f) == 8) {
@@ -69,6 +366,17 @@ static bool src_open(Source *s, const char *path)
 				fseek(s->f, len + (len & 1), SEEK_CUR);
 			}
 		}
+		fclose(s->f);
+		s->f = NULL;
+		return false;
+	}
+	/* MP3: an ID3 tag or an MPEG frame header first (or the name says so) */
+	size_t pl = strlen(path);
+	if ((pl > 4 && !strcasecmp(path + pl - 4, ".mp3")) || !memcmp(head, "ID3", 3) ||
+	    (head[0] == 0xff && (head[1] & 0xe0) == 0xe0)) {
+		rewind(s->f);
+		if (mp3_open(s))
+			return true;
 		fclose(s->f);
 		s->f = NULL;
 		return false;
@@ -99,10 +407,24 @@ static bool src_open(Source *s, const char *path)
 
 static void src_close(Source *s)
 {
-	if (s->type == SRC_OGG)
+	if (s->type == SRC_MIDI) {
+		tsf_close(s->synth);
+		tml_free(s->midi);
+		s->synth = NULL;
+		s->midi = s->msg = NULL;
+	} else if (s->type == SRC_OGG) {
 		ov_clear(&s->vf);
-	else if (s->f)
-		fclose(s->f);
+	} else {
+		if (s->mh) {
+			mpg123_close(s->mh);
+			mpg123_delete(s->mh);
+			s->mh = NULL;
+		}
+		if (s->f)
+			fclose(s->f);
+		free(s->abuf);
+		s->abuf = NULL;
+	}
 	s->type = SRC_NONE;
 	s->f = NULL;
 }
@@ -115,6 +437,12 @@ static void src_seek(Source *s, long frame)
 		ov_pcm_seek(&s->vf, frame);
 	else if (s->type == SRC_WAV)
 		fseek(s->f, s->data_start + frame * s->channels * (s->bits / 8), SEEK_SET);
+	else if (s->type == SRC_MP3)
+		mpg123_seek(s->mh, frame, SEEK_SET);
+	else if (s->type == SRC_MIDI)
+		midi_seek(s, frame);
+	else if (s->type == SRC_ADPCM)
+		adpcm_seek(s, frame);
 	s->pos = frame;
 }
 
@@ -133,6 +461,14 @@ static long src_read(Source *s, int16_t *out, long n, bool loop)
 				int bs;
 				long bytes = ov_read(&s->vf, (char *) (out + done * s->channels), want * s->channels * 2, &bs);
 				got = bytes > 0 ? bytes / (2 * s->channels) : 0;
+			} else if (s->type == SRC_ADPCM) {
+				got = adpcm_read(s, out + done * s->channels, want);
+			} else if (s->type == SRC_MIDI) {
+				got = midi_read(s, out + done * s->channels, want);
+			} else if (s->type == SRC_MP3) {
+				size_t bytes = 0;
+				int rc = mpg123_read(s->mh, (unsigned char *) (out + done * s->channels), want * s->channels * 2, &bytes);
+				got = (rc == MPG123_OK || rc == MPG123_DONE || bytes) ? (long) (bytes / (2 * s->channels)) : 0;
 			} else if (s->type == SRC_WAV) {
 				long left = s->data_frames - s->pos;
 				if (want > left)
@@ -211,7 +547,7 @@ static void set_mix(int ch, float v)
 /* find the file: with or without extension */
 static bool find_audio(const char *name, char *out, size_t n)
 {
-	static const char *const ext[] = { ".ogg", ".wav", ".oga", "", NULL };
+	static const char *const ext[] = { ".mkxa", ".ogg", ".wav", ".oga", ".mp3", ".mid", ".midi", "", NULL };
 	return file_find(name, ext, out, n);
 }
 
@@ -328,10 +664,14 @@ static void audio_thread(void *arg)
 /* --- sound effects: decoded once, cached */
 typedef struct {
 	char name[128];
-	int16_t *pcm; /* linear memory */
+	int16_t *pcm; /* linear memory (PCM16, or the ADPCM frames) */
 	long frames;
 	int channels, rate;
 	unsigned used; /* for evicting the least recently used */
+	size_t bytes;  /* of pcm */
+	bool adpcm;    /* mono .mkxa: played by the DSP as it is */
+	u16 coefs[16];
+	ndspAdpcmData adata;
 } Sound;
 
 #define SE_CACHE 48
@@ -369,7 +709,7 @@ static bool se_release_one(bool any)
 			se_wb[c].data_pcm16 = NULL;
 		}
 	linearFree(old->pcm);
-	se_bytes -= (size_t) old->frames * old->channels * 2;
+	se_bytes -= old->bytes;
 	old->pcm = NULL;
 	return true;
 }
@@ -391,6 +731,41 @@ static Sound *sound_load(const char *name)
 	u64 t_load = svcGetSystemTick();
 	if (!find_audio(name, path, sizeof path) || !src_open(&src, path))
 		return NULL;
+	if (src.type == SRC_ADPCM && src.channels == 1) {
+		/* mono DSP-ADPCM: kept as it is (a quarter of PCM16), the DSP
+		 * decodes it */
+		size_t bytes = (size_t) (src.data_frames + 13) / 14 * 8;
+		Sound *slot = NULL;
+		for (int i = 0; i < SE_CACHE && !slot; i++)
+			if (!sounds[i].pcm)
+				slot = &sounds[i];
+		while ((!slot || se_bytes + bytes > SE_BYTES) && se_release_one(false))
+			for (int i = 0; i < SE_CACHE && !slot; i++)
+				if (!sounds[i].pcm)
+					slot = &sounds[i];
+		uint8_t *data = slot ? linearAlloc(bytes) : NULL;
+		if (data && (fseek(src.f, src.data_start, SEEK_SET) || fread(data, 1, bytes, src.f) != bytes)) {
+			linearFree(data);
+			data = NULL;
+		}
+		if (data) {
+			DSP_FlushDataCache(data, bytes);
+			snprintf(slot->name, sizeof slot->name, "%s", name);
+			slot->pcm = (int16_t *) data;
+			slot->frames = src.data_frames;
+			slot->channels = 1;
+			slot->rate = src.rate;
+			slot->used = ++use_clock;
+			slot->bytes = bytes;
+			slot->adpcm = true;
+			for (int k = 0; k < 16; k++)
+				slot->coefs[k] = (u16) src.coefs[0][k];
+			se_bytes += bytes;
+		}
+		log_slow_load("sound", name, t_load);
+		src_close(&src);
+		return data ? slot : NULL;
+	}
 	/* decode it all (sound effects are short) */
 	long cap = 44100, n = 0;
 	int16_t *tmp = malloc(cap * src.channels * 2);
@@ -425,7 +800,7 @@ static Sound *sound_load(const char *name)
 				se_wb[c].data_pcm16 = NULL;
 			}
 		linearFree(slot->pcm);
-		se_bytes -= (size_t) slot->frames * slot->channels * 2;
+		se_bytes -= slot->bytes;
 		slot->pcm = NULL;
 	}
 	/* within the budget: the least recently used ones go */
@@ -441,7 +816,9 @@ static Sound *sound_load(const char *name)
 		slot->channels = src.channels;
 		slot->rate = src.rate;
 		slot->used = ++use_clock;
-		se_bytes += (size_t) n * src.channels * 2;
+		slot->bytes = (size_t) n * src.channels * 2;
+		slot->adpcm = false;
+		se_bytes += slot->bytes;
 	}
 	log_slow_load("sound", name, t_load);
 	free(tmp);
@@ -565,12 +942,20 @@ static VALUE a_se_play(int argc, VALUE *argv, VALUE self)
 	ndspChnWaveBufClear(ch);
 	ndspChnReset(ch);
 	ndspChnSetInterp(ch, NDSP_INTERP_LINEAR);
-	ndspChnSetFormat(ch, snd->channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
+	ndspChnSetFormat(ch, snd->adpcm ? NDSP_FORMAT_MONO_ADPCM
+	                                : snd->channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
 	ndspChnSetRate(ch, snd->rate * CLAMP(pitch, 50, 150) / 100.0f);
 	set_mix(ch, sound_factor(vol));
 	memset(&se_wb[c], 0, sizeof se_wb[c]);
 	se_wb[c].data_pcm16 = snd->pcm;
 	se_wb[c].nsamples = snd->frames;
+	if (snd->adpcm) {
+		ndspChnSetAdpcmCoefs(ch, snd->coefs);
+		/* (the decoder's start: the first frame's header, no history) */
+		snd->adata.index = ((const uint8_t *) snd->pcm)[0];
+		snd->adata.history0 = snd->adata.history1 = 0;
+		se_wb[c].adpcm_data = &snd->adata;
+	}
 	ndspChnWaveBufAdd(ch, &se_wb[c]);
 	return Qnil;
 }
@@ -662,4 +1047,100 @@ void init_audio(void)
 	rb_define_module_function(m, "mkxpz_preload_se", a_preload_se, 1);
 	rb_define_module_function(m, "se_stop", a_se_stop, 0);
 	rb_define_module_function(m, "setup_midi", a_nothing, -1);
+}
+
+/* --- a movie's sound (movie.c): its own DSP channel, a ring of buffers;
+ * the samples played so far are the movie's clock */
+#define CH_MOVIE (CH_SE0 + CH_SE_N)
+#define MOVIE_BUFS 8
+#define MOVIE_FRAMES 2048
+static ndspWaveBuf movie_wb[MOVIE_BUFS];
+static int16_t *movie_pcm;
+static int movie_channels, movie_next;
+static long long movie_queued; /* frames given to the DSP */
+
+bool audio_movie_open(int rate, int channels)
+{
+	if (!audio_ok || channels < 1 || channels > 2)
+		return false;
+	movie_pcm = linearAlloc(MOVIE_BUFS * MOVIE_FRAMES * channels * 2);
+	if (!movie_pcm)
+		return false;
+	movie_channels = channels;
+	movie_next = 0;
+	movie_queued = 0;
+	memset(movie_wb, 0, sizeof movie_wb);
+	for (int i = 0; i < MOVIE_BUFS; i++)
+		movie_wb[i].status = NDSP_WBUF_DONE;
+	ndspChnReset(CH_MOVIE);
+	ndspChnSetInterp(CH_MOVIE, NDSP_INTERP_LINEAR);
+	ndspChnSetFormat(CH_MOVIE, channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
+	ndspChnSetRate(CH_MOVIE, (float) rate);
+	set_mix(CH_MOVIE, music_factor(100));
+	return true;
+}
+
+/* a free buffer to fill (MOVIE_FRAMES frames), or NULL */
+int16_t *audio_movie_buffer(void)
+{
+	if (!movie_pcm)
+		return NULL;
+	ndspWaveBuf *wb = &movie_wb[movie_next];
+	if (wb->status != NDSP_WBUF_DONE && wb->status != NDSP_WBUF_FREE)
+		return NULL;
+	return movie_pcm + (size_t) movie_next * MOVIE_FRAMES * movie_channels;
+}
+
+int audio_movie_buffer_frames(void) { return MOVIE_FRAMES; }
+
+/* the buffer from audio_movie_buffer, with frames filled: played */
+void audio_movie_queue(int frames)
+{
+	ndspWaveBuf *wb = &movie_wb[movie_next];
+	int16_t *p = movie_pcm + (size_t) movie_next * MOVIE_FRAMES * movie_channels;
+	memset(wb, 0, sizeof *wb);
+	wb->data_pcm16 = p;
+	wb->nsamples = frames;
+	DSP_FlushDataCache(p, frames * movie_channels * 2);
+	ndspChnWaveBufAdd(CH_MOVIE, wb);
+	movie_queued += frames;
+	movie_next = (movie_next + 1) % MOVIE_BUFS;
+}
+
+/* frames played so far (the clock): the queued ones minus what's still
+ * waiting */
+long long audio_movie_played(void)
+{
+	if (!movie_pcm)
+		return 0;
+	long long waiting = 0;
+	bool playing_seen = false;
+	for (int i = 0; i < MOVIE_BUFS; i++) {
+		if (movie_wb[i].status == NDSP_WBUF_QUEUED)
+			waiting += movie_wb[i].nsamples;
+		else if (movie_wb[i].status == NDSP_WBUF_PLAYING) {
+			waiting += movie_wb[i].nsamples - ndspChnGetSamplePos(CH_MOVIE);
+			playing_seen = true;
+		}
+	}
+	(void) playing_seen;
+	return movie_queued - waiting;
+}
+
+bool audio_movie_idle(void)
+{
+	for (int i = 0; i < MOVIE_BUFS; i++)
+		if (movie_wb[i].status == NDSP_WBUF_QUEUED || movie_wb[i].status == NDSP_WBUF_PLAYING)
+			return false;
+	return true;
+}
+
+void audio_movie_close(void)
+{
+	if (!movie_pcm)
+		return;
+	ndspChnWaveBufClear(CH_MOVIE);
+	ndspChnReset(CH_MOVIE);
+	linearFree(movie_pcm);
+	movie_pcm = NULL;
 }

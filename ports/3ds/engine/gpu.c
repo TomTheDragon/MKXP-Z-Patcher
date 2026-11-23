@@ -1775,3 +1775,36 @@ void gpu_tex_dump(void)
 	log_only("textures: %d, %u KB; linear free %lu KB, VRAM free %lu KB\n", n, (unsigned) (total / 1024),
 	         (unsigned long) (linearSpaceFree() / 1024), (unsigned long) (vramSpaceFree() / 1024));
 }
+
+/* a movie frame (movie.c: a texture the Y2R unit filled, rows top down)
+ * on the top screen, as big as fits with its shape kept; in 3D the same
+ * picture for both eyes */
+void gpu_movie_frame(void *c3d_tex, int w, int h)
+{
+	C3D_Tex *tex = c3d_tex;
+	if (!gpu_on || in_frame)
+		return;
+	bool stereo = gpu_stereo_update();
+	gpu_frame_begin_sync(true);
+	for (int eye = 0; eye < (stereo && top_right ? 2 : 1); eye++) {
+		C3D_RenderTarget *target = eye ? top_right : top;
+		C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000ff, 0);
+		C3D_FrameDrawOn(target);
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_top);
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		presenting = true;
+		tev_last.valid = false;
+		cur_clip = (Rect) { -1, -1, -1, -1 };
+		cur_blend = -1;
+		set_blend(0);
+		set_tev(true, NULL, NULL);
+		C3D_TexBind(0, tex);
+		/* (in screen units of 400 x 240; wide: 2 pixels each across) */
+		int xs = eye ? 1 : gpu_top_xs;
+		float s = 400.0f / w < 240.0f / h ? 400.0f / w : 240.0f / h;
+		float dw = w * s, dh = h * s, x0 = (400 - dw) / 2 * xs, y0 = (240 - dh) / 2;
+		/* (the first rows written are the texture's top: v = 1) */
+		quad(x0, y0, x0 + dw * xs, y0 + dh, 0, 1, (float) w / tex->width, 1 - (float) h / tex->height, 1.0f, 0, 0, 0);
+	}
+	gpu_frame_end();
+}

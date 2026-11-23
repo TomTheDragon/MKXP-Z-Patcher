@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """MKXP-Z 3DS: a game's folder for the SD card, in one go.
 
-    make-3ds-package.py [--icon <picture>] <game folder> <mkxpz.3dsx> <output folder>
+    make-3ds-package.py [--icon <picture>] [--soundfont <file.sf2>] [--keep-audio]
+                        <game folder> <mkxpz.3dsx> <output folder>
 
 The output folder (made new; copy it into sdmc:/3ds/mkxpz/) gets:
   <Title>.3dsx   the engine with the game's title and icon (make-package.py)
   Game.data     the game's files in one pack, read by the engine directly:
                  Data, Graphics (images as .mkxi, convert-images.py; no
-                 PNGs), Audio, Movies... and, if the game has an RGSS archive
+                 PNGs), Audio (as .mkxa, DSP-ADPCM, convert-audio.py: MIDI
+                 rendered with --soundfont or an installed SoundFont; not
+                 with --keep-audio) and, if the game has an RGSS archive
                  (Game.rgssad / .rgss2a / .rgss3a), its contents
                  (extract-archive.py): nothing is decrypted on the 3DS
   Game.ini, Fonts/ and text files (.txt, .ini: games write some) as they are
 Left out: Game.exe and other programs, DLLs, the archive itself, editor
 project files, saves, zip files, hidden files, the PC patcher's mkxp-z
-folder, Movies (the engine plays no videos), Photoshop files, manuals
+folder, Photoshop files, manuals
 (PDF, HTML), Thumbs.db / desktop.ini, uninstallers. Other files in the
 game's folder itself stay plain (games write some).
 
@@ -22,8 +25,8 @@ per file (sorted by the lowercase name) u32 offset, u32 size, u16 name
 length, the name (as the game has it, "/", relative to the game folder);
 then the files.
 
-Needs ImageMagick ("magick", or MAGICK), lz4 ("lz4", or LZ4) and smdhtool
-(devkitPro, or SMDHTOOL).
+Needs ImageMagick ("magick", or MAGICK), lz4 ("lz4", or LZ4), smdhtool
+(devkitPro, or SMDHTOOL), and for the sound ffmpeg and a C compiler.
 """
 import importlib.util
 import os
@@ -45,8 +48,7 @@ def tool(name):
 SKIP_EXT = {".exe", ".dll", ".rgssad", ".rgss2a", ".rgss3a", ".rxproj", ".rvproj", ".rvproj2", ".lnk", ".url",
             ".ppdb", ".zip", ".7z", ".rar", ".psd", ".pdf", ".html", ".htm", ".ifl"}
 SKIP_NAMES = {"thumbs.db", "desktop.ini"}
-# (the 3DS engine plays no videos: Graphics.play_movie does nothing)
-SKIP_DIRS_ANYWHERE = {"movies"}
+SKIP_DIRS_ANYWHERE = set()
 PLAIN_EXT = {".txt", ".ini", ".cfg", ".json"}
 SKIP_DIRS = {"mkxp-z"}
 
@@ -59,8 +61,17 @@ def is_save(name):
 def main():
     args = sys.argv[1:]
     icon = []
-    if len(args) >= 2 and args[0] == "--icon":
-        icon, args = ["--icon", args[1]], args[2:]
+    soundfont = None
+    keep_audio = False
+    while args and args[0].startswith("--"):
+        if args[0] == "--icon" and len(args) >= 2:
+            icon, args = ["--icon", args[1]], args[2:]
+        elif args[0] == "--soundfont" and len(args) >= 2:
+            soundfont, args = args[1], args[2:]
+        elif args[0] == "--keep-audio":
+            keep_audio, args = True, args[1:]
+        else:
+            sys.exit(__doc__.strip())
     if len(args) != 3:
         sys.exit(__doc__.strip())
     game, engine, out = (os.path.abspath(a) for a in args)
@@ -94,9 +105,11 @@ def main():
             for name in os.listdir(stage):
                 if name.lower() == base + ".ini":
                     os.rename(os.path.join(stage, name), os.path.join(stage, "Game.ini"))
-        # 2. images converted (.mkxi next to each PNG)
+        # 2. images converted (.mkxi next to each PNG), sounds (.mkxa)
         if os.path.isdir(os.path.join(stage, "Graphics")):
             convert.main(stage)
+        if not keep_audio:
+            tool("convert-audio").main(stage, soundfont)
         # 3. plain files and the pack
         os.makedirs(out)
         files = []
@@ -121,6 +134,8 @@ def main():
                 if top == "graphics" and ext in (".png", ".jpg", ".jpeg", ".bmp") and \
                         os.path.exists(os.path.splitext(src)[0] + ".mkxi"):
                     continue  # (the .mkxi is used)
+                if top == "audio" and ext != ".mkxa" and os.path.exists(os.path.splitext(src)[0] + ".mkxa"):
+                    continue  # (the .mkxa is used)
                 files.append((low, rel.replace(os.sep, "/"), src))
         files.sort()
         index = b""

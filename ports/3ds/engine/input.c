@@ -88,6 +88,12 @@ void input_poll(void)
 	}
 }
 
+/* (movie.c) B pressed since the last poll: the movie is skipped */
+bool input_skip_movie(void)
+{
+	return (now & KEY_B) && !(before & KEY_B);
+}
+
 /* L held (default layout): the game runs as fast as it can */
 bool input_speedup(void)
 {

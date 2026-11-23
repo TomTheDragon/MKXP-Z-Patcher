@@ -60,11 +60,36 @@ Font.default_italic = false
 Font.default_color = Color.new(255, 255, 255, 255)
 Font.default_out_color = Color.new(0, 0, 0, 128)
 
-# Windows functions: none on the 3DS; calls do nothing
+# Windows functions: none on the 3DS; calls do nothing, except Windows'
+# MCI for videos (mciSendString: "open <file> ... alias X", "play X",
+# "status X mode", "close X"; Pocket Mirror's video script): played with
+# Graphics.play_movie, which returns when the video ends (or B skips it)
 class Win32API
-  def initialize(*) end
-  def call(*) 0 end
+  def initialize(dll = nil, func = nil, *)
+    @func = func.to_s
+  end
+
+  def call(*args)
+    return 0 unless @func =~ /\AmciSendString/i
+    Win32API.mkxpz_mci(args[0].to_s, args[1])
+  end
   alias Call call
+
+  def self.mkxpz_mci(cmd, buffer)
+    @mci ||= {}
+    case cmd
+    when /\Aopen\s+"?(.+?)"?(?:\s+type\s+\S+)?\s+alias\s+(\S+)/i
+      @mci[$2.downcase] = $1
+    when /\Aplay\s+(\S+)/i
+      path = @mci[$1.downcase]
+      Graphics.play_movie(path) if path
+    when /\Astatus\s+\S+\s+mode/i
+      buffer.replace('stopped') if buffer.is_a?(String)
+    when /\Aclose\s+(\S+)/i
+      @mci.delete($1.downcase)
+    end
+    0
+  end
 end
 
 # Screenshots in save files ("快速存储Bitmap的Marshal" by 柳之一, e.g. in

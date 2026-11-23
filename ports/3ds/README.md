@@ -465,6 +465,21 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   (3 MB) and taken over by Bitmap.new. Pack: files read from Game.data
   without a failed SD open first (pack_first), except in folders that are
   plain too or written to.
+- Sound: tools/convert-audio.py (make-3ds-package.py) turns Audio/* into
+  .mkxa (tools/mkxa.c: DSP-ADPCM, 8 predictors per file by k-means, best
+  predictor/scale per 14-sample frame; music resampled to 32728 Hz; Ogg
+  LOOPSTART/LOOPLENGTH and MIDI controller 111 kept; MIDI rendered with
+  TinySoundFont and an installed SoundFont). audio.c: .mkxa music decoded
+  in the audio thread, mono .mkxa sound effects played by the DSP
+  (NDSP_FORMAT_MONO_ADPCM), MP3 with libmpg123, MIDI with TinySoundFont
+  (tsf.h patched to keep 16-bit samples; too slow on the 3DS for most
+  pieces: the fallback). Sound effects cache: SE_BYTES.
+- Movies (movie.c): Ogg Theora + Vorbis with libtheoradec / Tremor; Y2R
+  converts each picture into a GPU_RGBA8 texture (8x8 blocks), the sound
+  plays on its own DSP channel and is the clock; late pictures are left out
+  (at least 4 a second shown). boot.rb's Win32API answers mciSendString
+  (open / play / status / close) with Graphics.play_movie.
+- GPU command list: 512 KB, C3D_FrameSplit when 3/4 full (cmdbuf_room).
 - Old games: boot.rb retries a section that doesn't compile with
   mkxpz_ruby18_fix (when x:, "foo (a, b)", |@ivar| block parameters,
   next/break outside a loop by the error's line), Ruby 1.8 classics

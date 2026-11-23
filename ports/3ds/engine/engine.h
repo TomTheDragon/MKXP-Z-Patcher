@@ -94,6 +94,18 @@ bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const 
 bool bitmap_read_rows(Bitmap *b, int y0, int y1, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 void gpu_preload_begin(void);
 bool audio_release_memory(void); /* audio.c: a cached sound effect let go of (textures need room) */
+/* audio.c: a movie's sound (movie.c) */
+bool audio_movie_open(int rate, int channels);
+int16_t *audio_movie_buffer(void);
+int audio_movie_buffer_frames(void);
+void audio_movie_queue(int frames);
+long long audio_movie_played(void);
+bool audio_movie_idle(void);
+void audio_movie_close(void);
+/* gpu.c: a movie frame (a texture filled by the Y2R unit) on the top screen */
+void gpu_movie_frame(void *c3d_tex, int w, int h);
+void init_movie(void);       /* movie.c: Graphics.play_movie */
+bool input_skip_movie(void); /* input.c */
 void gpu_preload(Bitmap *b, Rect r); /* gpu.c: the texture (pieces) for r, now */
 /* pack.c: the game's files in Game.data */
 struct _reent;
