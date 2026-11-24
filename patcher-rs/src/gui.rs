@@ -542,7 +542,7 @@ fn analyze(app: &Rc<App>, force: bool) {
         if !force && (s.analyzed.as_ref() == Some(&k) || s.pending.as_ref().map(|(_, p)| p) == Some(&k)) {
             return;
         }
-        if k.game.is_empty() || !Path::new(&k.game).is_dir() || k.platforms.is_empty() {
+        if k.game.is_empty() || !Path::new(&k.game).is_dir() || k.platforms.is_empty() && k.choice.system != System::N3ds {
             s.plan = None;
             s.plan_error = None;
             s.analyzed = Some(k);
@@ -786,7 +786,7 @@ fn render_summary(app: &App) {
     let k = key(&app.w);
     if k.game.is_empty() {
         put("Choose a game folder to begin.\n", None);
-    } else if k.platforms.is_empty() {
+    } else if k.platforms.is_empty() && k.choice.system != System::N3ds {
         put("There's no engine for this system and CPU type.\n", None);
     } else if let Some(e) = &s.plan_error {
         put(&format!("Error: {}\n", e), Some("err"));

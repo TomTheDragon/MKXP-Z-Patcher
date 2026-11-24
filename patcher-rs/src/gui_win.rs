@@ -638,7 +638,7 @@ fn analyze(force: bool) {
         if !force && (a.analyzed.as_ref() == Some(&k) || a.pending.as_ref().map(|(_, p)| p) == Some(&k)) {
             return;
         }
-        if k.game.is_empty() || !Path::new(&k.game).is_dir() || k.platforms.is_empty() {
+        if k.game.is_empty() || !Path::new(&k.game).is_dir() || k.platforms.is_empty() && k.choice.system != System::N3ds {
             a.plan = None;
             a.plan_error = None;
             a.analyzed = Some(k);
@@ -859,7 +859,7 @@ fn summary_lines(a: &App) -> Vec<(String, Option<u32>)> {
     let k = key(&a.c);
     if k.game.is_empty() {
         out.push(("Choose a game folder to begin.".into(), None));
-    } else if k.platforms.is_empty() {
+    } else if k.platforms.is_empty() && k.choice.system != System::N3ds {
         out.push(("There's no engine for this system and CPU type.".into(), None));
     } else if let Some(e) = &a.plan_error {
         out.extend(format!("Error: {}", e).lines().map(|l| (l.to_string(), Some(COLOR_ERR))));
