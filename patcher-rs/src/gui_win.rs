@@ -48,7 +48,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const ID_EDIT: [i32; 4] = [101, 102, 103, 104]; // game, engines, rtp, source
 const ID_BROWSE: [i32; 4] = [201, 202, 203, 204];
 // radio buttons: the systems (System::ALL), then the CPU types (Cpu::ALL)
-const ID_CHOICE: [i32; 9] = [301, 302, 303, 304, 305, 306, 307, 308, 311];
+const ID_CHOICE: [i32; 10] = [301, 302, 303, 304, 305, 312, 306, 307, 308, 311];
 const ID_SOUNDFONT: i32 = 309;
 const ID_REPLACE_EXE: i32 = 310;
 const ID_PATCH: i32 = 501;
@@ -144,7 +144,7 @@ struct Controls {
     /// "System:" and "CPU:"
     headings: [HWND; 2],
     /// see ID_CHOICE
-    choice: [HWND; 9],
+    choice: [HWND; 10],
     soundfont: HWND,
     replace_exe: HWND,
     hint: HWND,
@@ -296,7 +296,7 @@ pub fn run(game: Option<PathBuf>, paths: Paths, linux_engine: Option<PathBuf>) -
     let px = |v: f32| (v * scale) as i32;
     let hwnd = unsafe {
         CreateWindowExW(0, class.as_ptr(), wide("MKXP-Z Patcher").as_ptr(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                        CW_USEDEFAULT, CW_USEDEFAULT, px(1180.0), px(720.0), 0, 0, hinst, std::ptr::null())
+                        CW_USEDEFAULT, CW_USEDEFAULT, px(1290.0), px(720.0), 0, 0, hinst, std::ptr::null())
     };
     if hwnd == 0 {
         return Err("couldn't create the window".into());
@@ -382,8 +382,9 @@ fn create_controls(parent: HWND, hinst: isize, scale: f32) -> Controls {
     // Windows legacy: only the 32-bit engine for Windows XP (Game.exe also starts it on newer Windows)
     // Android: APKs are made on Linux only (Google's NDK), so it's shown but off here
     // Linux legacy: built in an Ubuntu 20.04 container (on Linux)
-    let names = ["Linux", "Linux legacy", "Windows", "Windows legacy (XP)", "Android (on Linux)", "32-bit", "64-bit",
-                 "ARM 32-bit", "ARM 64-bit"];
+    // Nintendo 3DS: the game converted for MKXP-Z 3DS, in a folder next to it (n3ds.rs)
+    let names = ["Linux", "Linux legacy", "Windows", "Windows legacy (XP)", "Android (on Linux)", "Nintendo 3DS", "32-bit",
+                 "64-bit", "ARM 32-bit", "ARM 64-bit"];
     let first_cpu = System::ALL.len();
     for i in 0..names.len() {
         // WS_GROUP starts each set of radio buttons (systems, CPU types)
@@ -437,7 +438,7 @@ fn layout(hwnd: HWND) {
         let gh = rowh * 3 + px(38.0);
         mv(c.group, m, y, width - 2 * m, gh);
         let (gx, gy) = (m + px(12.0), y + px(20.0));
-        let widths = [70.0, 115.0, 90.0, 160.0, 150.0, 75.0, 75.0, 100.0, 100.0];
+        let widths = [70.0, 115.0, 90.0, 160.0, 150.0, 115.0, 75.0, 75.0, 100.0, 100.0];
         let first_cpu = System::ALL.len();
         let mut x = gx;
         for i in 0..widths.len() {
@@ -620,6 +621,7 @@ fn options(a: &App, k: &Key) -> Options {
         rgss: None,
         bundle_soundfont: k.soundfont,
         replace_exe: k.replace_exe,
+        n3ds: k.choice.system == System::N3ds,
     }
 }
 
@@ -675,7 +677,33 @@ fn spawn_task(label: &str, f: impl FnOnce(&(dyn Fn(String) + Sync)) -> Result<St
     });
 }
 
+/// the Nintendo 3DS version: made next to the game folder (n3ds.rs)
+fn start_n3ds(hwnd: HWND) {
+    let Some((k, warnings)) = with(|a| (key(&a.c), a.plan.as_ref().map(|p| p.warnings.clone()).unwrap_or_default()))
+        else { return };
+    let game = PathBuf::from(&k.game);
+    let name = game.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut text = format!("This makes \"{} (3DS)\" next to the game folder (which stays as it is): the app MKXP-Z 3DS \
+                            and the game, its images and sound converted for the 3DS. That takes a minute or two.", name);
+    if !warnings.is_empty() {
+        text.push_str(&format!("\n\n{}", warnings.join("\n\n")));
+    }
+    if !ask(hwnd, "Create the 3DS version?", &text) {
+        return;
+    }
+    let o = crate::n3ds::Options { rtp: (!k.rtp.is_empty()).then(|| PathBuf::from(&k.rtp)), ..Default::default() };
+    spawn_task("Creating the 3DS version", move |log| {
+        let out = crate::n3ds::create(&game, &o, log)?;
+        Ok(format!("Made:\n  {}\n\nCopy its folders \"3ds\" and \"mkxpz\" to the top of the 3DS's SD card, then start \
+                    MKXP-Z 3DS in the Homebrew Launcher (see README.txt there).", out.display()))
+    });
+}
+
 fn start_patch(hwnd: HWND) {
+    if with(|a| choice(&a.c).system == System::N3ds).unwrap_or(false) {
+        start_n3ds(hwnd);
+        return;
+    }
     let Some((missing, warnings, k)) = with(|a| a.plan.as_ref().map(|p| (p.missing_engines.clone(), p.warnings.clone(), key(&a.c))))
         .flatten() else { return };
     if !missing.is_empty() {
@@ -899,6 +927,7 @@ fn update_controls(a: &mut App) {
     enable(c.replace_exe, !busy && win);
     let plan = a.plan.as_ref();
     set_text(c.patch, match plan {
+        _ if system == System::N3ds => "Create 3DS version",
         Some(p) if !p.missing_engines.is_empty() => "Build && patch",
         Some(p) if p.patched() => "Re-patch game",
         _ => "Patch game",

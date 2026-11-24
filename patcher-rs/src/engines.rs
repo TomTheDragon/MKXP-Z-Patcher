@@ -176,6 +176,9 @@ pub enum System {
     Legacy,
     /// an APK of the game (64-bit ARM: phones; x86-64: emulator, Waydroid)
     Android,
+    /// the Nintendo 3DS (homebrew): the game converted for MKXP-Z 3DS, in a
+    /// folder next to it (n3ds.rs); no engine to build
+    N3ds,
 }
 
 /// The CPU type chosen in the patcher's window.
@@ -188,7 +191,8 @@ pub enum Cpu {
 }
 
 impl System {
-    pub const ALL: [System; 5] = [System::Linux, System::LinuxLegacy, System::Windows, System::Legacy, System::Android];
+    pub const ALL: [System; 6] = [System::Linux, System::LinuxLegacy, System::Windows, System::Legacy, System::Android,
+                                  System::N3ds];
     /// Whether there's an engine for this system on that CPU type.
     pub fn has(self, cpu: Cpu) -> bool {
         match self {
@@ -197,6 +201,7 @@ impl System {
             System::Windows => cpu != Cpu::Arm32,
             System::Legacy => cpu == Cpu::X86,
             System::Android => matches!(cpu, Cpu::X64 | Cpu::Arm64),
+            System::N3ds => cpu == Cpu::Arm32, /* (the 3DS's ARM11) */
         }
     }
 }
@@ -231,6 +236,8 @@ impl Choice {
             self
         } else if self.system == System::Android {
             Choice { cpu: Cpu::Arm64, ..self }
+        } else if self.system == System::N3ds {
+            Choice { cpu: Cpu::Arm32, ..self }
         } else if self.system == System::LinuxLegacy {
             Choice { cpu: Cpu::X64, ..self }
         } else {

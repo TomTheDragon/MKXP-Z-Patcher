@@ -202,6 +202,9 @@ fn build_widgets() -> Widgets {
         ("Android", "An APK of the game for Android 8.0 and newer, next to the game folder (the folder itself \
                      stays as it is). ARM 64-bit: phones and tablets; 64-bit: the Android emulator and Waydroid. \
                      Downloads Google's Android tools (about 1.1 GB) when first needed."),
+        ("Nintendo 3DS", "A version for the Nintendo 3DS (homebrew, MKXP-Z 3DS) next to the game folder (the folder \
+                          itself stays as it is): the app and the game, its images and sound converted for the 3DS. \
+                          Copy it to the SD card; needs custom firmware (Luma3DS) and the Homebrew Launcher."),
     ]);
     let cpus = radios(&[
         ("32-bit", "x86 PCs. For Windows the recommended one: it runs on 32- and 64-bit Windows and loads the game's \
@@ -310,6 +313,7 @@ fn options(app: &App, k: &Key) -> Options {
         rgss: None,
         bundle_soundfont: k.soundfont,
         replace_exe: k.replace_exe,
+        n3ds: k.choice.system == System::N3ds,
     }
 }
 
@@ -579,9 +583,35 @@ fn spawn_task(app: &Rc<App>, label: &str, f: impl FnOnce(&(dyn Fn(String) + Sync
     });
 }
 
+/// the Nintendo 3DS version: made next to the game folder (n3ds.rs)
+fn start_n3ds(app: &Rc<App>) {
+    let k = key(&app.w);
+    let game = PathBuf::from(&k.game);
+    let name = game.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let warnings = app.s.borrow().plan.as_ref().map(|p| p.warnings.clone()).unwrap_or_default();
+    let o = crate::n3ds::Options { rtp: (!k.rtp.is_empty()).then(|| PathBuf::from(&k.rtp)), ..Default::default() };
+    let a = app.clone();
+    confirm(app, "Create the 3DS version?", &format!(
+        "This makes \"{} (3DS)\" next to the game folder (which stays as it is): the app MKXP-Z 3DS and the game, its \
+         images and sound converted for the 3DS. That takes a minute or two.{}", name,
+        if warnings.is_empty() { String::new() } else { format!("\n\n{}", warnings.join("\n\n")) }),
+        move || {
+            let (game, o) = (game.clone(), o.clone());
+            spawn_task(&a, "Creating the 3DS version", move |log| {
+                let out = crate::n3ds::create(&game, &o, log)?;
+                Ok(format!("Made:\n  {}\n\nCopy its folders \"3ds\" and \"mkxpz\" to the top of the 3DS's SD card, \
+                            then start MKXP-Z 3DS in the Homebrew Launcher (see README.txt there).", out.display()))
+            });
+        });
+}
+
 fn start_patch(app: &Rc<App>) {
     if choice(&app.w).system == System::Android {
         start_apk(app);
+        return;
+    }
+    if choice(&app.w).system == System::N3ds {
+        start_n3ds(app);
         return;
     }
     let (missing, warnings) = match &app.s.borrow().plan {
@@ -786,6 +816,7 @@ fn update_controls(app: &App) {
          match plan {
              _ if android && plan.map_or(false, |p| !p.missing_engines.is_empty()) => "Build engine & create APK",
              _ if android => "Create APK",
+             _ if choice(w).system == System::N3ds => "Create 3DS version",
              Some(p) if !p.missing_engines.is_empty() => "Build engines & patch",
              Some(p) if p.patched() => "Re-patch game",
              _ => "Patch game",
@@ -807,7 +838,7 @@ fn update_controls(app: &App) {
     }
     w.appimage.set_sensitive(!busy && can_patch && !appimage_platforms(app).is_empty());
     let win = matches!(system, System::Windows | System::Legacy);
-    w.soundfont.set_sensitive(!busy && !matches!(system, System::Linux | System::LinuxLegacy));
+    w.soundfont.set_sensitive(!busy && !matches!(system, System::Linux | System::LinuxLegacy | System::N3ds));
     w.replace_exe.set_sensitive(!busy && win);
     w.patch.set_label(patch_label);
     w.patch.set_sensitive(can_patch && !busy);

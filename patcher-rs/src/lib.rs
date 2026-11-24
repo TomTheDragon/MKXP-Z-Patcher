@@ -14,6 +14,7 @@ pub mod gui_win;
 pub mod json;
 pub mod linux_sysroot;
 pub mod marshal;
+pub mod n3ds;
 pub mod patch;
 pub mod pe;
 pub mod plan;

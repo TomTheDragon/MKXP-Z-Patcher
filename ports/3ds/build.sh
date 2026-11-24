@@ -121,4 +121,8 @@ smdhtool --create "MKXP-Z 3DS" "RPG Maker XP/VX/VX Ace games" "MKXP-Z Patcher" \
     "$HERE/icon.png" "$E/mkxpz.smdh"
 3dsxtool "$E/mkxpz.elf" "$BUILD/mkxpz.3dsx" --smdh="$E/mkxpz.smdh" --romfs="$E/romfs"
 cp "$BUILD/mkxpz.3dsx" "$BUILD/MKXP-Z 3DS.3dsx"
+# (the patcher carries it, zlib-compressed: patcher-rs/assets/3ds; its
+# --3ds packages a game with it)
+python3 -I -c 'import sys, zlib; open(sys.argv[2], "wb").write(zlib.compress(open(sys.argv[1], "rb").read(), 9))' \
+    "$BUILD/mkxpz.3dsx" "$ROOT/patcher-rs/assets/3ds/mkxpz-3ds.3dsx.z"
 echo "Built $BUILD/MKXP-Z 3DS.3dsx"

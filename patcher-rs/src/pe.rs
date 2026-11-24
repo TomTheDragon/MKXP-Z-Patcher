@@ -183,6 +183,20 @@ impl Icon {
     }
 }
 
+/// The icon's largest image as (w, h, RGBA pixels).
+pub fn largest_rgba(icon: &Icon) -> Option<(u32, u32, Vec<u8>)> {
+    let mut best: Option<(u32, u32, Vec<u8>)> = None;
+    for img in &icon.images {
+        let got = if img.starts_with(b"\x89PNG\r\n\x1a\n") { crate::n3ds::decode_png(img).ok() } else { dib_to_rgba(img) };
+        if let Some(g) = got {
+            if best.as_ref().map_or(true, |b| g.0 * g.1 > b.0 * b.1) {
+                best = Some(g);
+            }
+        }
+    }
+    best
+}
+
 /// One icon image (PNG, or a DIB as stored in .ico files) as (w, h, PNG).
 fn image_png(img: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if img.starts_with(b"\x89PNG\r\n\x1a\n") {

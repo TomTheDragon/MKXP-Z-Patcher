@@ -40,6 +40,13 @@ Options:
                       to the game folder; the game folder itself stays as it
                       is). Linux x86-64 only; downloads Google's Android tools
                       (about 1.1 GB, 3.9 GB unpacked) when first needed
+  --3ds               make a Nintendo 3DS version (MKXP-Z 3DS, for the Homebrew
+                      Launcher) in a folder next to the game, \"<game> (3DS)\":
+                      copy its \"3ds\" and \"mkxpz\" folders to the SD card's top.
+                      Images and sound are converted for the 3DS (MIDI with an
+                      installed SoundFont); the game folder stays as it is
+  --3ds-keep-audio    with --3ds: leave the sound as it is (slower on the 3DS)
+  --soundfont FILE    with --3ds: the SoundFont (.sf2) for MIDI music
   --check             only analyze the game and print the report
   --unpatch           remove a previously applied patch
   --no-build          don't build missing engines (fail instead)
@@ -132,11 +139,15 @@ struct Args {
     gui: bool,
     appimage: bool,
     apk: bool,
+    n3ds: bool,
+    n3ds_keep_audio: bool,
+    soundfont: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args { game: None, platforms: None, check: false, fetch_source: false, source_archive: None, unpatch: false, no_build: false, build_only: None,
-                       no_soundfont: false, keep_exe: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false, apk: false };
+                       no_soundfont: false, keep_exe: false, engines: None, src: None, msys2: None, engine: None, rtp: None, rgss: None, gui: false, appimage: false, apk: false,
+                       n3ds: false, n3ds_keep_audio: false, soundfont: None };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().into_owned();
@@ -169,6 +180,9 @@ fn parse_args() -> Result<Args, String> {
             "--gui" => a.gui = true,
             "--appimage" => a.appimage = true,
             "--apk" => a.apk = true,
+            "--3ds" => a.n3ds = true,
+            "--3ds-keep-audio" => a.n3ds_keep_audio = true,
+            "--soundfont" => a.soundfont = Some(val(&s)?.into()),
             _ if s.starts_with('-') => return Err(format!("unknown option {} (see --help)", s)),
             _ if a.game.is_none() => a.game = Some(arg.into()),
             _ => return Err(format!("unexpected argument {}", s)),
@@ -194,7 +208,7 @@ fn main() {
     // window's fields, which are relative to the patcher's folder).
     let abs = |p: &PathBuf| if p.is_absolute() { p.clone() } else { std::env::current_dir().unwrap_or_default().join(p) };
     let mut a = a;
-    for p in [&mut a.engines, &mut a.src, &mut a.msys2, &mut a.engine, &mut a.rtp, &mut a.game, &mut a.source_archive]
+    for p in [&mut a.engines, &mut a.src, &mut a.msys2, &mut a.engine, &mut a.rtp, &mut a.game, &mut a.source_archive, &mut a.soundfont]
         .into_iter().flatten() {
         *p = abs(p);
     }
@@ -264,6 +278,14 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
     if a.unpatch {
         return patch::unpatch(&game, &log_line);
     }
+    if a.n3ds {
+        // (the 3DS app is the same for every game: nothing to build)
+        let o = mkxpz_patcher::n3ds::Options { rtp: a.rtp.clone(), keep_audio: a.n3ds_keep_audio,
+                                               soundfont: a.soundfont.clone(), out_parent: None };
+        let out = mkxpz_patcher::n3ds::create(&game, &o, &|s| log_line(s))?;
+        println!("\nMade {}\nCopy its folders \"3ds\" and \"mkxpz\" to the top of the 3DS's SD card (see its README.txt).", out.display());
+        return Ok(());
+    }
     let opts = plan::Options {
         platforms: a.platforms.clone().unwrap_or_else(|| vec![host_platform()]),
         paths: paths.clone(),
@@ -272,6 +294,7 @@ fn cli(a: Args, paths: Paths) -> Result<(), String> {
         rgss: a.rgss,
         bundle_soundfont: !a.no_soundfont,
         replace_exe: !a.keep_exe,
+        n3ds: false,
     };
     let android = opts.platforms.iter().any(|p| p.is_android());
     if a.apk && !android {

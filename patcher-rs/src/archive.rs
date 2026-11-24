@@ -16,6 +16,8 @@ pub struct Archive {
     data: Arc<Vec<u8>>,
     /// lowercase path with forward slashes -> entry
     entries: Arc<HashMap<String, Entry>>,
+    /// the paths as the archive spells them (forward slashes)
+    originals: Arc<Vec<String>>,
 }
 
 fn u32le(d: &[u8], p: usize) -> Option<u32> {
@@ -33,6 +35,7 @@ impl Archive {
             return Err("not an RGSS archive".into());
         }
         let mut entries = HashMap::new();
+        let mut originals = Vec::new();
         let bad = || "damaged RGSS archive".to_string();
         match d[7] {
             1 => {
@@ -54,6 +57,7 @@ impl Archive {
                     if p + size > d.len() {
                         return Err(bad());
                     }
+                    originals.push(String::from_utf8_lossy(&name).replace('\\', "/"));
                     entries.insert(norm(&name), Entry { offset: p, size, key });
                     p += size;
                 }
@@ -75,12 +79,18 @@ impl Archive {
                     if off as usize + size as usize > d.len() {
                         return Err(bad());
                     }
+                    originals.push(String::from_utf8_lossy(&name).replace('\\', "/"));
                     entries.insert(norm(&name), Entry { offset: off as usize, size: size as usize, key: fkey });
                 }
             }
             v => return Err(format!("unsupported RGSS archive version {}", v)),
         }
-        Ok(Archive { data: Arc::new(d), entries: Arc::new(entries) })
+        Ok(Archive { data: Arc::new(d), entries: Arc::new(entries), originals: Arc::new(originals) })
+    }
+
+    /// The files' paths as the archive spells them (forward slashes).
+    pub fn original_names(&self) -> &[String] {
+        &self.originals
     }
 
     pub fn names(&self) -> impl Iterator<Item = &String> {

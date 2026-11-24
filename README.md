@@ -19,7 +19,7 @@ mkxp-z settings, key bindings and shaders stay).
   (32-bit, 64-bit, ARM64). Linux builds every engine (Windows ones are
   cross-compiled); Windows builds the x86 Windows engines in a portable MSYS2
   it sets up by itself. In the window you choose one system (Linux, Linux
-  legacy, Windows, Windows legacy, Android) and one CPU type (32-bit, 64-bit,
+  legacy, Windows, Windows legacy, Android, Nintendo 3DS) and one CPU type (32-bit, 64-bit,
   ARM 32-bit, ARM 64-bit). Windows has no ARM 32-bit engine, Windows legacy is
   32-bit only and Linux legacy x86 only; CPU types a system has no engine for
   are greyed out. The command line can add
@@ -56,6 +56,18 @@ mkxp-z settings, key bindings and shaders stay).
   or the Back key, opens a menu with the settings (mkxp-z's F1 menu: volume,
   smooth movement, widescreen, screen shader, key bindings for controllers),
   resetting the game (F12) and quitting.
+- **Nintendo 3DS (experimental):** "Nintendo 3DS" (`--3ds`) makes
+  "<game> (3DS)" next to the game folder: the homebrew app `MKXP-Z 3DS.3dsx`
+  (ports/3ds, carried in the patcher: nothing to build) and the game in
+  `mkxpz/<game>/`, converted for the 3DS by the patcher itself (images to
+  LZ4-packed textures, sound to DSP-ADPCM, MIDI rendered with an installed
+  SoundFont, an RGSS archive unpacked, everything in one `Game.data`; no
+  other tools needed, on Windows too). Copy its `3ds` and `mkxpz` folders to
+  the SD card's top and start "MKXP-Z 3DS" in the Homebrew Launcher (custom
+  firmware: Luma3DS): it lists the games in `sdmc:/mkxpz/`. In 3D with the
+  slider; settings with START (text size, screen modes, frame skip...).
+  `--3ds-keep-audio` leaves the sound as it is, `--soundfont FILE` picks the
+  SoundFont.
 - **Game analysis:** RGSS version, encrypted archives, fonts the game asks for
   (with a CJK fallback font when its text needs one), MIDI music (SoundFont),
   RTP, Win32API use, Steam versions.
@@ -139,6 +151,7 @@ From the command line:
 mkxpz-patcher --check "path/to/game"                 # analyze only
 mkxpz-patcher --platform linux,windows "path/to/game"
 mkxpz-patcher --appimage "path/to/game"              # <Title>-x86_64.AppImage next to the folder
+mkxpz-patcher --3ds "path/to/game"                   # "<game> (3DS)" next to the folder
 mkxpz-patcher --unpatch "path/to/game"
 mkxpz-patcher --help
 ```
@@ -197,6 +210,7 @@ unzip and zip, but no compilers of the computer's own.
 | `patcher-rs/assets/mkxpz-patches/` | the patcher's changes to mkxp-z, applied before each engine build |
 | `patcher-rs/assets/compat/` | compatibility scripts added to games that need them |
 | `launcher/` | the tiny Windows launcher that takes the place of `Game.exe` |
+| `ports/3ds/` | the Nintendo 3DS engine (MKXP-Z 3DS); its build refreshes `patcher-rs/assets/3ds/` |
 | `tools/` | helpers for cross-building the patcher |
 | `docs/screenshots/` | the pictures above |
 

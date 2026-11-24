@@ -38,6 +38,8 @@ pub struct Options {
     /// Game.original.exe); else it's added next to it as "Game.mkxp-z.exe"
     /// (64-bit engines: "Game.mkxp-z.64.exe")
     pub replace_exe: bool,
+    /// a Nintendo 3DS version (n3ds.rs): no engines, a short report
+    pub n3ds: bool,
 }
 
 pub struct Plan {
@@ -167,7 +169,7 @@ impl Plan {
         let mut platforms = o.platforms.clone();
         platforms.sort();
         platforms.dedup();
-        if platforms.is_empty() {
+        if platforms.is_empty() && !o.n3ds {
             return Err("Choose at least one platform.".into());
         }
         if platforms.contains(&Platform::Windows32) && platforms.contains(&Platform::Windows64) {
@@ -186,6 +188,42 @@ impl Plan {
         let archive = game::find_archive(&game_dir, rgss);
         let manifest = patch::read_manifest(&game_dir)?;
         let (mut notes, mut warnings, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+        if o.n3ds {
+            // (the 3DS version: made next to the game, nothing patched)
+            notes.push(format!("Nintendo 3DS: makes \"{}\" next to the game folder (which stays as it is): the app \
+                                MKXP-Z 3DS and the game, its images and sound converted for the 3DS. Copy its folders \
+                                \"3ds\" and \"mkxpz\" to the top of the SD card, then start MKXP-Z 3DS in the Homebrew \
+                                Launcher (needs custom firmware: Luma3DS).",
+                               game_dir.file_name().map(|n| format!("{} (3DS)", n.to_string_lossy())).unwrap_or_default()));
+            if archive.is_some() {
+                notes.push("The game's archive is unpacked into the 3DS version (the 3DS can't decrypt it fast enough).".into());
+            }
+            if game::has_midi(&game_dir) {
+                match find_soundfonts().into_iter().next() {
+                    Some(sf) => notes.push(format!("Uses MIDI music: rendered with the SoundFont {} (the 3DS is too \
+                                                    slow to play MIDI itself).", sf.file_name().unwrap_or_default()
+                                                    .to_string_lossy())),
+                    None => warnings.push("Uses MIDI music, but no .sf2 SoundFont is installed here to render it: on \
+                                           the 3DS it plays slowly (with a soundfont.sf2 in sdmc:/3ds/mkxpz/) or not at \
+                                           all (install one, e.g. fluid-soundfont-gm).".into()),
+                }
+            }
+            let mut rtp = None;
+            if game::needs_rtp(&game_dir, &ini, rgss) {
+                rtp = game::find_rtp(rgss, o.rtp.as_deref())?;
+                match &rtp {
+                    Some(p) => notes.push(format!("The RTP's graphics and sounds go into the 3DS version (from {}).",
+                                                  p.display())),
+                    None => warnings.push(format!("The game seems to need the {} RTP, which wasn't found. Choose its \
+                                                   folder, or graphics/sounds may be missing.",
+                                                  RGSS_NAMES[rgss].split(" (").next().unwrap_or(""))),
+                }
+            }
+            return Ok(Plan { game_dir, platforms, rgss, title, exec_name, archive, manifest, engines: Vec::new(),
+                             missing_engines: Vec::new(), scripts_src: None, license_src: None, preload: Vec::new(),
+                             compat: Vec::new(), fonts: None, cjk_font: None, rtp, soundfont: None, notes, warnings,
+                             errors, icon_png: None, bundle_rtp: false, replace_exe: o.replace_exe });
+        }
 
         // engines
         let paths = o.paths.resolved();
@@ -465,6 +503,9 @@ impl Plan {
                 .unwrap_or_else(|| "unencrypted folders".into())),
             format!("Status:   {}", status),
         ];
+        if self.platforms.is_empty() {
+            lines.push("Target:   Nintendo 3DS (MKXP-Z 3DS)".into());
+        }
         for &p in &self.platforms {
             lines.push(format!("Target:   {:<15} {}", p.label(), self.engine(p)
                 .map(|e| e.dir.display().to_string()).unwrap_or_else(|| "engine not built yet".into())));

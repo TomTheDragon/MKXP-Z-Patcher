@@ -22,6 +22,13 @@ SetArgv, as the Homebrew Launcher starts apps) and quits; without hb:ldr
 A game's own app as before (the game next to its .3dsx, started without
 the list): `make-package.py --app build/mkxpz.3dsx <game> [<out>]`.
 
+The patcher does all of it too (`mkxpz-patcher --3ds <game>`, or "Nintendo
+3DS" in its window; patcher-rs/src/n3ds.rs ports tools/: images, sound,
+MIDI, the pack, game.smdh), with no Python, ImageMagick, lz4 or ffmpeg; it
+carries the app (patcher-rs/assets/3ds/mkxpz-3ds.3dsx.z, written by
+build.sh). Its LZ4 is the fast kind (lz4_flex), so Game.data comes out
+about a third bigger than with `lz4 -12`; unpacking is as fast.
+
 ## Step 1: Ruby 3.1 on the 3DS (done)
 
 `build.sh` builds mkxp-z's Ruby 3.1.3 for the 3DS with devkitPro's devkitARM
