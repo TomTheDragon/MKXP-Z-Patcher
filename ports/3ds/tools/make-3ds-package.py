@@ -2,10 +2,13 @@
 """MKXP-Z 3DS: a game's folder for the SD card, in one go.
 
     make-3ds-package.py [--icon <picture>] [--soundfont <file.sf2>] [--keep-audio]
-                        <game folder> <mkxpz.3dsx> <output folder>
+                        [--app <mkxpz.3dsx>] <game folder> <output folder>
 
-The output folder (made new; copy it into sdmc:/3ds/mkxpz/) gets:
-  <Title>.3dsx   the engine with the game's title and icon (make-package.py)
+The output folder (made new; copy it into sdmc:/mkxpz/, where the one app
+"MKXP-Z 3DS.3dsx" lists the games) gets:
+  game.smdh     the game's title and icon for that list (make-package.py);
+                with --app also <Title>.3dsx, the game's own app (the
+                engine with that title and icon, started from the folder)
   Game.data     the game's files in one pack, read by the engine directly:
                  Data, Graphics (images as .mkxi, convert-images.py; no
                  PNGs), Audio (as .mkxa, DSP-ADPCM, convert-audio.py: MIDI
@@ -59,6 +62,7 @@ def is_save(name):
 
 
 def main():
+    app = []
     args = sys.argv[1:]
     icon = []
     soundfont = None
@@ -70,11 +74,15 @@ def main():
             soundfont, args = args[1], args[2:]
         elif args[0] == "--keep-audio":
             keep_audio, args = True, args[1:]
+        elif args[0] == "--app" and len(args) >= 2:
+            app, args = ["--app", os.path.abspath(args[1])], args[2:]
         else:
             sys.exit(__doc__.strip())
-    if len(args) != 3:
+    if len(args) == 3 and args[1].lower().endswith(".3dsx"):
+        args = [args[0], args[2]]  # (the earlier form: the engine in the middle, no longer needed)
+    if len(args) != 2:
         sys.exit(__doc__.strip())
-    game, engine, out = (os.path.abspath(a) for a in args)
+    game, out = (os.path.abspath(a) for a in args)
     if os.path.exists(out):
         sys.exit(f"{out} exists already (a new folder is made)")
     extract = tool("extract-archive")
@@ -153,8 +161,8 @@ def main():
             for _, _, src in files:
                 with open(src, "rb") as s:
                     shutil.copyfileobj(s, f)
-        # 4. the .3dsx (title and icon from the original folder: Game.exe)
-        sys.argv = ["make-package.py"] + icon + [game, engine, out]
+        # 4. game.smdh (title and icon from the original folder: Game.exe)
+        sys.argv = ["make-package.py"] + icon + app + [game, out]
         tool("make-package").main()
         print(f"{out}: Game.data with {len(files)} files ({at // 1024 // 1024} MB)")
     finally:

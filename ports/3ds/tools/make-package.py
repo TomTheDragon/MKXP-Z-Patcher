@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""MKXP-Z 3DS: the engine as a game's own homebrew app.
+"""MKXP-Z 3DS: a game's title and icon for the game list.
 
-    make-package.py [--icon <picture>] <game folder> <mkxpz.3dsx> [<output folder>]
+    make-package.py [--icon <picture>] [--app <mkxpz.3dsx>] <game folder> [<output folder>]
 
-Writes <output folder>/<Title>.3dsx (default output: the game folder): the
-engine with the game's title (Game.ini) and icon (Game.exe's, 48x48) in its
-SMDH, which the Homebrew Launcher shows. The engine runs the game next to
-the .3dsx, so each game gets its own folder on the SD card, e.g.
-sdmc:/3ds/mkxpz/Dazed/Dazed.3dsx with the game's files beside it.
+Writes <output folder>/game.smdh (default output: the game folder): the
+game's title (Game.ini) and icon (Game.exe's, 48x48), which the one app
+"MKXP-Z 3DS.3dsx" shows in its list of the games in sdmc:/mkxpz/<game>/.
+--app: also <Title>.3dsx, the game's own app as in earlier builds (the
+engine with that SMDH; it runs the game in its own folder).
 
 Needs smdhtool (devkitPro; or set SMDHTOOL) and ImageMagick ("magick", or
 set MAGICK) for the icon. Without an icon in Game.exe the 3DS's default
@@ -182,13 +182,19 @@ def set_smdh(path, smdh):
 
 def main():
     args = sys.argv[1:]
-    own_icon = None
-    if len(args) >= 2 and args[0] == "--icon":
-        own_icon, args = args[1], args[2:]
-    if len(args) not in (2, 3):
+    own_icon = engine = None
+    while len(args) >= 2 and args[0] in ("--icon", "--app"):
+        if args[0] == "--icon":
+            own_icon = args[1]
+        else:
+            engine = args[1]
+        args = args[2:]
+    if len(args) == 3 and args[1].lower().endswith(".3dsx"):
+        engine, args = args[1], [args[0], args[2]]  # (the earlier form: makes the game's own app)
+    if len(args) not in (1, 2):
         sys.exit(__doc__.strip())
-    game, engine = args[0], args[1]
-    out_dir = args[2] if len(args) == 3 else game
+    game = args[0]
+    out_dir = args[1] if len(args) == 2 else game
     title = game_title(game)
     smdhtool = os.environ.get("SMDHTOOL") or shutil.which("smdhtool") or os.path.join(DEVKITPRO, "tools", "bin", "smdhtool")
     with tempfile.TemporaryDirectory() as tmp:
@@ -206,9 +212,12 @@ def main():
         subprocess.run([smdhtool, "--create", title[:63], "RPG Maker game (MKXP-Z 3DS)", "MKXP-Z Patcher", icon, smdh],
                        check=True, stdout=subprocess.DEVNULL)
         os.makedirs(out_dir, exist_ok=True)
-        target = os.path.join(out_dir, file_name(title) + ".3dsx")
-        shutil.copyfile(engine, target)
-        set_smdh(target, open(smdh, "rb").read())
+        target = os.path.join(out_dir, "game.smdh")
+        shutil.copyfile(smdh, target)
+        if engine:
+            target = os.path.join(out_dir, file_name(title) + ".3dsx")
+            shutil.copyfile(engine, target)
+            set_smdh(target, open(smdh, "rb").read())
     print(f"{target}: \"{title}\"")
 
 

@@ -3,6 +3,25 @@
 Can mkxp-z run RPG Maker XP / VX / VX Ace games on a 3DS (homebrew)? This
 folder holds the experiment, step by step. It isn't part of the patcher yet.
 
+## On the SD card
+
+One app for all games: `MKXP-Z 3DS.3dsx` (build.sh; its own icon,
+`icon.png`), anywhere, e.g. `sdmc:/3ds/`. It lists the games in
+`sdmc:/mkxpz/<game>/` (only one: started at once, its exit and the
+settings' "Quit to the Homebrew Launcher" go straight out; each with its Game.ini; name and icon from the
+folder's `game.smdh`, which `tools/make-package.py` writes, else Game.ini's
+Title and a plain icon) and runs the chosen one in the same app
+(engine/menu.c; drawn into the top framebuffer with FreeType before Ruby
+and the GPU start). When the game quits (or stops with an error) the bottom
+screen asks (in big letters, menu_ask): A back to the list, B to the
+Homebrew Launcher; the settings' "Quit to the game list" ends the game the
+same way and goes back straight. Back to the list: the app tells Luma3DS's `hb:ldr` to load it next (SetTarget,
+SetArgv, as the Homebrew Launcher starts apps) and quits; without hb:ldr
+(an emulator) it only quits. Closing from the HOME menu just closes.
+
+A game's own app as before (the game next to its .3dsx, started without
+the list): `make-package.py --app build/mkxpz.3dsx <game> [<out>]`.
+
 ## Step 1: Ruby 3.1 on the 3DS (done)
 
 `build.sh` builds mkxp-z's Ruby 3.1.3 for the 3DS with devkitPro's devkitARM
@@ -447,6 +466,49 @@ Measured in Azahar (original 3DS mode) on Dazed's first map:
   in MKXPZ_STOCK_VX). C objects' instance variables are read through one
   table lookup per object (IvSet). Changed-special's cat boss (422 events):
   12.8 -> 8.8 ms of Ruby per frame in the emulator.
+- 3D drawing: each eye's scene is cleared by a black quad on the GPU too
+  (C3D_RenderTargetClear is a memory fill outside the command list: the
+  right eye's scene was drawn over the left eye's, a double line where
+  things had moved). Graphics.freeze in 3D draws one frozen picture per
+  eye (texture 2, RGB565, made once), with the screen's brightness in it
+  (as RGSS: a fade to black stays black until the transition; while
+  frozen the brightness isn't applied again). Loading frames draw only
+  the icon onto both eyes' last pictures.
+- 3D: each eye's picture is presented moved by under a screen pixel
+  (gpu_present_eye dx) so the front layer (shifted by whole game pixels,
+  0.58 screen pixels each) lands on whole screen pixels as in 2D; thin
+  lines (Changed-special's window frame) looked double otherwise.
+- Font sizes as Windows / mkxp-z take them (font.c windows_ppem, Wine's
+  calc_ppem_for_height): the size is the cell height (win ascent +
+  descent), so the em is smaller (Source Han Sans 25 -> 18, Liberation
+  Sans 20 -> 17).
+- Screen "extended": Graphics.mkxpz_margin is (screen width - the game's
+  width) / 2 - WIDE_INSET, the wide box over the wider screen (boot.rb
+  updates the widescreen script's @mkxpz_x after moving the box).
+  Settings "Text size" 100..200% (font_box_scale) and "Text width"
+  100..200% (font_box_sx, FreeType's x size) for the wide box's text
+  (marked by Bitmap#mkxpz_text_mult).
+- 3D on the console: before each eye's picture is presented, the scene
+  texture is flushed out of the GPU's framebuffer cache and the texture
+  cache is cleared (gpu.c scene_to_memory); the right eye showed left-eye
+  pixels where the scene was drawn last (the text box's frame twice). 3D: a full-screen sprite stays flat only
+  when opaque (Element.opaque, bitmap_opaque: a file's texture format or
+  its pixels). Test: a file mkxpz-3dtest tints the left eye red.
+- Wide text boxes always (no setting since 2026-11-24), WIDE_INSET from
+  the screen's edges; the box's contents have Bitmap#mkxpz_text_mult =
+  wide width / the game's width (font sizes times that, font.c
+  font_box_scale; also when the game makes the contents again,
+  MkxpzWideContents): the text about a quarter bigger, every line that
+  fit the game's box fits.
+- 3D: a shifted element (in front / behind) is drawn with its clip moved
+  along (planes keep theirs: they repeat), windows also into the
+  screen's sides, anything else only on the game's area, within the screen's sides (fit: gpu_margin, always there in fit
+  mode; Graphics.mkxpz_margin, the wide text boxes' part, is 0 with
+  "Text boxes: game's width"), and its shift kept
+  within that area (Element.bounds for windows and sprites, scene.c
+  shift_within). In 3D Graphics.mkxpz_margin is STEREO_MAX (4) smaller, so
+  the wide text box has room for the whole shift (a full-width box lost
+  its outline on one side per eye; held flat instead, boxes had no 3D).
 - Hooks into classes that the widescreen script also prepends to
   (Spriteset_Map, Window_NumberInput, Window_ChoiceList) are prepended
   modules, not aliases: after a reset an alias took the prepended method

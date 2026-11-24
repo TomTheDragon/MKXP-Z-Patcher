@@ -318,6 +318,47 @@ static VALUE viewport_init(int argc, VALUE *argv, VALUE self)
 }
 
 static int depth_of(const Element *e, int inherited);
+
+/* 3D: an element's shift. Everything in front (or behind) shifts by the
+ * same amount (limiting single elements to the screen made a window and the
+ * picture next to it differ: a double line in one eye); only what covers
+ * the whole screen stays flat (a full-screen picture showed what's behind
+ * at its sides) */
+static int shift_within(const Element *e, int shift, int ox, const Canvas *c)
+{
+	Rect b;
+	if (!shift || e->is_viewport || !e->bounds || !e->bounds(e, &b))
+		return shift;
+	int l = ox + b.x, r = l + b.w;
+	/* (full-screen: flat when nothing shows through it; one with
+	 * transparent parts, meant to be seen in a scene, stays in 3D) */
+	if (l <= 0 && r >= c->w && b.h >= c->h * 3 / 4 && (!e->opaque || e->opaque(e)))
+		return 0;
+	return shift;
+}
+
+/* 3D: where a shifted element may be drawn: the screen's sides too (fit) */
+static Rect shift_limit(const Canvas *c)
+{
+	if (c->gpu && gpu_margin > 0)
+		return (Rect) { -gpu_margin, 0, c->w + 2 * gpu_margin, c->h };
+	return (Rect) { 0, 0, c->w, c->h };
+}
+
+/* the clip moved with the shift (the layer's window moves with it), kept
+ * within lim */
+static Rect clip_shifted(Rect clip, int s, Rect lim)
+{
+	int x0 = clip.x + s, x1 = clip.x + clip.w + s;
+	if (x0 < lim.x)
+		x0 = lim.x;
+	if (x1 > lim.x + lim.w)
+		x1 = lim.x + lim.w;
+	clip.x = x0;
+	clip.w = x1 > x0 ? x1 - x0 : 0;
+	return clip;
+}
+
 static void viewport_draw(Element *e, Canvas *c, int ox, int oy)
 {
 	Viewport *v = (Viewport *) e;
@@ -336,8 +377,20 @@ static void viewport_draw(Element *e, Canvas *c, int ox, int oy)
 	int n;
 	Element **list = collect(e->self, &n);
 	int vd = depth_of(e, 0);
-	for (int i = 0; i < n; i++)
-		list[i]->draw(list[i], &sub, r.x - v->ox + stereo_shift[depth_of(list[i], vd) + 1], r.y - v->oy);
+	for (int i = 0; i < n; i++) {
+		int base = r.x - v->ox, s = stereo_shift[depth_of(list[i], vd) + 1];
+		if (!s) {
+			list[i]->draw(list[i], &sub, base, r.y - v->oy);
+			continue;
+		}
+		s = shift_within(list[i], s, base, c);
+		Canvas sc = sub;
+		/* (planes repeat without end: their clip stays, moved along it
+		 * left an empty strip at one edge) */
+		if (list[i]->layer != -1)
+			sc.clip = clip_shifted(sub.clip, s, shift_limit(c));
+		list[i]->draw(list[i], &sc, base + s, r.y - v->oy);
+	}
 	free(list);
 	canvas_effect(&sub, sub.clip, color_get(v->color), c->gpu ? NULL : tone_get(v->tone));
 	if (v->flash_left > 0) {
@@ -401,6 +454,8 @@ typedef struct {
 } Sprite;
 
 static void sprite_draw(Element *e, Canvas *c, int ox, int oy);
+static bool sprite_bounds(const Element *e, Rect *r);
+static bool sprite_opaque(const Element *e);
 
 static void sprite_mark(void *p)
 {
@@ -447,9 +502,29 @@ static VALUE sprite_init(int argc, VALUE *argv, VALUE self)
 	s->bush_opacity = 128;
 	s->zoom_x = s->zoom_y = 1.0;
 	s->el.draw = sprite_draw;
+	s->el.bounds = sprite_bounds;
+	s->el.opaque = sprite_opaque;
 	s->el.sort_y = &s->y;
 	element_register(&s->el, self, vp);
 	return self;
+}
+
+static bool sprite_opaque(const Element *e)
+{
+	const Sprite *s = (const Sprite *) e;
+	Bitmap *b = bitmap_get_maybe(s->bitmap);
+	return s->opacity >= 255 && s->blend_type == 0 && b && bitmap_opaque(b);
+}
+
+static bool sprite_bounds(const Element *e, Rect *r)
+{
+	const Sprite *s = (const Sprite *) e;
+	if (s->angle != 0 || NIL_P(s->bitmap) || !s->visible || s->opacity <= 0)
+		return false;
+	const Rect *sr = rect_get(s->src_rect);
+	int w = (int) lround(sr->w * s->zoom_x), h = (int) lround(sr->h * s->zoom_y);
+	*r = (Rect) { s->x - (int) lround(s->ox * s->zoom_x), s->y - (int) lround(s->oy * s->zoom_y), w, h };
+	return w > 0;
 }
 
 static void sprite_draw(Element *e, Canvas *c, int ox, int oy)
@@ -686,8 +761,20 @@ void scene_draw(Canvas *c)
 	Canvas wc = *c;
 	if (c->gpu && gpu_margin > 0)
 		wc.clip = (Rect) { -gpu_margin, 0, c->w + 2 * gpu_margin, c->h };
-	for (int i = 0; i < n; i++)
-		list[i]->draw(list[i], list[i]->wide ? &wc : c, stereo_shift[depth_of(list[i], 0) + 1], 0);
+	for (int i = 0; i < n; i++) {
+		Canvas *cv = list[i]->wide ? &wc : c;
+		int s = stereo_shift[depth_of(list[i], 0) + 1];
+		if (!s || !c->gpu) {
+			list[i]->draw(list[i], cv, s, 0);
+			continue;
+		}
+		s = shift_within(list[i], s, 0, c);
+		Canvas sc = *cv;
+		/* (a viewport's own area stays: only what's in it shifts) */
+		if (list[i]->layer != -1 && !list[i]->is_viewport)
+			sc.clip = clip_shifted(cv->clip, s, shift_limit(c));
+		list[i]->draw(list[i], &sc, s, 0);
+	}
 	free(list);
 }
 

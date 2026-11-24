@@ -919,6 +919,15 @@ module MkxpzWideNumberInput
   end
 end
 
+# (a game making the message box's contents again: the bigger text stays)
+module MkxpzWideContents
+  def create_contents(*args)
+    r = super
+    contents.mkxpz_text_mult = @mkxpz_tm if @mkxpz_tm && contents && contents.respond_to?(:mkxpz_text_mult=)
+    r
+  end
+end
+
 module MkxpzWideChoices
   def update_placement
     super
@@ -946,6 +955,9 @@ def mkxpz_wide_setup
       @mkxpz_m = m
       self.mkxpz_wide = true
       self.x = x + old - m
+      # (the widescreen script's record of where it put the box: else it
+      # took the move for the game placing it and moved it again)
+      @mkxpz_x = self.x if instance_variable_defined?(:@mkxpz_x)
       self.width = width - 2 * old + 2 * m
       had = contents && !contents.disposed? ? contents : nil
       keep = had && Bitmap.new(had.width, had.height).mkxpz_take(had)
@@ -957,6 +969,11 @@ def mkxpz_wide_setup
         contents.dispose if contents && !contents.disposed?
         self.contents = Bitmap.new(width - 32, height - 32)
       end
+      # the text as much bigger as the box is wider: every line that fit
+      # the game's box fits (more readable on the small screen)
+      cw = contents.width
+      @mkxpz_tm = m > 0 && cw > 2 * m ? cw.to_f / (cw - 2 * m) : nil
+      contents.mkxpz_text_mult = @mkxpz_tm || 1 if contents.respond_to?(:mkxpz_text_mult=)
       if keep
         # (the text keeps its place in the box: the contents' left edge
         # moved with the box's)
@@ -989,6 +1006,8 @@ def mkxpz_wide_setup
   # took the prepended method: the two called each other without end.
   # Prepending again does nothing.)
   Window_NumberInput.prepend(MkxpzWideNumberInput) if defined?(Window_NumberInput)
+  Window_Message.prepend(MkxpzWideContents) if Window_Message.method_defined?(:create_contents) ||
+                                               Window_Message.private_method_defined?(:create_contents)
   # VX Ace's choices: at the box's right end
   if defined?(Window_ChoiceList) && Window_ChoiceList.method_defined?(:update_placement)
     Window_ChoiceList.prepend(MkxpzWideChoices)

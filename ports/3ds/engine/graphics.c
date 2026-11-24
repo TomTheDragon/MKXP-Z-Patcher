@@ -199,6 +199,21 @@ static void overlay_text(void)
 /* the scene and the top screen: once, or (3D) once per eye with the layers
  * shifted: behind the screen (parallax), on it, in front (windows,
  * pictures); left eye: in front to the right, behind to the left */
+/* 3D: the layers' shifts for an eye (0 left, 1 right; -1: none) */
+static void eye_shifts(int eye)
+{
+	if (eye < 0) {
+		stereo_shift[0] = stereo_shift[1] = stereo_shift[2] = 0;
+		return;
+	}
+	float slider = osGet3DSliderState();
+	int d = (int) (slider * STEREO_MAX + 0.5f); /* game pixels per eye, at the most STEREO_MAX */
+	int sign = eye == 0 ? 1 : -1;
+	stereo_shift[0] = -sign * d; /* behind */
+	stereo_shift[1] = 0;
+	stereo_shift[2] = sign * d;  /* in front */
+}
+
 static void draw_eyes(int frozen_alpha, bool stereo)
 {
 	if (!stereo) {
@@ -208,20 +223,20 @@ static void draw_eyes(int frozen_alpha, bool stereo)
 		gpu_present(frozen_alpha, brightness);
 		return;
 	}
-	float slider = osGet3DSliderState();
-	int d = (int) (slider * 4.0f + 0.5f); /* game pixels per eye, at the most 4 */
 	for (int eye = 0; eye < 2; eye++) {
-		int sign = eye == 0 ? 1 : -1;
-		stereo_shift[0] = -sign * d; /* behind */
-		stereo_shift[1] = 0;
-		stereo_shift[2] = sign * d;  /* in front */
-		/* (window text: its position already has the window's shift) */
-		gpu_present_eye(eye, 0);
+		eye_shifts(eye);
+		/* the picture moved by less than a screen pixel, so what's in front
+		 * lands on whole screen pixels as in 2D (moved by whole game
+		 * pixels, ~0.58 screen pixels each: thin lines, e.g. the white
+		 * edge of Changed-special's window frame, fell between two pixels
+		 * and looked double in one eye); the background takes the rest */
+		float s = stereo_shift[2] * gpu_scale_x();
+		gpu_present_eye(eye, rintf(s) - s);
 		if (frozen_alpha < 255)
 			gpu_draw_scene(0);
 		gpu_present(frozen_alpha, brightness);
 	}
-	stereo_shift[0] = stereo_shift[1] = stereo_shift[2] = 0;
+	eye_shifts(-1);
 	gpu_present_eye(0, 0);
 }
 
@@ -448,7 +463,19 @@ static VALUE g_reset(VALUE self)
 }
 
 /* (boot.rb: how far message boxes reach beyond the game's screen) */
-static VALUE g_margin(VALUE self) { return INT2FIX(gpu_on ? gpu_margin : 0); }
+/* (the wide text box WIDE_INSET from the screen's edges: in 3D it's
+ * shifted toward the viewer by up to STEREO_MAX and keeps its whole
+ * outline; the same in 2D, so switching 3D doesn't change the box) */
+static VALUE g_margin(VALUE self)
+{
+	if (!gpu_on || !settings.wide_text)
+		return INT2FIX(0); /* (the sides only for 3D shifts) */
+	/* fit: the screen's sides; extended: the wider screen around the
+	 * game's own width (the box stayed 544 wide in Changed's 704) */
+	int base = rgss_version >= 2 ? 544 : 640;
+	int m = settings.screen == 2 && screen_w > base ? (screen_w - base) / 2 : gpu_margin;
+	return INT2FIX(m > WIDE_INSET ? m - WIDE_INSET : m);
+}
 
 static VALUE g_wait(VALUE self, VALUE n)
 {
@@ -462,8 +489,21 @@ static VALUE g_freeze(VALUE self)
 	late_setup();
 	if (gpu_on) {
 		if (!gpu_frozen) {
+			/* (3D: one frozen picture per eye; with the screen's brightness,
+			 * as RGSS's freeze: a fade to black stayed black until the
+			 * transition) */
 			gpu_frame_begin();
+			bool eyes = gpu_stereo_on() && gpu_frozen_right_ready();
+			eye_shifts(eyes ? 0 : -1);
 			gpu_draw_scene(1);
+			gpu_scene_darken(brightness);
+			if (eyes) {
+				eye_shifts(1);
+				gpu_draw_scene(3);
+				gpu_scene_darken(brightness);
+				eye_shifts(-1);
+			}
+			gpu_set_frozen_eyes(eyes);
 			gpu_frame_end();
 			bitmap_text_layers_drop_full();
 			gpu_frozen = true;

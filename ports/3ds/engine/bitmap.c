@@ -68,7 +68,7 @@ static void ops_remove(Bitmap *b, Rect r)
 		}
 		bool covered = r.x <= o.x && r.y <= o.y && r.x + r.w >= o.x + o.w && r.y + r.h >= o.y + o.h;
 		if (!covered && b->px) {
-			font_draw_text(b, b->ops[i].font, o.x, o.y, o.w, o.h, b->ops[i].str, b->ops[i].align);
+			WITH_TEXT_MULT(b, font_draw_text(b, b->ops[i].font, o.x, o.y, o.w, o.h, b->ops[i].str, b->ops[i].align));
 			b->version++;
 		}
 	}
@@ -152,7 +152,7 @@ Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy)
 		int x1 = (int) ((o->r.x + o->r.w) * sx + 0.5f), y1 = (int) ((o->r.y + o->r.h) * sy + 0.5f);
 		/* (letters twice as wide for the wide top screen: sx is twice sy) */
 		int xs = sx >= 1.9f * sy ? 2 : 1;
-		font_draw_text_scaled(l, o->font, x0, y0, x1 - x0, y1 - y0, o->str, o->align, sy, xs);
+		WITH_TEXT_MULT(b, font_draw_text_scaled(l, o->font, x0, y0, x1 - x0, y1 - y0, o->str, o->align, sy, xs));
 	}
 	l->version++;
 	b->layer_gen = b->ops_gen;
@@ -1067,8 +1067,8 @@ static VALUE bitmap_init_copy(VALUE self, VALUE orig)
 	b->font = rb_obj_dup(o->font);
 	/* (a copy gets the texts drawn into its pixels) */
 	for (int i = 0; i < o->nops; i++)
-		font_draw_text(b, o->ops[i].font, o->ops[i].r.x, o->ops[i].r.y, o->ops[i].r.w, o->ops[i].r.h, o->ops[i].str,
-		               o->ops[i].align);
+		WITH_TEXT_MULT(o, font_draw_text(b, o->ops[i].font, o->ops[i].r.x, o->ops[i].r.y, o->ops[i].r.w, o->ops[i].r.h,
+		                                 o->ops[i].str, o->ops[i].align));
 	return self;
 }
 
@@ -1088,12 +1088,44 @@ static VALUE bitmap_take(VALUE self, VALUE other)
 		bool ok = t->r.x < b->w && t->r.y < b->h && ops_add(b, t->r, t->str, t->align);
 		b->font = keep;
 		if (!ok && t->r.x < b->w && t->r.y < b->h)
-			font_draw_text(b, t->font, t->r.x, t->r.y, t->r.w, t->r.h, t->str, t->align);
+			WITH_TEXT_MULT(o, font_draw_text(b, t->font, t->r.x, t->r.y, t->r.w, t->r.h, t->str, t->align));
 		RB_GC_GUARD(keep);
 	}
 	b->ops_gen++;
 	b->version++;
 	return self;
+}
+
+/* Bitmap#mkxpz_text_mult = f: its texts f times bigger (the wide text box:
+ * as much as it's wider, so every line still fits) */
+static VALUE bitmap_set_text_mult(VALUE self, VALUE f)
+{
+	Bitmap *b = bitmap_get(self);
+	float m = (float) NUM2DBL(f);
+	b->text_mult = m > 0.5f && m < 3 ? m : 1;
+	b->ops_gen++; /* (its sharp text drawn again) */
+	return f;
+}
+
+/* no transparent pixel? A file's image: its texture format says it
+ * (convert-images.py: RGB8, L8, L4 have no alpha); else the pixels,
+ * looked at once per change */
+bool bitmap_opaque(Bitmap *b)
+{
+	if (b->opaque_ver == b->version + 1)
+		return b->opaque;
+	bool op = false;
+	if (b->file && b->version == b->file_version)
+		op = b->tex_fmt == 1 || b->tex_fmt == 3 || b->tex_fmt == 5;
+	else if (b->px) {
+		op = true;
+		size_t n = (size_t) b->w * b->h;
+		for (size_t i = 0; i < n && op; i++)
+			op = PX_A(b->px[i]) == 255;
+	}
+	b->opaque = op;
+	b->opaque_ver = b->version + 1;
+	return op;
 }
 
 VALUE bitmap_new_size(int w, int h)
@@ -1465,7 +1497,7 @@ static VALUE bitmap_draw_text(int argc, VALUE *argv, VALUE self)
 	int align = argc > rest + 1 ? num2int(argv[rest + 1]) : 0;
 	if (b->text_native && settings.sharp_text && RSTRING_LEN(str) > 0 && ops_add(b, r, str, align))
 		return self; /* (drawn sharp on the finished picture; gpu.c) */
-	font_draw_text(b, b->font, r.x, r.y, r.w, r.h, str, align);
+	WITH_TEXT_MULT(b, font_draw_text(b, b->font, r.x, r.y, r.w, r.h, str, align));
 	b->version++;
 	return self;
 }
@@ -1476,7 +1508,7 @@ static VALUE bitmap_text_size(VALUE self, VALUE str)
 	if (!RB_TYPE_P(str, T_STRING))
 		str = rb_obj_as_string(str);
 	int w, h;
-	font_text_size(b->font, str, &w, &h);
+	WITH_TEXT_MULT(b, font_text_size(b->font, str, &w, &h));
 	return rect_new(0, 0, w, h);
 }
 
@@ -1594,6 +1626,7 @@ void init_bitmap(void)
 	rb_define_method(cBitmap, "rect", bitmap_rect, 0);
 	rb_define_method(cBitmap, "blt", bitmap_blt_m, -1);
 	rb_define_method(cBitmap, "mkxpz_take", bitmap_take, 1);
+	rb_define_method(cBitmap, "mkxpz_text_mult=", bitmap_set_text_mult, 1);
 	rb_define_method(cBitmap, "stretch_blt", bitmap_stretch_blt, -1);
 	rb_define_method(cBitmap, "fill_rect", bitmap_fill_rect, -1);
 	rb_define_method(cBitmap, "gradient_fill_rect", bitmap_gradient_fill_rect, -1);

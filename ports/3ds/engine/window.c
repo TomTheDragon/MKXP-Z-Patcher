@@ -14,6 +14,7 @@ typedef struct {
 } Window;
 
 static void window_draw(Element *e, Canvas *c, int ox, int oy);
+static bool window_bounds(const Element *e, Rect *r);
 
 static void window_mark(void *p)
 {
@@ -74,6 +75,7 @@ static VALUE window_init(int argc, VALUE *argv, VALUE self)
 	w->openness = 255;
 	w->el.z = rgss_version >= 3 ? 100 : 0;
 	w->el.draw = window_draw;
+	w->el.bounds = window_bounds;
 	w->el.layer = 1; /* (3D: windows in front of the screen) */
 	element_register(&w->el, self, vp);
 	return self;
@@ -132,6 +134,13 @@ static void cursor(Canvas *c, Bitmap *skin, Rect r, int op)
 	stretched(c, skin, (Rect) { sx, sy + b, b, 32 - 2 * b }, (Rect) { r.x, r.y + b, b, r.h - 2 * b }, op, NULL);
 	stretched(c, skin, (Rect) { sx + 32 - b, sy + b, b, 32 - 2 * b }, (Rect) { r.x + r.w - b, r.y + b, b, r.h - 2 * b }, op, NULL);
 	stretched(c, skin, (Rect) { sx + b, sy + b, 32 - 2 * b, 32 - 2 * b }, (Rect) { r.x + b, r.y + b, r.w - 2 * b, r.h - 2 * b }, op, NULL);
+}
+
+static bool window_bounds(const Element *e, Rect *r)
+{
+	const Window *w = (const Window *) e;
+	*r = (Rect) { w->x, w->y, w->w, w->h };
+	return w->w > 0 && w->visible && w->openness > 0;
 }
 
 static void window_draw(Element *e, Canvas *c, int vx, int vy)

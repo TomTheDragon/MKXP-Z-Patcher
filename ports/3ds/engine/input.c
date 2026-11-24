@@ -74,8 +74,15 @@ void input_poll(void)
 		}
 	}
 	if ((now & KEY_START) && !(before & KEY_START)) {
-		if (settings_menu())
+		int act = settings_menu();
+		if (act == 1)
 			reset_requested = true;
+		if (act == 2) {
+			/* (the game ends like with exit; main.c then starts the list) */
+			quit_to_list = menu_games > 1; /* (one game: to the Homebrew Launcher) */
+			quit_now = true;
+			rb_exit(0);
+		}
 		now = hidKeysHeld();
 		before = now; /* (buttons still held after the menu: no presses) */
 		for (int k = 0; k < K_MAX; k++)

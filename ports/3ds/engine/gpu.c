@@ -38,8 +38,12 @@ static int game_w = 544, game_h = 416;
  * lines); a second texture holds the frozen picture (Graphics.freeze) */
 #define SCENE_W 1024
 #define SCENE_H 512
-static C3D_Tex scene_tex[2];
-static C3D_RenderTarget *scene_rt[2];
+/* 0 the picture, 1 the frozen picture (Graphics.freeze), 2 the frozen
+ * picture of the right eye (3D: made the first time it's needed) */
+static C3D_Tex scene_tex[3];
+static C3D_RenderTarget *scene_rt[3];
+static bool frozen_eyes; /* the frozen picture is one per eye (1 and 2) */
+static int present_eye;
 
 /* A bitmap's texture is made of up to 8x8 pieces with power-of-two sides
  * (the GPU's rule): a 544x544 picture as 512+32 by 512+32 needs 1.1 MB,
@@ -452,8 +456,9 @@ bool gpu_wide_auto(void)
 /* 3D (settings "3D", the slider up): a picture per eye; wide mode is off
  * meanwhile (the two exclude each other) */
 static bool stereo_on;
+bool gpu_stereo_on(void) { return stereo_on; }
 static C3D_RenderTarget *top_right, *present_target;
-static int present_eye_shift; /* (window text: screen pixels) */
+static float present_dx; /* 3D: the eye's picture moved by this (screen pixels, under 1) */
 
 static void top_target(void)
 {
@@ -519,10 +524,39 @@ bool gpu_stereo_update(void)
 
 /* the eye the next gpu_present draws for (0 left, 1 right) and the window
  * text's shift in screen pixels */
-void gpu_present_eye(int eye, int text_shift)
+/* 3D freeze: the right eye's frozen picture (texture 2), made once; false:
+ * no memory for it (then one frozen picture for both eyes) */
+bool gpu_frozen_right_ready(void)
 {
+	if (scene_rt[2])
+		return true;
+	if (!C3D_TexInitVRAM(&scene_tex[2], SCENE_W, SCENE_H, GPU_RGB565) &&
+	    !C3D_TexInit(&scene_tex[2], SCENE_W, SCENE_H, GPU_RGB565))
+		return false;
+	C3D_TexSetFilter(&scene_tex[2], GPU_LINEAR, GPU_LINEAR);
+	scene_rt[2] = C3D_RenderTargetCreateFromTex(&scene_tex[2], GPU_TEXFACE_2D, 0, -1);
+	if (!scene_rt[2])
+		C3D_TexDelete(&scene_tex[2]);
+	return scene_rt[2] != NULL;
+}
+
+void gpu_set_frozen_eyes(bool on) { frozen_eyes = on; }
+
+/* the scene just drawn (frozen) as dark as the screen's brightness */
+void gpu_scene_darken(int brightness)
+{
+	if (brightness >= 255)
+		return;
+	Canvas c = { .w = game_w, .h = game_h, .clip = { -gpu_margin, 0, game_w + 2 * gpu_margin, game_h }, .gpu = true };
+	Color black = { 0, 0, 0, 255 };
+	gpu_fill(&c, c.clip, &black, 255 - brightness);
+}
+
+void gpu_present_eye(int eye, float dx)
+{
+	present_eye = eye;
 	present_target = eye && top_right ? top_right : top;
-	present_eye_shift = text_shift;
+	present_dx = dx;
 }
 
 void gpu_set_wide(void)
@@ -542,10 +576,13 @@ void gpu_set_screen(int w, int h)
 		return;
 	game_w = w;
 	game_h = h;
-	/* fit with wide text boxes: the picture as wide as the screen (5:3);
-	 * the game draws in the middle, its message boxes over all of it */
+	/* fit: the picture as wide as the screen (5:3); the game draws in the
+	 * middle, its message boxes over all of it (settings "Text boxes": wide,
+	 * Graphics.mkxpz_margin), and in 3D shifted windows reach into the
+	 * sides (with no sides there, a box as wide as the game had no room to
+	 * be shifted: flat) */
 	gpu_margin = 0;
-	if (settings.screen != 1 && settings.wide_text && h * 400 > w * 240)
+	if (settings.screen != 1 && h * 400 > w * 240)
 		gpu_margin = (h * 400 / 240 - w) / 2;
 	if (w + 2 * gpu_margin > SCENE_W)
 		gpu_margin = (SCENE_W - w) / 2;
@@ -1444,7 +1481,7 @@ static void draw_text_jobs(void)
 		if (!l)
 			continue;
 		/* the contents' origin on the screen, whole pixels (sharp) */
-		int ox = (int) floorf(off_x + (j->gx + gpu_margin) * scale_x + 0.5f) + present_eye_shift;
+		int ox = (int) floorf(off_x + present_dx + (j->gx + gpu_margin) * scale_x + 0.5f);
 		int oy = (int) floorf(off_y + j->gy * scale_y + 0.5f);
 		/* what shows: the clip, in the layer's pixels */
 		int x0 = (int) floorf((j->clip.x - j->gx) * scale_x), y0 = (int) floorf((j->clip.y - j->gy) * scale_y);
@@ -1462,7 +1499,7 @@ void gpu_scene_begin(int which)
 	scene_which = which;
 	if (which == 0)
 		ntext_jobs = 0;
-	int t = which == 2 ? 0 : which; /* (2: a snapshot, in texture 0) */
+	int t = which == 2 ? 0 : which == 3 ? 2 : which; /* (2: a snapshot, in texture 0; 3: frozen, right eye) */
 	C3D_RenderTargetClear(scene_rt[t], C3D_CLEAR_ALL, 0x000000ff, 0);
 	C3D_FrameDrawOn(scene_rt[t]);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_scene);
@@ -1470,15 +1507,34 @@ void gpu_scene_begin(int which)
 	tev_last.valid = false;
 	cur_clip = (Rect) { -1, -1, -1, -1 };
 	cur_blend = -1;
+	/* cleared again by drawing: the clear above is a memory fill outside the
+	 * GPU's commands, and a texture drawn twice in a frame (3D: the scene
+	 * of each eye) kept the first picture under the second (a double line
+	 * in the right eye where a window had moved) */
+	Rect all = { -gpu_margin, 0, SCENE_W, SCENE_H };
+	Canvas c = { .w = game_w, .h = game_h, .clip = all, .gpu = true };
+	Color black = { 0, 0, 0, 255 };
+	gpu_fill(&c, all, &black, 255);
 }
 
 /* a scene texture onto the top screen, scaled with filtering */
+/* test (a file mkxpz-3dtest in the game's folder): the left eye's picture
+ * reddish, to tell the 3D screen's crosstalk (the other eye's picture
+ * faintly seen) from a picture left over in an eye */
+static int test_3d = -1;
+
 static void present_tex(int which, float alpha)
 {
-
+	if (test_3d < 0) {
+		FILE *f = fopen("mkxpz-3dtest", "r");
+		test_3d = f != NULL;
+		if (f)
+			fclose(f);
+	}
 	set_blend(0);
-	set_tev(true, NULL, NULL);
-	if (settings.colors) {
+	static const Color red = { 255, 0, 0, 120 };
+	set_tev(true, test_3d && stereo_on && present_eye == 0 ? &red : NULL, NULL);
+	if (settings.colors && !(test_3d && stereo_on && present_eye == 0)) {
 		/* vivid: 1.2 * c - 0.1 (contrast around the middle) */
 		C3D_TexEnv *e = C3D_GetTexEnv(0);
 		C3D_TexEnvInit(e);
@@ -1497,10 +1553,10 @@ static void present_tex(int which, float alpha)
 		C3D_TexEnvColor(e, abgr(26, 26, 26, 255));
 		tev_last.valid = false;
 	}
-	C3D_TexBind(0, &scene_tex[which]);
+	C3D_TexBind(0, &scene_tex[which == 1 && frozen_eyes && present_eye == 1 ? 2 : which]);
 	int pw = game_w + 2 * gpu_margin;
 	float u1 = (float) pw / SCENE_W, v1 = (float) game_h / SCENE_H;
-	float x0 = off_x, y0 = off_y, x1 = off_x + pw * scale_x, y1 = off_y + game_h * scale_y;
+	float x0 = off_x + present_dx, y0 = off_y, x1 = off_x + present_dx + pw * scale_x, y1 = off_y + game_h * scale_y;
 	if (which == 0 && settings.smooth && scale_y < 0.9f) {
 		/* smooth (settings: "Smooth pictures"): four samples a quarter of a
 		 * screen pixel apart, averaged (blend 1, 1/2, 1/3, 1/4); each screen
@@ -1664,9 +1720,23 @@ static void draw_battery(void)
 		gpu_fill(&c, (Rect) { x + 2, y + 2, fw, h - 4 }, &fill, 255);
 }
 
+/* the scene just drawn into its texture, read back as a texture next: out
+ * of the GPU's framebuffer cache into memory, and the texture cache
+ * cleared (on the console, without it the right eye read left-eye pixels
+ * where the scene was drawn last: the text box's frame showed twice; the
+ * emulator has no such caches) */
+static void scene_to_memory(void)
+{
+	cmdbuf_room();
+	GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+	GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+	GPUCMD_AddMaskedWrite(GPUREG_TEXUNIT_CONFIG, 0x4, 1u << 16);
+}
+
 void gpu_present(int frozen_alpha, int brightness)
 {
 	C3D_RenderTarget *target = present_target ? present_target : top;
+	scene_to_memory();
 	C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000ff, 0);
 	C3D_FrameDrawOn(target);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_top);
@@ -1681,7 +1751,9 @@ void gpu_present(int frozen_alpha, int brightness)
 	}
 	if (frozen_alpha >= 0)
 		present_tex(1, frozen_alpha / 255.0f);
-	if (brightness < 255) {
+	/* (frozen: the picture has the brightness it had; while frozen nothing
+	 * on the screen changes, as in RGSS) */
+	if (brightness < 255 && frozen_alpha < 255) {
 		Canvas c = { .clip = { 0, 0, top_w, 240 } };
 		Color black = { 0, 0, 0, 255 };
 		gpu_fill(&c, c.clip, &black, 255 - brightness);
@@ -1767,7 +1839,21 @@ void gpu_loading_frame(int frozen_alpha, int brightness, float frac)
 	C3D_FrameBegin(0);
 	in_frame = true;
 	(void) frac;
-	gpu_present(frozen_alpha, brightness); /* (with the CD / floppy icon) */
+	(void) frozen_alpha;
+	(void) brightness;
+	/* the last picture stays in each eye's target: only the CD / floppy
+	 * icon on it (presenting the scene again gave both eyes the right
+	 * eye's picture: in 3D, it looked flat for a moment while loading) */
+	for (int eye = 0; eye < (stereo_on && top_right ? 2 : 1); eye++) {
+		C3D_FrameDrawOn(eye ? top_right : top);
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		presenting = true;
+		tev_last.valid = false;
+		cur_clip = (Rect) { -1, -1, -1, -1 };
+		cur_blend = -1;
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_proj, &proj_ui);
+		draw_activity();
+	}
 	C3D_FrameEnd(0);
 	in_frame = false;
 }

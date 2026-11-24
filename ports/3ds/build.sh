@@ -104,7 +104,7 @@ PY
 # the fallback font (mkxp-z's Liberation Sans)
 cp "$(dirname "$RUBY_SRC")/../assets/liberation.ttf" "$E/romfs/fonts/" 2>/dev/null || true
 OBJS=""
-for f in main types bitmap font scene window graphics input gpu tilemap audio settings files memory profile rbinternal events battery pack movie; do
+for f in main types bitmap font scene window graphics input gpu tilemap audio settings files memory profile rbinternal events battery pack movie menu; do
     arm-none-eabi-gcc $CF -O2 -Wall -Wno-unused-parameter -include mkxpz-3ds-compat.h -I"$E" \
         -I"$R/.ext/include/arm-eabi" -I"$RS/include" -I"$DEVKITPRO/portlibs/3ds/include" \
         -I"$DEVKITPRO/portlibs/3ds/include/freetype2" $( [ $f = rbinternal ] && echo "-I$RS -I$R" ) \
@@ -115,7 +115,10 @@ arm-none-eabi-gcc -specs=3dsx.specs $ARCH -Wl,--gc-sections -Wl,--wrap=fcntl -Wl
     $OBJS "$T/compat.o" "$T/pipe.o" "$R/ext/extinit.o" "$R/enc/encinit.o" \
     -Wl,--start-group "$R/libruby-static.a" $EXTS -Wl,--end-group \
     -L"$DEVKITPRO/libctru/lib" -L"$DEVKITPRO/portlibs/3ds/lib" -lfreetype -lbz2 -lpng16 -ltheoradec -lvorbisidec -logg -lmpg123 -llz4 -lz -lm -lcitro3d -lctru
-smdhtool --create "MKXP-Z" "RPG Maker XP/VX/VX Ace games" "MKXP-Z Patcher" \
-    "$DEVKITPRO/libctru/default_icon.png" "$E/mkxpz.smdh"
+# the one app for all games (the game list: engine/menu.c); mkxpz.3dsx the
+# same, for tools/make-package.py (a game's own app, as before)
+smdhtool --create "MKXP-Z 3DS" "RPG Maker XP/VX/VX Ace games" "MKXP-Z Patcher" \
+    "$HERE/icon.png" "$E/mkxpz.smdh"
 3dsxtool "$E/mkxpz.elf" "$BUILD/mkxpz.3dsx" --smdh="$E/mkxpz.smdh" --romfs="$E/romfs"
-echo "Built $BUILD/mkxpz.3dsx"
+cp "$BUILD/mkxpz.3dsx" "$BUILD/MKXP-Z 3DS.3dsx"
+echo "Built $BUILD/MKXP-Z 3DS.3dsx"

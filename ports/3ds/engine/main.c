@@ -199,6 +199,35 @@ static void show_error(void)
 }
 
 static bool finished;
+#define from_menu from_game_list
+bool from_game_list; /* started from the game list (MKXP-Z 3DS.3dsx) */
+bool quit_to_list;   /* settings: "Quit to the game list" */
+bool quit_now;       /* settings: "Quit to the game list / Homebrew Launcher" */
+static char self_path[512];
+static void wait_start(void);
+
+/* after the game (it quit, or an error): back to the list or out */
+static void after_game(bool error)
+{
+	console_force = true;
+	if (!from_menu) {
+		if (error)
+			wait_start();
+		return;
+	}
+	if (quit_to_list && menu_relaunch(self_path))
+		return;
+	/* (one game, no list: its own exit (title) goes straight to the
+	 * Homebrew Launcher) */
+	if (quit_now || (menu_games == 1 && !error))
+		return;
+	/* (B or START: out) */
+	if (menu_ask(error) && !menu_relaunch(self_path)) {
+		say("\n(The list can't be started again here: start MKXP-Z 3DS\nfrom the Homebrew Launcher.)\n");
+		for (int i = 0; i < 180 && aptMainLoop(); i++)
+			gspWaitForVBlank();
+	}
+}
 
 /* an unexpected exit (e.g. a Ruby "[BUG]"): keep the message on screen */
 static void hold_on_exit(void)
@@ -711,14 +740,18 @@ static void bg_icon_load(void)
 		if (d)
 			closedir(d);
 	}
-	FILE *f = self_path[0] ? fopen(self_path, "rb") : NULL;
+	/* the game's game.smdh (make-package.py), else its own .3dsx's */
+	FILE *f = fopen("game.smdh", "rb");
+	bool own = f != NULL;
+	if (!f)
+		f = self_path[0] && !from_menu ? fopen(self_path, "rb") : NULL;
 	if (!f)
 		return;
 	unsigned char head[44];
 	u16 *icon = NULL;
-	if (fread(head, 1, 44, f) == 44 && !memcmp(head, "3DSX", 4) && (head[4] | head[5] << 8) >= 44) {
-		u32 at = head[32] | head[33] << 8 | head[34] << 16 | (u32) head[35] << 24;
-		u32 size = head[36] | head[37] << 8 | head[38] << 16 | (u32) head[39] << 24;
+	if (own || (fread(head, 1, 44, f) == 44 && !memcmp(head, "3DSX", 4) && (head[4] | head[5] << 8) >= 44)) {
+		u32 at = own ? 0 : head[32] | head[33] << 8 | head[34] << 16 | (u32) head[35] << 24;
+		u32 size = own ? 0x36C0 : head[36] | head[37] << 8 | head[38] << 16 | (u32) head[39] << 24;
 		static u16 tiled[48 * 48];
 		if (size >= 0x24C0 + sizeof tiled && !fseek(f, (long) at + 0x24C0, SEEK_SET) &&
 		    fread(tiled, 2, 48 * 48, f) == 48 * 48 && (icon = malloc(48 * 48 * 2))) {
@@ -735,7 +768,7 @@ static void bg_icon_load(void)
 	}
 	fclose(f);
 	bg_icon = icon;
-	log_only("bottom screen icon: %s\n", icon ? "from the .3dsx" : "none");
+	log_only("bottom screen icon: %s\n", icon ? own ? "game.smdh" : "from the .3dsx" : "none");
 }
 
 /* dark enough to be background (the dimmed icon is at most 30%) */
@@ -827,8 +860,9 @@ int main(int argc, char **argv)
 	battery_init();
 	osSetSpeedupEnable(true); /* New 3DS: 804 MHz */
 
-	/* the game: next to the .3dsx, else sdmc:/mkxpz */
-	char dir[512] = "sdmc:/mkxpz";
+	/* the game: next to the .3dsx (a game's own app, as in earlier
+	 * builds), else the list of the games in sdmc:/mkxpz */
+	char dir[512] = "";
 	if (argc > 0 && argv[0]) {
 		snprintf(self_path, sizeof self_path, "%s", argv[0]);
 		snprintf(dir, sizeof dir, "%s", argv[0]);
@@ -836,7 +870,15 @@ int main(int argc, char **argv)
 		if (slash)
 			*slash = 0;
 		if (!has_game(dir))
-			snprintf(dir, sizeof dir, "sdmc:/mkxpz");
+			dir[0] = 0;
+	}
+	if (!dir[0]) {
+		if (!menu_pick(dir, sizeof dir)) {
+			finished = true;
+			gfxExit();
+			return 0;
+		}
+		from_menu = true;
 	}
 	if (chdir(dir) != 0 || !has_game(".")) {
 		console_force = true;
@@ -977,11 +1019,13 @@ int main(int argc, char **argv)
 		gpu_startup_progress(0.4f);
 		rb_protect(run_scripts, Qnil, &state);
 		say("scripts ended (%d)\n", state);
-		if (state) {
+		/* (exit in the game: SystemExit, not an error) */
+		bool error = state && !rb_obj_is_kind_of(rb_errinfo(), rb_eSystemExit);
+		if (error)
 			show_error();
-			wait_start();
-		}
 		audio_stop();
+		if (aptMainLoop())
+			after_game(error);
 		ruby_cleanup(0);
 	}
 	finished = true;

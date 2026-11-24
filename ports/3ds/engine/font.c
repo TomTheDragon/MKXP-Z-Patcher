@@ -7,6 +7,7 @@
 #include FT_SYNTHESIS_H
 #include FT_SFNT_NAMES_H
 #include FT_TRUETYPE_IDS_H
+#include FT_TRUETYPE_TABLES_H
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,14 +148,28 @@ static bool attr_true(VALUE font, const char *name)
 }
 
 static float text_scale = 1; /* font_draw_text_scaled */
+float font_box_scale = 1;     /* the bitmap's text_mult (bitmap.c: set around a call) */
+float font_box_sx = 1;        /* and across, more (settings "Text width") */
+
+/* a wide text box's text (mult: set for its contents): settings "Text
+ * size" (both ways) and "Text width" (the letters stretched across) */
+void font_box_begin(float mult)
+{
+	if (mult <= 0 || mult == 1) {
+		font_box_scale = font_box_sx = 1;
+		return;
+	}
+	font_box_scale = settings.text_size / 100.0f;
+	font_box_sx = settings.text_width / 100.0f;
+}
 static int text_xs = 1;       /* letters this many times as wide (wide top screen) */
 
 static int font_px_size(VALUE font)
 {
 	VALUE s = rb_ivar_get(font, rb_intern("@size"));
 	int n = NIL_P(s) ? 24 : num2int(s);
-	if (text_scale != 1)
-		n = (int) (n * text_scale + 0.5f);
+	if (text_scale != 1 || font_box_scale != 1)
+		n = (int) (n * text_scale * font_box_scale + 0.5f);
 	return CLAMP(n, 6, 96);
 }
 
@@ -176,7 +191,7 @@ static uint32_t next_cp(const unsigned char **p, const unsigned char *end)
 typedef struct {
 	FT_Face face;
 	uint32_t cp;
-	unsigned char size, bold, italic, used, xs;
+	unsigned char size, bold, italic, used, xs, sxp; /* (sxp: font_box_sx in percent) */
 	short advance, left, top, w, h;
 	uint8_t *cov;  /* w x h */
 	uint8_t *out;  /* (w + 2) x (h + 2): the outline */
@@ -193,15 +208,41 @@ typedef struct {
 } Metrics;
 static Metrics metrics[16];
 static FT_Face sized_face;
-static int sized_px, sized_xs;
+static int sized_px, sized_xs, sized_sxp;
+
+/* a font size as Windows (and mkxp-z, from Wine) takes it: the height of
+ * the letters' cell (win ascent + descent), not of the em square; the em
+ * then is smaller (e.g. Changed's Source Han Sans at 25: 18 pixels; ours
+ * was 25, and long lines didn't fit into the text box) */
+static int windows_ppem(FT_Face face, int height)
+{
+	if (!FT_IS_SCALABLE(face) || height <= 0)
+		return height;
+	TT_OS2 *os2 = FT_Get_Sfnt_Table(face, FT_SFNT_OS2);
+	TT_HoriHeader *hh = FT_Get_Sfnt_Table(face, FT_SFNT_HHEA);
+	long units = 0;
+	if (os2 && os2->version != 0xFFFF)
+		units = os2->usWinAscent + labs((long) (short) os2->usWinDescent);
+	if (units <= 0 && hh)
+		units = hh->Ascender - hh->Descender;
+	if (units <= 0)
+		return height;
+	int ppem = (int) FT_MulDiv(face->units_per_EM, height, units);
+	if (ppem > 1 && FT_MulDiv(units, ppem, face->units_per_EM) > height)
+		ppem--;
+	return ppem > 0 ? ppem : 1;
+}
 
 static void set_size(FT_Face face, int size)
 {
-	if (sized_face != face || sized_px != size || sized_xs != text_xs) {
-		FT_Set_Pixel_Sizes(face, (FT_UInt) (size * text_xs), size);
+	int sxp = (int) (font_box_sx * 100 + 0.5f);
+	if (sized_face != face || sized_px != size || sized_xs != text_xs || sized_sxp != sxp) {
+		int ppem = windows_ppem(face, size);
+		FT_Set_Pixel_Sizes(face, (FT_UInt) (ppem * text_xs * font_box_sx + 0.5f), ppem);
 		sized_face = face;
 		sized_px = size;
 		sized_xs = text_xs;
+		sized_sxp = sxp;
 	}
 }
 
@@ -269,7 +310,8 @@ static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uin
 		Glyph *g = &glyphs[i];
 		if (!g->face)
 			break;
-		if (g->face == face && g->cp == cp && g->size == size && g->bold == bold && g->italic == italic && g->xs == text_xs)
+		if (g->face == face && g->cp == cp && g->size == size && g->bold == bold && g->italic == italic && g->xs == text_xs &&
+		    g->sxp == (unsigned char) (font_box_sx * 100 + 0.5f))
 			return g;
 	}
 	if (nglyphs > GLYPHS * 3 / 4)
@@ -290,6 +332,7 @@ static const Glyph *glyph_of(FT_Face face, int size, bool bold, bool italic, uin
 	g->bold = bold;
 	g->italic = italic;
 	g->xs = (unsigned char) text_xs;
+	g->sxp = (unsigned char) (font_box_sx * 100 + 0.5f);
 	nglyphs++;
 	/* small sizes (e.g. sharp window text, ~14 px): light auto-hinting
 	 * puts horizontal strokes on whole pixels */
@@ -512,7 +555,10 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 		return;
 	/* too wide: squeezed (RGSS shrinks the text to the rect, down to 60%) */
 	int sw = m.w;
-	if (sw > w + 2) {
+	/* (text box text made bigger / wider: never squeezed, nor cut at the
+	 * rect, which the game sized for its own letters (VX: 40 per letter)) */
+	bool boxed = font_box_scale != 1 || font_box_sx != 1;
+	if (sw > w + 2 && !boxed) {
 		sw = w + 2;
 		if (sw < m.w * 6 / 10)
 			sw = m.w * 6 / 10;
@@ -523,7 +569,7 @@ void font_draw_text(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str
 	 * more than the rect's: our fonts' ascent + descent is a bit more than
 	 * Windows', and the rect cut the bottom of the letters off) */
 	int extra = m.h > h ? (m.h - h) / 2 + 2 : 1;
-	Rect clip = { x - 1, y - extra, w + 2, h + 2 * extra };
+	Rect clip = { x - 1, y - extra, (boxed && sw + 2 > w + 2 ? sw : w) + 2, h + 2 * extra };
 	Mask only = m;
 	int sh = text_scale < 0.75f ? 1 : 2; /* (the shadow's offset, at the scale) */
 	if (attr_true(font, "@shadow"))

@@ -67,6 +67,9 @@ typedef struct Bitmap_ {
 	int layer_done;          /* ops already in the layer */
 	float layer_sx, layer_sy;
 	unsigned layer_epoch; /* (text_layer_epoch when made) */
+	float text_mult;      /* its texts this much bigger (wide text boxes; 0: 1) */
+	unsigned opaque_ver;  /* bitmap_opaque: for version opaque_ver - 1 */
+	bool opaque;
 	/* a big .mkxi's compressed data and its blocks' offsets (random access:
 	 * bitmap_read_rows); lz_tried: not again after a failure */
 	unsigned char *lz;
@@ -81,6 +84,10 @@ typedef struct TextOp { Rect r; int align; VALUE str, font; } TextOp;
 /* the text layer at scale sx, sy (NULL: none); full: also when not native */
 Bitmap *bitmap_text_layer(Bitmap *b, float sx, float sy);
 void bitmap_text_layers_drop_full(void); /* the scale-1 layers made for a freeze */
+extern float font_box_scale; /* font.c: sizes times this (a bitmap's text_mult, set around a call) */
+extern float font_box_sx;
+void font_box_begin(float mult);
+#define WITH_TEXT_MULT(bm, call) do { font_box_begin((bm)->text_mult); call; font_box_begin(1); } while (0)
 void font_draw_text_scaled(Bitmap *b, VALUE font, int x, int y, int w, int h, VALUE str, int align, float scale, int xs);
 
 extern VALUE cBitmap, cFont;
@@ -90,6 +97,7 @@ void bitmap_uploaded(Bitmap *b); /* gpu.c: its texture is up to date */
 /* gpu.c: an image that has let go of its pixels, read from its .mkxi file
  * row by row (rows: y0, n rows, their pixels); false: not possible */
 /* rows: false = enough (the rest isn't read) */
+bool bitmap_opaque(Bitmap *b); /* no transparent pixel (3D: a full-screen picture stays flat) */
 bool bitmap_stream_file(Bitmap *b, bool (*rows)(void *ctx, int y0, int n, const px_t *px), void *ctx);
 /* rows y0 .. y1-1 of a big .mkxi without reading the rest (false: not
  * possible for this image: then bitmap_stream_file) */
@@ -216,8 +224,14 @@ void gpu_snapshot_end(px_t *dst, int w, int h);
 bool gpu_wide_auto(void);    /* what "auto" chooses */
 extern unsigned text_layer_epoch; /* bitmap.c: changed, every text layer is made again */
 extern int gpu_redraw_frames;     /* gpu.c: frames still drawn in full (none skipped) after 2D/3D changed */
-bool gpu_stereo_update(void);  /* 3D on or off (setting and slider); true: on */
-void gpu_present_eye(int eye, int text_shift);
+bool gpu_stereo_update(void);
+bool gpu_stereo_on(void);
+#define STEREO_MAX 4 /* 3D: the most a layer is shifted per eye (game pixels) */
+#define WIDE_INSET 8 /* wide text boxes: this far from the screen's edges (game pixels; more than STEREO_MAX) */  /* 3D on or off (setting and slider); true: on */
+void gpu_present_eye(int eye, float dx); /* 3D: which eye, its picture moved by dx screen pixels */
+bool gpu_frozen_right_ready(void);   /* 3D freeze: the right eye's frozen picture can be made */
+void gpu_set_frozen_eyes(bool on);   /* the frozen picture: one per eye (scene 1 and 3) */
+void gpu_scene_darken(int brightness); /* the scene just drawn: the screen's brightness into it */
 float gpu_scale_x(void);
 bool system_is_emulator(void); /* gpu.c: Citra / Azahar */
 void gpu_set_wide(void); /* bitmap.c: disposed or freed */
@@ -258,6 +272,8 @@ struct Element {
 	bool wide;        /* mkxpz_wide: may use the screen's sides (gpu_margin) */
 	void (*draw)(Element *e, Canvas *c, int ox, int oy);
 	void (*draw_z)(Element *e, Canvas *c, int ox, int oy, int layer);
+	bool (*bounds)(const Element *e, Rect *r); /* 3D: where it draws (at ox, oy 0), if known */
+	bool (*opaque)(const Element *e);         /* 3D: nothing shows through it (NULL: as if so) */
 	Element *next;    /* registry */
 };
 void element_register(Element *e, VALUE self, VALUE viewport);
@@ -307,6 +323,8 @@ typedef struct {
 	int wide_text;  /* fit: message boxes over the screen's whole width */
 	int frame_skip; /* 0 off, 1 auto */
 	int same_sound; /* the same sound effect at most this often at once (0: no limit) */
+	int text_size;  /* text in the text boxes: percent of the game's size (100..200) */
+	int text_width; /* and its letters stretched across: percent (100..200) */
 	int show_speed; /* "Bottom log": messages and speed lines on the bottom screen (off) */
 	int log_file;   /* mkxpz-3ds.log in the game folder (off; also on with a file mkxpz-log) */
 	int overlay;    /* game speed and memory on the bottom screen */
@@ -326,7 +344,10 @@ void log_set_enabled(bool on); /* main.c: open / close mkxpz-3ds.log */
 bool log_enabled(void);
 void battery_init(void);
 bool battery_get(int *percent, bool *charging); /* battery.c; false: unknown */
-bool settings_menu(void); /* true: reset the game */
+int settings_menu(void); /* 1: reset the game, 2: quit to the game list */
+extern bool from_game_list; /* main.c: started from the game list (MKXP-Z 3DS.3dsx) */
+extern bool quit_to_list;   /* main.c: the game quits, then the list again */
+extern bool quit_now;       /* main.c: settings "Quit to ...": no question afterwards */
 void audio_volumes_changed(void);
 /* rbinternal.c: Ruby internals */
 typedef struct { VALUE klass; uint32_t index; } IvCache;
@@ -356,6 +377,10 @@ void prof_caller(char *out, size_t n);
 extern unsigned bitmaps_created;
 void status_line(const char *text); /* main.c: the bottom screen's first line */
 void say(const char *fmt, ...);
+bool menu_pick(char *dir, size_t n); /* menu.c: the game list; false: quit */
+bool menu_relaunch(const char *self); /* menu.c: the list again after this app quits */
+extern int menu_games;      /* menu.c: games in the list (1: started at once) */
+bool menu_ask(bool error);            /* menu.c: after a game: true = back to the list */
 void log_only(const char *fmt, ...); /* mkxpz-3ds.log only */ /* the bottom screen and mkxpz-3ds.log */
 extern int rgss_version; /* 1 XP, 2 VX, 3 VX Ace */
 

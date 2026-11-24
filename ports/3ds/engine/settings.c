@@ -21,7 +21,9 @@ Settings settings = {
 	.wide_screen = 2, /* auto */
 	.stereo = 1,
 	.colors = 0,
-	.wide_text = 1,
+	.wide_text = 1, /* (no longer a setting: always wide, the text in them bigger) */
+	.text_size = 150,
+	.text_width = 100,
 	.same_sound = 4, /* (Changed's shark: many at once, very loud) */
 };
 
@@ -54,6 +56,8 @@ void settings_load(void)
 		/* (the older wide_screen=0/1 key: not read, its default was on everywhere) */
 		else if (sscanf(line, "colors=%d", &v) == 1) settings.colors = CLAMP(v, 0, 1);
 		else if (sscanf(line, "wide_text=%d", &v) == 1) settings.wide_text = CLAMP(v, 0, 1);
+		else if (sscanf(line, "text_size=%d", &v) == 1) settings.text_size = CLAMP(v, 100, 200);
+		else if (sscanf(line, "text_width=%d", &v) == 1) settings.text_width = CLAMP(v, 100, 200);
 		else if (sscanf(line, "same_sound=%d", &v) == 1) settings.same_sound = CLAMP(v, 0, 4);
 	}
 	fclose(f);
@@ -63,19 +67,25 @@ void settings_load(void)
 		settings.frame_skip = skip;
 		settings.same_sound = same;
 	}
+	/* (version 2's text_width meant something else: the new defaults) */
+	if (version < 3) {
+		settings.text_size = 150;
+		settings.text_width = 100;
+	}
 	/* (no longer settings: 3D with the slider, the speed display and sharp
 	 * window text are always on) */
 	settings.stereo = settings.overlay = settings.sharp_text = 1;
+	settings.wide_text = 1; /* (always: wide text boxes with bigger text) */
 }
 
 static void settings_save(void)
 {
 	/* written only when something changed (a write shows the floppy icon) */
 	char text[1024];
-	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nversion=2\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
-	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\nstereo=%d\nsame_sound=%d\n", settings.music_volume,
+	int n = snprintf(text, sizeof text, "# MKXP-Z 3DS settings (START in the game)\nversion=3\nmusic_volume=%d\nsound_volume=%d\nbuttons=%d\n"
+	        "screen=%d\nwide_text=%d\ncolors=%d\nframe_skip=%d\nbottom_log=%d\nlog_file=%d\noverlay=%d\nsharp_text=%d\nsmooth=%d\nbattery=%d\nactivity_icons=%d\ntop_screen=%d\nstereo=%d\nsame_sound=%d\ntext_size=%d\ntext_width=%d\n", settings.music_volume,
 	        settings.sound_volume, settings.buttons, settings.screen, settings.wide_text, settings.colors, settings.frame_skip,
-	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen, settings.stereo, settings.same_sound);
+	        settings.show_speed, settings.log_file, settings.overlay, settings.sharp_text, settings.smooth, settings.battery, settings.activity_icons, settings.wide_screen, settings.stereo, settings.same_sound, settings.text_size, settings.text_width);
 	if (n <= 0 || n >= (int) sizeof text)
 		return;
 	char old[1024];
@@ -96,7 +106,20 @@ static void settings_save(void)
 
 /* (no longer settings: 3D (always, with the slider), the speed display
  * (always on) and sharp window text (always: no drawback)) */
-enum { I_MUSIC, I_SOUND, I_SAME, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXT, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_SPEED, I_LOG, I_RESET, I_BACK, I_COUNT };
+/* (the actions first: back to the game, reset, the game list (only when
+ * started from it)) */
+enum { I_BACK, I_RESET, I_LIST, I_MUSIC, I_SOUND, I_SAME, I_BUTTONS, I_SCREEN, I_WIDE, I_TEXTS, I_TEXTW, I_SMOOTH, I_BATTERY, I_ACTIVITY, I_COLORS, I_SKIP, I_SPEED, I_LOG, I_COUNT };
+
+/* (started from the list (MKXP-Z 3DS.3dsx); with one game, which starts at
+ * once: "Quit to the Homebrew Launcher") */
+static bool item_shown(int i) { return i != I_LIST || from_game_list; }
+static int item_step(int sel, int dir)
+{
+	do
+		sel = (sel + dir + I_COUNT) % I_COUNT;
+	while (!item_shown(sel));
+	return sel;
+}
 
 static void show(int sel)
 {
@@ -118,8 +141,8 @@ static void show(int sel)
 		snprintf(v[I_WIDE], 40, "%s", gpu_wide_possible() ? "on (800 across)" : "on (2DS: no 800)");
 	else
 		snprintf(v[I_WIDE], 40, "off (400 across)");
-	snprintf(v[I_TEXT], 40, "%s", settings.screen == 1 ? "(not with stretch)" :
-	         settings.wide_text ? "whole screen width" : "game's width");
+	snprintf(v[I_TEXTS], 40, "%d%% (in text boxes)", settings.text_size);
+	snprintf(v[I_TEXTW], 40, "%d%% (letters wider)", settings.text_width);
 	snprintf(v[I_SMOOTH], 40, "%s", settings.smooth ? "on (smoother edges)" : "off");
 	snprintf(v[I_BATTERY], 40, "%s", settings.battery ? "on (top left)" : "off");
 	snprintf(v[I_ACTIVITY], 40, "%s", settings.activity_icons ? "on (top right)" : "off");
@@ -130,26 +153,30 @@ static void show(int sel)
 		snprintf(v[I_SKIP], 40, "off");
 	snprintf(v[I_SPEED], 40, "%s", settings.show_speed ? "on" : "off");
 	snprintf(v[I_LOG], 40, "%s", settings.log_file ? "on (mkxpz-3ds.log)" : "off");
-	v[I_RESET][0] = v[I_BACK][0] = 0;
-	static const char *const names[I_COUNT] = { "Music volume", "Sound volume", "Same sound", "Buttons", "Screen", "Top screen", "Text boxes", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
-	                                            "Bottom log", "Log file", "Reset game (title)", "Back to the game" };
+	v[I_RESET][0] = v[I_BACK][0] = v[I_LIST][0] = 0;
+	const char *quit = menu_games == 1 ? "Quit to the Homebrew Launcher" : "Quit to the game list";
+	static const char *const names[I_COUNT] = { "Back to the game", "Reset game (title)", "", "Music volume", "Sound volume", "Same sound", "Buttons", "Screen", "Top screen", "Text size", "Text width", "Smooth pictures", "Battery icon", "Load/save icons", "Colors", "Frame skip",
+	                                            "Bottom log", "Log file" };
 	printf("\x1b[2J\x1b[1;1H\x1b[1m MKXP-Z settings\x1b[0m   (START: back)\n\n");
 	for (int i = 0; i < I_COUNT; i++) {
-		printf("%s %-14s %s\n", i == sel ? "\x1b[33m>" : " ", names[i], v[i]);
+		if (!item_shown(i))
+			continue;
+		printf("%s %-14s %s\n", i == sel ? "\x1b[33m>" : " ", i == I_LIST ? quit : names[i], v[i]);
 		if (i == sel)
 			printf("\x1b[0m");
-		if (i == I_LOG)
+		if (i == I_LIST || (i == I_RESET && !item_shown(I_LIST)))
 			printf("\n");
 	}
-	printf("\n Up/Down: choose, Left/Right: change\n A or B: reset / back");
+	printf("\n Up/Down: choose, Left/Right: change\n A or B: the action (first ones)");
 }
 
-/* the menu; returns once it's closed (true: reset the game) */
-bool settings_menu(void)
+/* the menu; returns once it's closed: 0, 1 reset the game, 2 quit to the
+ * game list */
+int settings_menu(void)
 {
 	console_force = true; /* (the menu shows also with the bottom log off) */
 	int sel = 0;
-	bool reset = false;
+	int reset = 0;
 	hidSetRepeatParameters(20, 6);
 	show(sel);
 	/* wait until START is released (it opened the menu) */
@@ -166,8 +193,8 @@ bool settings_menu(void)
 		bool changed = false;
 		if (k & KEY_START)
 			break;
-		if (k & KEY_DOWN) { sel = (sel + 1) % I_COUNT; changed = true; }
-		if (k & KEY_UP) { sel = (sel + I_COUNT - 1) % I_COUNT; changed = true; }
+		if (k & KEY_DOWN) { sel = item_step(sel, 1); changed = true; }
+		if (k & KEY_UP) { sel = item_step(sel, -1); changed = true; }
 		if (dir) {
 			changed = true;
 			switch (sel) {
@@ -183,7 +210,14 @@ bool settings_menu(void)
 				settings.wide_screen = settings.wide_screen == 2 ? (dir > 0 ? 1 : 0) : settings.wide_screen == 1 ? (dir > 0 ? 0 : 2) : (dir > 0 ? 2 : 1);
 				gpu_set_wide();
 				break;
-			case I_TEXT: settings.wide_text ^= 1; gpu_set_screen(screen_w, screen_h); break;
+			case I_TEXTS: /* 100..200%, the game's size and bigger */
+				settings.text_size = settings.text_size + dir * 10 > 200 ? 100 : settings.text_size + dir * 10 < 100 ? 200 : settings.text_size + dir * 10;
+				text_layer_epoch++; /* (the boxes' sharp text drawn again) */
+				break;
+			case I_TEXTW: /* 100..200%: the letters stretched across */
+				settings.text_width = settings.text_width + dir * 10 > 200 ? 100 : settings.text_width + dir * 10 < 100 ? 200 : settings.text_width + dir * 10;
+				text_layer_epoch++;
+				break;
 			case I_SMOOTH: settings.smooth ^= 1; break;
 			case I_BATTERY: settings.battery ^= 1; break;
 			case I_ACTIVITY: settings.activity_icons ^= 1; break;
@@ -194,8 +228,8 @@ bool settings_menu(void)
 			}
 		}
 		if (k & (KEY_A | KEY_B)) {
-			if (sel == I_RESET) {
-				reset = true;
+			if (sel == I_RESET || sel == I_LIST) {
+				reset = sel == I_RESET ? 1 : 2;
 				break;
 			}
 			if (sel == I_BACK)
